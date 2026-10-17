@@ -9,7 +9,7 @@ import time
 import numpy as np
 
 from . import sinc as sc
-from .pcmm import _N32_CAP, KeyRng, _ks_key, _twiddles, find_prime
+from .pcmm import _N32_CAP, _TSYNC, KeyRng, _ks_key, _twiddles, find_prime
 
 NB, NS, KY, SW = 1 << 16, 1 << 13, 64, 8
 # PF_CCMM_MERGE=1: operands duplicated on batch l + 16 (sinc.dup) make every output even in Y = X^1024, so output pairs
@@ -208,7 +208,8 @@ class Ccmm:
             return prep
         fb = self._factors(amax, bmax, shift, out_scale, merge)[1]
         bts, S = self.bts, ops.inf.slots
-        bts.sync()
+        if _TSYNC:
+            bts.sync()
         t0 = time.perf_counter()
         # a dropped device ciphertext keeps its full allocation: host copies of the 4 live limbs, imported by
         # apply into one shared set of carriers (the first operands prepared)
@@ -229,7 +230,8 @@ class Ccmm:
             if carry:
                 self._carriers[0].append(x)
                 self._carriers[1].append(d)
-        bts.sync()
+        if _TSYNC:
+            bts.sync()
         self.t_in += time.perf_counter() - t0
         return prep
 
@@ -287,7 +289,8 @@ class Ccmm:
 
     def _device(self, xa, xb, b_transposed, fa, fb, shift, merge=False):
         ops, bts, S = self.ops, self.bts, self.ops.inf.slots
-        bts.sync()
+        if _TSYNC:
+            bts.sync()
         t0 = time.perf_counter()
         da, db, states = [], [], []
         if isinstance(xb, PreparedB) and xb.dev:
@@ -325,7 +328,8 @@ class Ccmm:
             bts.stc_high(d, S, d.level - 2 - (2 if d.noise_level == 2 else 0), 1.0, 6)
             if shift:
                 bts.mult_int(d, 1 << shift)
-        bts.sync()
+        if _TSYNC:
+            bts.sync()
         self.t_out += time.perf_counter() - t2
         return list(xa)
 

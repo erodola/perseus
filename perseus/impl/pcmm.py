@@ -336,6 +336,7 @@ _INTERLEAVE = int(os.environ.get("PF_PCMM_INTERLEAVE", "0") or 0)
 # PF_PCMM_RAISE="gate_up:1,qkv:3": the finishes of those linears raise d composite levels below the top (the route's raise
 # variant, their outputs land 2 d level units deeper, where the consumer has the slack); "gate_up:1:0-23" only on blocks 0..23
 _RAISE = [e.split(":") for e in os.environ.get("PF_PCMM_RAISE", "").split(",") if e]
+_TSYNC = os.environ.get("PF_MM_TSYNC", "0") not in ("", "0")    # fences for the phase timings
 
 
 def _raise_of(lin):
@@ -502,7 +503,8 @@ class Pcmm:
     def _device_cf(self, xr, lin):
         ops, bts, S = self.ops, self.bts, self.ops.inf.slots
         stamp = lin.w_scale * (1 << lin.shift)
-        bts.sync()
+        if _TSYNC:
+            bts.sync()
         t0 = time.perf_counter()
         devs, outs, out_devs, states = [], [], [], []
         spare = []
@@ -531,7 +533,8 @@ class Pcmm:
                 outs.append(x)
                 out_devs.append(d)
                 states.append(stf)
-        bts.sync()
+        if _TSYNC:
+            bts.sync()
         t1 = time.perf_counter()
         self.t_in += t1 - t0
         self._ensure_keys(devs[0])
@@ -554,7 +557,8 @@ class Pcmm:
         finally:
             if drop:
                 bts.raise_scope(self.fhe, old_drop)
-        bts.sync()
+        if _TSYNC:
+            bts.sync()
         self.t_out += time.perf_counter() - t2
         if self.land is None and not drop:
             self.land = ops.level(outs[0])
