@@ -396,6 +396,13 @@ void bind_bts(py::module_& root) {
           kRelease);
     m.def("cts_stage", [](DeviceCt& d, const FC::BtsState& s, int k) { FC::btsCtSStage(d.get(), s, k); },
           py::arg("ct"), py::arg("st"), py::arg("k"), kRelease);
+    m.def("cts_stage_batch", [](std::vector<DeviceCt> ds, std::vector<const FC::BtsState*> ss, int k) {
+              std::vector<FC::Ciphertext*> cts;
+              for (auto& d : ds) cts.push_back(&d.get());
+              FC::btsCtSStageBatch(cts, ss, k);
+          },
+          py::arg("cts"), py::arg("sts"), py::arg("k"), kRelease,
+          "cts_stage on up to 4 ciphertexts of one route and level, the key and plaintext loads shared.");
     m.def("eval_mod", [](DeviceCt& d, const FC::BtsState& s) { FC::btsEvalMod(d.get(), s); }, py::arg("ct"),
           py::arg("st"), kRelease);
     m.def("stc_first_output", [](DeviceCt& d, const FC::BtsState& s) { FC::btsStcFirstOutput(d.get(), s); },

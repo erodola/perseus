@@ -339,6 +339,12 @@ _RAISE = [e.split(":") for e in os.environ.get("PF_PCMM_RAISE", "").split(",") i
 _TSYNC = os.environ.get("PF_MM_TSYNC", "0") not in ("", "0")    # fences for the phase timings
 # PF_PCMM_RAISE_UP=d[:lo-hi]: gate_up's up half (outputs n_out/2..) raises d instead (on blocks lo..hi)
 _RAISE_UP = os.environ.get("PF_PCMM_RAISE_UP", "").split(":") if os.environ.get("PF_PCMM_RAISE_UP") else None
+# PF_PCMM_BATCH=K (2..4): the output finishes in groups of K, each CtS stage batched (bts.cts_stage_batch)
+_BATCH = int(os.environ.get("PF_PCMM_BATCH", "0") or 0)
+if _BATCH > 4:
+    raise ValueError(f"PF_PCMM_BATCH={_BATCH}: at most 4")
+# PF_PCMM_BATCH_DROPS=1: with per-output drops (PF_PCMM_RAISE_UP), batch the outputs of each drop together
+_BATCH_DROPS = os.environ.get("PF_PCMM_BATCH_DROPS", "0") not in ("", "0")
 
 
 def _raise_of(lin):
@@ -579,6 +585,16 @@ class Pcmm:
 
     def _finish_all(self, out_devs, states, lin, ph, drops=None):
         bts = self.bts
+        if drops is not None and _BATCH > 1 and _BATCH_DROPS:
+            n = lin.n_out
+            for dv in dict.fromkeys(drops[:n]):
+                idx = [m for m in range(n) if drops[m] == dv]
+                old = bts.raise_scope(self.fhe, dv)
+                try:
+                    _finish_batched(bts, [out_devs[m] for m in idx], [states[m] for m in idx], lin.shift, ph)
+                finally:
+                    bts.raise_scope(self.fhe, old)
+            return
         if drops is not None:            # per-output drops: one output at a time, each in its scope
             for m in range(lin.n_out):
                 old = bts.raise_scope(self.fhe, drops[m])
@@ -586,6 +602,9 @@ class Pcmm:
                     self._finish_one(out_devs[m], states[m], lin, ph)
                 finally:
                     bts.raise_scope(self.fhe, old)
+            return
+        if _BATCH > 1:
+            _finish_batched(bts, out_devs[:lin.n_out], states[:lin.n_out], lin.shift, ph)
             return
         if _INTERLEAVE > 1 and not ph:
             self._finish_interleaved(out_devs[:lin.n_out], states[:lin.n_out], lin.shift)
@@ -608,6 +627,29 @@ class Pcmm:
         tp = _phase(bts, "stc_out", tp) if ph else None
         if lin.shift:
             bts.mult_int(d, 1 << lin.shift)
+
+
+def _finish_batched(bts, ds, sts, shift, ph):
+    """PF_PCMM_BATCH: groups of K finishes, the CtS stages batched across the group."""
+    for g in range(0, len(ds), _BATCH):
+        dg, sg = ds[g:g + _BATCH], sts[g:g + _BATCH]
+        tp = _phase(bts, None) if ph else None
+        for d, st in zip(dg, sg):
+            bts.mod_raise(d, st)
+            bts.fold(d, st)
+        tp = _phase(bts, "raise+fold", tp) if ph else None
+        for k in range(max(st.n_cts for st in sg)):
+            if len(dg) > 1:
+                bts.cts_stage_batch(dg, sg, k)
+            else:
+                bts.cts_stage(dg[0], sg[0], k)
+        tp = _phase(bts, "cts", tp) if ph else None
+        for d, st in zip(dg, sg):
+            bts.eval_mod(d, st)
+            bts.stc_first_output(d, st)
+            if shift:
+                bts.mult_int(d, 1 << shift)
+        tp = _phase(bts, "evalmod+out", tp) if ph else None
 
 
 def _finish_interleaved_impl(bts, ds, sts, shift):
