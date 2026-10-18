@@ -337,6 +337,8 @@ _INTERLEAVE = int(os.environ.get("PF_PCMM_INTERLEAVE", "0") or 0)
 # variant, their outputs land 2 d level units deeper, where the consumer has the slack); "gate_up:1:0-23" only on blocks 0..23
 _RAISE = [e.split(":") for e in os.environ.get("PF_PCMM_RAISE", "").split(",") if e]
 _TSYNC = os.environ.get("PF_MM_TSYNC", "0") not in ("", "0")    # fences for the phase timings
+# PF_PCMM_RAISE_UP=d[:lo-hi]: gate_up's up half (outputs n_out/2..) raises d instead (on blocks lo..hi)
+_RAISE_UP = os.environ.get("PF_PCMM_RAISE_UP", "").split(":") if os.environ.get("PF_PCMM_RAISE_UP") else None
 
 
 def _raise_of(lin):
@@ -351,6 +353,15 @@ def _raise_of(lin):
                 continue
         return int(e[1])
     return 0
+
+
+def _raise_out(lin, m):
+    """The raise drop of lin's output m."""
+    if _RAISE_UP and (lin.name or "").endswith(".gate_up") and m >= lin.n_out // 2:
+        blk = int(lin.name.split(".")[0][1:])
+        if len(_RAISE_UP) < 2 or int(_RAISE_UP[1].split("-")[0]) <= blk <= int(_RAISE_UP[1].split("-")[1]):
+            return int(_RAISE_UP[0])
+    return _raise_of(lin)
 
 
 def _phase(bts, name, t0=None):
@@ -480,7 +491,7 @@ class Pcmm:
             for c in range(lin.n_in):
                 blk = Wi[m * nch:(m + 1) * nch, c * nch:(c + 1) * nch].astype(np.float64)[inv[:, None], inv[None, :]]
                 y += blk @ X[c]
-            o = FakeCt(np.roll(y.reshape(-1) / lin.w_scale, 1), self.land + 2 * _raise_of(lin), 1, xr[0].packing)
+            o = FakeCt(np.roll(y.reshape(-1) / lin.w_scale, 1), self.land + 2 * _raise_out(lin, m), 1, xr[0].packing)
             if hasattr(xr[0], "ptag"):       # fakecap: outputs reuse the input handles (spares: input 0)
                 o.ptag = xr[m if m < lin.n_in else 0].ptag
             outs.append(o)
@@ -509,8 +520,9 @@ class Pcmm:
         devs, outs, out_devs, states = [], [], [], []
         spare = []
         drop = _raise_of(lin)
+        drops = [_raise_out(lin, m) for m in range(lin.n_out)]
 
-        def fin_state(d):        # the finish's state, from the route's raise variant under a drop
+        def fin_state(d, drop=drop):        # the finish's state, from the route's raise variant under a drop
             if not drop:
                 return bts.begin(d, S, False, True)
             old = bts.raise_scope(self.fhe, drop)
@@ -521,9 +533,10 @@ class Pcmm:
         for x in xr:
             d = bts.device(self.fhe, x)
             st = bts.begin(d, S, False, True)
-            stf = fin_state(d) if drop else st
+            m = len(outs)
+            stf = (fin_state(d, drops[m]) if drops[m] else st) if m < lin.n_out else st
             if not spare and lin.n_out > lin.n_in:   # the spare outputs' states, taken at the input level
-                spare = [fin_state(d) for _ in range(lin.n_out - lin.n_in)]
+                spare = [fin_state(d, drops[k]) for k in range(lin.n_out - 1, lin.n_in - 1, -1)]
             if not st.stc_first:
                 raise RuntimeError("pcmm: the dense route is not StC-first (FIDESLIB_BTS_STC_FIRST=2)")
             bts.scale_noise_factor(d, stamp)
@@ -553,7 +566,7 @@ class Pcmm:
         ph = _PHASES is not None
         old_drop = bts.raise_scope(self.fhe, drop) if drop else None
         try:
-            self._finish_all(out_devs, states, lin, ph)
+            self._finish_all(out_devs, states, lin, ph, drops if len(set(drops)) > 1 else None)
         finally:
             if drop:
                 bts.raise_scope(self.fhe, old_drop)
@@ -564,26 +577,37 @@ class Pcmm:
             self.land = ops.level(outs[0])
         return outs[:lin.n_out]
 
-    def _finish_all(self, out_devs, states, lin, ph):
+    def _finish_all(self, out_devs, states, lin, ph, drops=None):
         bts = self.bts
+        if drops is not None:            # per-output drops: one output at a time, each in its scope
+            for m in range(lin.n_out):
+                old = bts.raise_scope(self.fhe, drops[m])
+                try:
+                    self._finish_one(out_devs[m], states[m], lin, ph)
+                finally:
+                    bts.raise_scope(self.fhe, old)
+            return
         if _INTERLEAVE > 1 and not ph:
             self._finish_interleaved(out_devs[:lin.n_out], states[:lin.n_out], lin.shift)
         for m in (range(0) if _INTERLEAVE > 1 and not ph else range(lin.n_out)):
-            d, st = out_devs[m], states[m]
-            tp = _phase(bts, None) if ph else None
-            bts.mod_raise(d, st)
-            tp = _phase(bts, "raise", tp) if ph else None
-            bts.fold(d, st)
-            tp = _phase(bts, "fold", tp) if ph else None
-            for k in range(st.n_cts):
-                bts.cts_stage(d, st, k)
-                tp = _phase(bts, f"cts{k}", tp) if ph else None
-            bts.eval_mod(d, st)
-            tp = _phase(bts, "evalmod", tp) if ph else None
-            bts.stc_first_output(d, st)
-            tp = _phase(bts, "stc_out", tp) if ph else None
-            if lin.shift:
-                bts.mult_int(d, 1 << lin.shift)
+            self._finish_one(out_devs[m], states[m], lin, ph)
+
+    def _finish_one(self, d, st, lin, ph):
+        bts = self.bts
+        tp = _phase(bts, None) if ph else None
+        bts.mod_raise(d, st)
+        tp = _phase(bts, "raise", tp) if ph else None
+        bts.fold(d, st)
+        tp = _phase(bts, "fold", tp) if ph else None
+        for k in range(st.n_cts):
+            bts.cts_stage(d, st, k)
+            tp = _phase(bts, f"cts{k}", tp) if ph else None
+        bts.eval_mod(d, st)
+        tp = _phase(bts, "evalmod", tp) if ph else None
+        bts.stc_first_output(d, st)
+        tp = _phase(bts, "stc_out", tp) if ph else None
+        if lin.shift:
+            bts.mult_int(d, 1 << lin.shift)
 
 
 def _finish_interleaved_impl(bts, ds, sts, shift):
