@@ -172,15 +172,16 @@ def main(argv=None):
         from perseus.impl.pcmm import engine
         engine(model.rt).prepare(model.rt.dims.dim)
     print(f"[prefill] weights ready {time.time() - t_pre:.1f}s", flush=True)
-    # GPT2_PF_WARMUP=1 (default 0): one untimed prefill of another prompt of the same length first (the same tokens with
-    # positions 1.. reversed, the position embeddings kept in place), as the Llama prefill's PF_WARMUP: masks encoded,
-    # StC caches built and pools grown -- setup that does not depend on the prompt. SUMMARY's wall and bts stay the
-    # timed pass's.
+    # GPT2_PF_WARMUP=1 (the default; 0 times the cold first pass): one untimed prefill of another prompt of the same
+    # length first (the same tokens with positions 1.. reversed, the position embeddings kept in place), as the Llama
+    # prefill's PF_WARMUP: masks encoded, StC caches built and pools grown -- setup that does not depend on the prompt.
+    # SUMMARY's wall and bts stay the timed pass's.
     bts0 = 0
-    if os.environ.get("GPT2_PF_WARMUP", "0") not in ("", "0") and not a.capture:
+    warm = os.environ.get("GPT2_PF_WARMUP", "1")
+    if warm not in ("", "0") and not a.capture:
         wpe = np.asarray(store.tensor(weights.WPE)[:a.tokens])
         tok = rows - wpe
-        if os.environ["GPT2_PF_WARMUP"] != "same":     # =same (diagnostic): the timed prompt itself
+        if warm != "same":     # =same (diagnostic): the timed prompt itself
             tok[1:] = tok[1:][::-1].copy()
         t_w = time.time()
         Xw, chw, _ = model.prefill(tok + wpe)

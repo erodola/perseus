@@ -151,7 +151,20 @@ seeds drift, at about 0.01 s per token faster and a mean KL about 2-3x the main 
 
 ## Channel-blocked prefill plans (32-bit)
 
-`gpt2_prefill_python_n32_blocked`, `llama31_8b_prefill_python_n32_blocked` and `llama31_8b_prefill_python_n32_blocked_gqa`
-are 128-token PCMM prefills on the channel-blocked layout (`PF_LAYOUT=blocked`: 512 channels and 128 tokens per
+`gpt2_prefill128` (the GPT-2 result plan below), `llama31_8b_prefill_python_n32_blocked` and
+`llama31_8b_prefill_python_n32_blocked_gqa` are 128-token PCMM prefills on the channel-blocked layout (`PF_LAYOUT=blocked`: 512 channels and 128 tokens per
 ciphertext, whole heads per block; `_gqa` keeps each Llama KV head once, `PF_GQA=1`). Their switches are in the
 `runtime=` line, so `--plan` alone runs them: GPT-2 0.46 s per token, Llama 3.8 s (blocked) and 3.5 s (GQA).
+
+## Result plans (README tables, tag `table-2026-10-19`)
+
+Each runs with `--plan` alone: every switch is in its `runtime=` line. `scripts/repro/` has one script per plan and
+`docs/RESULTS_2026-10-19.md` every run.
+
+| directory | model and task | result |
+|---|---|---|
+| `llama31_8b_prefill128` | Llama-3.1-8B, 128-token prefill (pr2 capture with the lever patches of 10-17..10-19, listed in its `lineage=` line) | 111.0 s |
+| `gpt2_prefill128` | GPT-2, 128-token prefill | 33.1 s |
+| `gpt2_decode_python_n32` | GPT-2, decode with the encrypted argmax | 3.78 s / token |
+| `bert_base_sst2_128` | BERT-base, SST-2 classification of a 128-token input | 37.7 s |
+| `vit_b16_224` | ViT-B/16, one 224 x 224 image | 123.2 s |
