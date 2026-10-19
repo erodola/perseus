@@ -1,0 +1,108 @@
+% The paper's comparison tables for README.md, one page per table. Render: bash assets/render.sh paper-tables, which writes
+% paper-tables-<page>-{light,dark}.png in the order of the pages line below. \darkmode switches the palette.
+% pages: llama-prefill llama-decode gpt2 vit bert
+\documentclass[border=14pt,varwidth=17.2cm,multi=tbl]{standalone}
+\usepackage{newtxtext,newtxmath}
+\usepackage{booktabs,xcolor,colortbl,pifont}
+\ifdefined\darkmode
+  \definecolor{fg}{RGB}{230,237,243}\definecolor{bg}{RGB}{13,17,22}\definecolor{ours}{RGB}{28,48,78}
+  \definecolor{yescol}{RGB}{86,211,100}\definecolor{nocol}{RGB}{248,113,113}
+\else
+  \definecolor{fg}{RGB}{0,0,0}\definecolor{bg}{RGB}{255,255,255}\definecolor{ours}{RGB}{224,236,252}
+  \definecolor{yescol}{RGB}{0,128,0}\definecolor{nocol}{RGB}{179,0,0}
+\fi
+\pagecolor{bg}\color{fg}
+\arrayrulecolor{fg}
+% the row fill overlaps its neighbour cells by 0.3pt: no seams between them when rasterized
+\newcommand{\oursrow}{\rowcolor{ours}[\dimexpr\tabcolsep+0.3pt\relax][\dimexpr\tabcolsep+0.3pt\relax]}
+\newcommand{\yes}{\textcolor{yescol}{\ding{51}}}
+\newcommand{\no}{\textcolor{nocol}{\ding{55}}}
+\newcommand{\semi}{$\sim$}
+\newcommand{\nt}[1]{\rlap{$^{#1}$}}
+\newcommand{\tcap}[1]{\vspace{10pt}\begin{minipage}{\linewidth}\fontsize{11.5}{14.5}\selectfont #1\end{minipage}}
+\newcommand{\legend}{\yes\ open source, \semi\ partially or temporarily released, \no\ closed source.}
+\newenvironment{tbl}{\centering\setlength{\tabcolsep}{7pt}\renewcommand{\arraystretch}{1.18}}{}
+\begin{document}
+
+\begin{tbl}
+\begin{tabular}{lrrlc}
+\toprule
+\textbf{Llama-3-8B} & prompt & prefill (s) & GPU & open source \\
+\midrule
+MOAI (Zhang et al., 2026) & $8\!\to\!128$ & 3592.0\nt{\dagger *} & -- & \semi \\
+NEXUS (Zhang et al., 2025) & $8\!\to\!128$ & 829.0\nt{\dagger *} & 4$\times$A100 & \semi \\
+Euston (Gao et al., 2026) & 128 & 484.0\nt{\dagger *} & RTX 6000 Ada & \semi \\
+STIP (Wang et al., 2026) & 128 & 406.6\nt{\dagger *} & A100 & \no \\
+Odin (Fan et al., 2026) & 128 & 366.4 & H100 & \no \\
+Cerium (Jayashankar et al., 2025) & 128 & 347.5\nt{\S} & RTX PRO 6000 & \yes \\
+Sylph (Park et al., 2026) & 128 & 116.0\nt{\dagger} & RTX PRO 6000 & \no \\
+\oursrow\textbf{Perseus (ours)} & 128 & \textbf{111.0} & RTX PRO 6000 & \yes \\
+\bottomrule
+\end{tabular}
+\tcap{Encrypted Llama-3-8B prefill, from the prompt to the first token. $^\dagger$Composed from per-block or per-operator
+timings, not run end to end; $^*$amortized over a batch; $^\S$replicated from the released code on our GPU. Perseus runs
+Llama-3.1-8B (the same architecture) end to end on one GPU; its wall excludes key generation, encryption and decryption.
+\legend}
+\end{tbl}
+
+\begin{tbl}
+\begin{tabular}{lrrlc}
+\toprule
+\textbf{Llama-3-8B} & context & s / token & GPU & open source \\
+\midrule
+AR-HE (Kanpak and Unat, 2026) & 32 & 1569.0\nt{\dagger} & H100 & \no \\
+ROSETTA (Yu et al., 2026) & 512 & 311.0\nt{\dagger} & A100 & \no \\
+Cachemir (Yu et al., 2026) & 512 & 97.0\nt{\dagger} & A100 & \semi \\
+Sylph (Park et al., 2026) & 128 & 31.0\nt{\dagger} & RTX PRO 6000 & \no \\
+\oursrow\textbf{Perseus (ours)} & 512 & \textbf{21.1} & RTX PRO 6000 & \yes \\
+\bottomrule
+\end{tabular}
+\tcap{Encrypted Llama-3-8B decode of one token at the given context size. $^\dagger$Composed from per-block or per-operator
+timings, not run end to end. Perseus runs Llama-3.1-8B end to end on one GPU. \legend}
+\end{tbl}
+
+\begin{tbl}
+\begin{tabular}{lrrrrlc}
+\toprule
+\textbf{GPT-2 small} & prompt & prefill (s) & context & s / token & GPU & open source \\
+\midrule
+AR-HE (Kanpak and Unat, 2026) & 128 & 18520.0 & 33 & 544.0 & H100 & \no \\
+ROSETTA (Yu et al., 2026) & -- & -- & 512 & 78.6\nt{\dagger} & A100 & \no \\
+EncryptedLLM (Castro et al., 2025) & -- & -- & 128 & 68.0 & A100 & \semi \\
+\oursrow\textbf{Perseus (ours)} & 128 & \textbf{33.9} & 32 & \textbf{3.78} & RTX PRO 6000 & \yes \\
+\bottomrule
+\end{tabular}
+\tcap{Encrypted GPT-2 small: prefill of a 128-token prompt and decode of one token. $^\dagger$Composed from per-block
+timings. Perseus' decode includes the encrypted argmax that picks the next token on the server. \legend}
+\end{tbl}
+
+\begin{tbl}
+\begin{tabular}{llrlc}
+\toprule
+\textbf{ViT} & model & s / image & hardware & open source \\
+\midrule
+FIONA (Peng et al., 2026) & ViT-S/16 & 374.4\nt{*} & CPU, 48 cores & \no \\
+ATLAS (Xie et al., 2026) & ViT-B/16 & 2259.0 & RTX 4090 48GB & \yes \\
+\oursrow\textbf{Perseus (ours)} & ViT-B/16 & \textbf{123.2} & RTX PRO 6000 & \yes \\
+\bottomrule
+\end{tabular}
+\tcap{Encrypted ViT inference of one $224\times224$ image. $^*$Amortized over a batch of 32, on a model retrained with
+polynomial layers. \legend}
+\end{tbl}
+
+\begin{tbl}
+\begin{tabular}{llrrlc}
+\toprule
+\textbf{BERT} & model & tokens & s & GPU & open source \\
+\midrule
+THOR (Moon et al., 2025) & BERT-base & 128 & 602.0 & A100 & \semi \\
+POLARIS & BERT-Mini & -- & 83.0 & A100 & \no \\
+Cerium (Jayashankar et al., 2025) & BERT-base & 128 & 43.6\nt{\S} & RTX PRO 6000 & \yes \\
+\oursrow\textbf{Perseus (ours)} & BERT-base & 128 & \textbf{38.4} & RTX PRO 6000 & \yes \\
+\bottomrule
+\end{tabular}
+\tcap{Encrypted BERT inference of one input (SST-2 classification for Perseus). $^\S$Replicated from the released code on
+our GPU. \legend}
+\end{tbl}
+
+\end{document}
