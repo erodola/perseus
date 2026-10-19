@@ -32,6 +32,13 @@ def main(argv=None):
     ap.add_argument("--device", type=int, default=3)
     ap.add_argument("--argmax", action="store_true", help="also run the encrypted CutMax per token")
     ap.add_argument("--capture", default=None, help="graph dir: capture block graphs at token 0")
+    ap.add_argument("--fake-prefix", type=int, default=0, metavar="N",
+                    help="run positions 0..N-1 on the numpy fake (CPU) and start the device at N from their caches "
+                         "(their K/V pushes replayed from payloads encrypted as public values at --prefix-level): a capture of position N without "
+                         "decoding the positions before it")
+    ap.add_argument("--prefix-level", type=int, default=36, help="the level of the replayed push payloads")
+    ap.add_argument("--structure-only", action="store_true",
+                    help="capture without the per-node magnitude decrypts (fast); fill them with capture_mags.py")
     ap.add_argument("--plan", default=None, help="plan dir: run under block_<b>_placement.json")
     ap.add_argument("--no-plan-argmax", action="store_true", help="run CutMax / feedback eager even if planned")
     ap.add_argument("--weights", default=os.environ.get("WEIGHTS_PATH"))
@@ -45,16 +52,21 @@ def main(argv=None):
     ap.add_argument("--payload", choices=("complex", "real"), default="complex",
                     help="complex: CKKS_COMPLEX=1, the C++ decode configuration (K/V pair bootstrap, "
                          "packed CutMax); real: real slots only (no shipped plan)")
+    ap.add_argument("--cpp-bootstrap", action="store_true",
+                    help="run FIDESlib's C++ bootstrap instead of the default Python stage orchestration "
+                         "(perseus/impl/bootstrap.py); not with a SPRU plan")
+    ap.add_argument("--py-bootstrap", action="store_true", help=argparse.SUPPRESS)  # the default now
     ap.add_argument("--chain", choices=("n32", "n64"),
                     default=os.environ.get("CHAIN") or "n32",
                     help="CKKS chain; source scripts/local_env.sh for the SAME chain")
     ap.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                     help="override one of the port's session env values (env.ENV), repeatable")
     ap.add_argument("--force", action="store_true", help="run even if GPU is busy")
+    ap.add_argument("--fake", action="store_true", help="capture on the numpy fake (perseus.impl.fakecap): no GPU")
     ap.add_argument("--profile", action="store_true", help="per-primitive wall-time split")
     a = ap.parse_args(argv)
 
-    busy = gpu_busy(a.device)
+    busy = None if a.fake else gpu_busy(a.device)
     if busy and not a.force:
         print(f"GPU {a.device} has other processes: {busy}; refusing (use --force)", file=sys.stderr)
         return 2
@@ -62,12 +74,14 @@ def main(argv=None):
     from . import env
     # GPT2_PACKING is only read back by the plan contract: a plan cut under one packing
     # must not load under the other
-    over = {"GPT2_PACKING": a.packing, **dict(kv.split("=", 1) for kv in a.set)}
+    # the plan's landing-bound bootstrap levers (post-raise scaling, SPRU); --set wins
+    over = {**env.plan_runtime(a.plan, a.chain), "GPT2_PACKING": a.packing,
+            **dict(kv.split("=", 1) for kv in a.set)}
     env.export_env(a.device, chain=a.chain,
                    CKKS_COMPLEX="1" if a.payload == "complex" else "0", **over)
     if not a.configs:
         _cfg = "gpt2_base_n32" if a.chain == "n32" else "gpt2_base"
-        a.configs = f"configs/model/approximation/{_cfg}/configs.json"
+        a.configs = env.plan_configs(a.plan, a.chain, f"configs/model/approximation/{_cfg}/configs.json")
     if a.capture:
         os.environ["FHE_GRAPH_DIR"] = a.capture
     from perseus import _core
@@ -77,18 +91,37 @@ def main(argv=None):
 
     # `over` has to reach open_session as well: it calls export_env a second time, and a
     # second call re-applies env.ENV over anything set here.
-    sess = env.open_session(a.device, complex_payload=(a.payload == "complex"),
-                            chain=a.chain, **over)
-    inf = sess.inf
+    core = _core
+    if a.fake:
+        from perseus.impl import fake, fakecap
+        from perseus.impl.layout import Dims
+        env.export_env(a.device, chain=a.chain, CKKS_COMPLEX="1" if a.payload == "complex" else "0", **over)
+        os.environ["CUDA_VISIBLE_DEVICES"] = ""
+        fakecap.session_env(env.ENV, {"CKKS_COMPLEX": "1" if a.payload == "complex" else "0", **over}, a.chain,
+                            a.payload == "complex")
+        d = Dims.gpt2()
+        band, _ = fake.make_fake(N=d.N, hid=d.hid, dim=d.dim, H=d.H, H_real=d.H_real, E=d.E, E_real=d.E_real)
+        _, inf = fakecap.make_session(d, set(band.loaded_rot_steps) | fakecap.GPT2_BAND)
+        sess, core = fakecap.FakeSession(inf), fakecap.core
+    else:
+        sess = env.open_session(a.device, complex_payload=(a.payload == "complex"),
+                                chain=a.chain, **over)
+        inf = sess.inf
+        env.bootstrap_setup(inf.fhe, over, cpp_bootstrap=a.cpp_bootstrap)
+        print(f"[bootstrap] {'C++' if a.cpp_bootstrap else 'Python'}; shift={over.get('FIDESLIB_BTS_SHIFT')} "
+              f"spru={over.get('FIDESLIB_SPRU')}", file=sys.stderr)
     store = weights.RawStore(a.weights)
     cfgs = config.load_configs(a.configs)
-    model = Gpt2Model(inf, store, cfgs, core=_core, n_layers=a.layers, profile=a.profile, packing=a.packing)
+    model = Gpt2Model(inf, store, cfgs, core=core, n_layers=a.layers, profile=a.profile, packing=a.packing,
+                      **({"kv_offload": False} if a.fake else {}))
     missing = env.rotation_audit(inf.fhe, model.rt.dims)
     if missing:
         print(f"rotation keys missing from the band: {missing}", file=sys.stderr)
         return 3
     if a.capture:
         model.set_capture(a.capture)
+        if a.structure_only:
+            inf.fhe.magnitude_suppressed = True
     if a.plan:
         model.load_plans(a.plan, argmax_blocks=not a.no_plan_argmax)
 
@@ -115,6 +148,8 @@ def main(argv=None):
             line += f" ref={r['ref']} ref_rank={r['ref_rank']} KL={r['kl']:.4g} {'OK' if r['hit'] else 'MISS'}"
         if "free_gb" in r:
             line += f" free={r['free_gb']}GB"
+        if "pool_gb" in r:
+            line += " pool={}/{}GB(trim {}, recycler {})".format(*r["pool_gb"])
         if "rss_gb" in r:
             line += f" rss={r['rss_gb']}GB"
         if "cpu_s" in r:
@@ -131,8 +166,21 @@ def main(argv=None):
             line += f" cutmax={r['cutmax']} {'OK' if r['cutmax'] == r['top1'] else 'MISS'} z_mass={r['z_mass']:.4f} argmax={r['argmax_s']:.1f}s bts={r.get('argmax_bts', '?')}"
         print(line, flush=True)
 
+    first = 0
+    if a.fake_prefix:
+        # the fake's run needs the session's switches, already exported above
+        from .capture_mags import fake_model
+        t0 = time.time()
+        fmodel, _ffhe, _finf = fake_model(a.weights, a.configs, a.packing)
+        for kv in fmodel.kv:
+            kv.payload_log = []
+        fmodel.run_decode(inputs[:a.fake_prefix])
+        model.start()
+        first = model.replay_kv_pushes([kv.payload_log for kv in fmodel.kv], a.prefix_level)
+        print(f"[impl] positions 0..{first - 1} on the fake, their pushes replayed from level {a.prefix_level} "
+              f"({time.time() - t0:.0f}s)", flush=True)
     t0 = time.time()
-    res = model.run_decode(inputs, gt_logits, on_token=on_token, argmax=a.argmax)
+    res = model.run_decode(inputs, gt_logits, on_token=on_token, argmax=a.argmax, first=first)
     ok, bad = dist_gate(res)
     hits = sum(1 for r in res if r.get("hit"))
     kls = sorted(r["kl"] for r in res if "kl" in r)

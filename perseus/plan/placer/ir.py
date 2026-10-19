@@ -4,8 +4,12 @@ import heapq
 import json
 import re
 from collections import defaultdict
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# packtag::Field::Real (include/packing/pack_tag.h): the slots hold a real payload.
+FIELD_REAL = 1
 
 # Table depth costs, in CKKS levels (x level_unit at use sites).
 DEPTH_COSTS: dict[str, int] = {
@@ -68,6 +72,7 @@ class Node:
     max_coeff: float | None
     pack_period: int | None
     max_coeff_ac: float | None = None   # max_coeff with the DC (X^0) coefficient excluded
+    pack_field: int = 0                 # packtag::Field of the slots (FIELD_REAL: a real payload)
     # derived, precomputed once
     cipher_inputs: tuple[str, ...] = ()
     hint_level: float | None = None
@@ -106,6 +111,15 @@ class Graph:
         if not raw:
             raise ValueError("graph has no nodes")
 
+        # PLAN_DELIB_LANDING_REMAP="old:new,...": captured landings of the code's own (deliberate) bootstraps re-mapped,
+        # for a library whose route landings differ from the capture's (e.g. FIDESLIB_BTS_RAISE_DROP moves the s=1 route);
+        # the planner re-routes auto bootstraps itself, but a deliberate one keeps its captured output level.
+        remap: dict[float, float] = {}
+        for tok in os.environ.get("PLAN_DELIB_LANDING_REMAP", "").split(","):
+            if ":" in tok:
+                a, b = tok.split(":", 1)
+                remap[float(a)] = float(b)
+
         drafts: list[dict] = []
         for n in raw:
             inputs = tuple(str(x) for x in n.get("inputs", []))
@@ -119,7 +133,10 @@ class Graph:
                 inputs=inputs,
                 input_levels=input_levels,
                 output=str(n.get("output", "")),
-                output_level=(float(n["output_level"])
+                output_level=(remap.get(float(n["output_level"]), float(n["output_level"]))
+                              if str(n.get("op_type", "")) == "deliberate_bootstrap" and remap
+                              and isinstance(n.get("output_level"), (int, float)) and n["output_level"] >= 0
+                              else float(n["output_level"])
                               if isinstance(n.get("output_level"), (int, float))
                               and n["output_level"] >= 0 else None),
                 output_deg=(int(n["output_noise_level"])
@@ -138,6 +155,7 @@ class Graph:
                              if isinstance(n.get("pack_period"), (int, float)) else None),
                 max_coeff_ac=(float(n["output_max_coeff_ac"])
                               if isinstance(n.get("output_max_coeff_ac"), (int, float)) else None),
+                pack_field=int(n.get("pack_field") or 0),
             ))
 
         for d in drafts:
@@ -246,4 +264,5 @@ def _node_to_raw(n: Node) -> dict:
         "output_max_coeff": n.max_coeff,
         "output_max_coeff_ac": n.max_coeff_ac,
         "pack_period": n.pack_period,
+        **({"pack_field": n.pack_field} if n.pack_field else {}),
     }

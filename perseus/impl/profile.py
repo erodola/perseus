@@ -6,12 +6,14 @@ from __future__ import annotations
 
 import collections
 import functools
+import os
 import time
 
 from .ops import FheOps
 
 _TIMED = ("add", "sub", "mult", "square", "negate", "rotate", "conjugate", "inplace_add", "copy",
-          "mult_pt", "add_pt", "mult_pt_many", "rotate_and_sum", "rotate_many", "mult_add_many",
+          "mult_pt", "add_pt", "mult_pt_many", "mult_pt_sum", "mult_slot_pt_sum", "mult_coeff_sum", "mult_i", "mult_const",
+          "fold_bootstrap", "rotate_and_sum", "rotate_many", "mult_add_many",
           "bootstrap", "bootstrap_hint", "realize", "encode_token",
           "decrypt_slots", "decode_linear_output", "decode_token", "load_pts", "evict_pts")
 
@@ -25,16 +27,18 @@ class TimedOps(FheOps):
         self.n_step = collections.defaultdict(int)
         self.t_sp = collections.defaultdict(float)     # (step, primitive) -> time
         self.n_sp = collections.defaultdict(int)
+        self.b_sp = collections.defaultdict(int)       # (step, primitive) -> bootstraps fired inside
         self.step_label = None
 
     def reset(self):
         self.t.clear(); self.n.clear(); self.t_step.clear(); self.n_step.clear()
-        self.t_sp.clear(); self.n_sp.clear()
+        self.t_sp.clear(); self.n_sp.clear(); self.b_sp.clear()
 
     def report_step_split(self, step, tokens=1, top=10):
         """The primitives inside one step label (e.g. "cutmax"): time and calls per token."""
         rows = sorted(((k[1], v) for k, v in self.t_sp.items() if k[0] == step), key=lambda kv: -kv[1])[:top]
-        return " | ".join(f"{k} {v / tokens:.2f}s n={self.n_sp[(step, k)] // tokens}" for k, v in rows)
+        return " | ".join(f"{k} {v / tokens:.2f}s n={self.n_sp[(step, k)] // tokens} bts={self.b_sp[(step, k)]}"
+                          for k, v in rows)
 
     def report_steps(self, tokens=1):
         tot = sum(self.t_step.values())
@@ -50,14 +54,23 @@ class TimedOps(FheOps):
         return "\n".join(lines) + f"\ntotal {tot:.1f}s"
 
 
+# IMPL_PROFILE_SYNC=1: a device fence after every timed call (slower, but no call is billed for
+# the queued work of the calls before it)
+_SYNC = os.environ.get("IMPL_PROFILE_SYNC", "0") not in ("", "0")
+
+
 def _wrap(name):
     base = getattr(FheOps, name)
 
     @functools.wraps(base)
     def f(self, *a, **k):
         t0 = time.perf_counter()
+        b0 = getattr(self.fhe, "total_bootstraps", 0)
         try:
-            return base(self, *a, **k)
+            out = base(self, *a, **k)
+            if _SYNC:                      # charge each primitive its own GPU time
+                self.device_sync()
+            return out
         finally:
             dt = time.perf_counter() - t0
             self.t[name] += dt
@@ -67,6 +80,7 @@ def _wrap(name):
             self.n_step[lab] += 1
             self.t_sp[(lab, name)] += dt
             self.n_sp[(lab, name)] += 1
+            self.b_sp[(lab, name)] += getattr(self.fhe, "total_bootstraps", 0) - b0
     return f
 
 

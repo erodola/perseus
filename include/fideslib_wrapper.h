@@ -24,6 +24,7 @@ namespace FIDESlib::CKKS { int BootstrapPrecapture(Context& cc); }  // Bootstrap
 namespace FIDESlib::CKKS { void setArcsineOverride(int v); }  // ApproxModEval.cu
 
 #include <any>
+#include <cstdio>
 #include <vector>
 #include <complex>
 #include <string>
@@ -59,6 +60,20 @@ namespace FIDESlib::CKKS { void setArcsineOverride(int v); }  // ApproxModEval.c
 
 struct Inference;  // ctor below takes Inference&; full definition in inference.h
 struct CKKSContext;
+
+// BTS_DIM1="cts,stc": OpenFHE's BSGS baby-step sizes for the CtS and StC linear transforms
+// (0 = OpenFHE's automatic split = the shipped default). Traffic campaign lever D.
+inline std::vector<uint32_t> bts_dim1_from_env() {
+    std::vector<uint32_t> d{0, 0};
+    if (const char* e = std::getenv("BTS_DIM1")) {
+        unsigned a = 0, b = 0;
+        if (std::sscanf(e, "%u,%u", &a, &b) >= 1) {
+            d[0] = a;
+            d[1] = b;
+        }
+    }
+    return d;
+}
 
 struct WithStep {
     CKKSContext* ctx_;
@@ -225,6 +240,12 @@ struct BootstrapPlan {
     //     and EXACT whatever the runtime value turns out to be: it is a plaintext add and
     //     its exact inverse, so a stale c loses benefit but can never corrupt.
     std::unordered_map<std::string, int>         correction_factor;
+    // Level-aware ModRaise: composite levels below the chain top the site's raise stops at (0 = full).
+    std::unordered_map<std::string, int>         raise_drop;
+    // Dense refreshes of real payloads: one EvalMod chain (FIDESLIB_BTS_REAL).
+    std::unordered_set<std::string>              real_route;
+    // StC-first runs (FIDESLIB_BTS_STC_FIRST): dense sites that bootstrap in the shipped order.
+    std::unordered_set<std::string>              shipped_order;
     std::unordered_map<std::string, double>      offset;
     bool valid = false;
 
@@ -312,6 +333,12 @@ inline BootstrapPlan parse_bootstrap_plan_file(const std::string& path) {
         for (const auto& x : d->arr)
             if (x.is_string()) plan.hint_fire.insert(x.str);
     }
+    if (const auto* d = find_any("real_route"); d && d->is_array())
+        for (const auto& x : d->arr)
+            if (x.is_string()) plan.real_route.insert(x.str);
+    if (const auto* d = find_any("shipped_order"); d && d->is_array())
+        for (const auto& x : d->arr)
+            if (x.is_string()) plan.shipped_order.insert(x.str);
 
     // Plan-bound rescale decisions: key presence (even an empty list) binds every
     // landing-realize decision to the plan (same rule as hint_fire).
@@ -352,6 +379,11 @@ inline BootstrapPlan parse_bootstrap_plan_file(const std::string& path) {
         for (const auto& kv : d->obj)
             if (kv.second.is_number())
                 plan.offset[kv.first] = kv.second.number;
+
+    if (const auto* d = find_any("raise_drop"); d && d->is_object())
+        for (const auto& kv : d->obj)
+            if (kv.second.is_number() && kv.second.number > 0)
+                plan.raise_drop[kv.first] = static_cast<int>(kv.second.number);
 
     if (const auto* d = find_any("sparse_bts_slots"); d && d->is_array())
         for (const auto& x : d->arr)
@@ -470,6 +502,9 @@ struct CKKSContext {
     // Per-site correction factor and offset DC, same keying. Absent = the context-wide
     // CORRECTION_FACTOR and no offset.
     std::unordered_map<std::string, int>      plan_correction_factor;
+    std::unordered_map<std::string, int>      plan_raise_drop;
+    std::unordered_set<std::string>           plan_real_route;
+    std::unordered_set<std::string>           plan_shipped_order;
     std::unordered_map<std::string, double>   plan_offset;
     int active_cache_pin_level = -1;   // placer-chosen KV read level for the live block plan (-1 = unset)
     uint64_t graph_ct_counter = 0;
@@ -479,6 +514,9 @@ struct CKKSContext {
 
     std::string graph_var_scope;
     uint64_t    graph_var_scope_counter = 0;
+    // a scope that only NAMES (step-scoped ciphertext names, perseus.impl Rt): planned mode keeps its
+    // strict reactive-refresh check under it (an unflagged scope skips it)
+    bool        graph_scope_strict = false;
     uint64_t weight_relevel_count = 0;
     uint64_t unplanned_bootstrap_count = 0;
 
@@ -491,11 +529,59 @@ struct CKKSContext {
         uint64_t hits      = 0;
     };
     std::map<std::string, WeightRelevelStat> weight_relevel_stats;
+
+    // Report the weights whose pre-baked encode level did not match the level the runtime
+    // met them at. An over-pin of exactly +1 on a deg-2 ciphertext is the expected
+    // self-heal; anything else means the plan's weight levels and the run disagree.
+    void dump_weight_relevel_report(std::ostream& os = std::cerr) const {
+        if (weight_relevel_stats.empty()) {
+            os << "[weight_relevel_report] clean: no pre-baked plaintext re-leveled "
+                  "(plan levels == runtime levels)\n";
+            return;
+        }
+        os << "[weight_relevel_report] " << weight_relevel_stats.size()
+           << " weight(s) drifted (total re-encodes=" << weight_relevel_count << "):\n";
+        for (const auto& kv : weight_relevel_stats) {
+            const WeightRelevelStat& s = kv.second;
+            const char* cls =
+                (s.delta == 1 && s.ct_deg == 1) ? "INFO  over-pin+1 (deg-2->deg-1 self-heal, expected)" :
+                (s.delta  > 1)                  ? "WARN  over-pin>+1 (unexpected; check plan)" :
+                (s.delta  < 0)                  ? "ERROR under-pin (weight fell back to default; plan gap)" :
+                                                  "INFO  drift";
+            os << "  " << std::left << std::setw(16) << kv.first << std::right
+               << " enc L" << s.enc_level << "/d" << s.enc_deg
+               << " -> ct L" << s.ct_level << "/d" << s.ct_deg
+               << "  delta=" << (s.delta >= 0 ? "+" : "") << s.delta
+               << "  hits=" << s.hits
+               << "   " << cls << "\n";
+        }
+    }
+
     bool placement_plan_enabled = false;
     std::unordered_set<std::string> planned_warned_;   // dedup keys for one-shot planned-mode warnings
 
     PublicKey<DCRTPoly>&  pk()  { return keys.publicKey; }
     PrivateKey<DCRTPoly>& sk()  { return keys.secretKey; }
+
+    std::pair<double, double> debug_max_abs_re_im(const Ctx& ct) {
+        Plaintext pt;
+        Ctx c = ct;   // Decrypt takes a non-const Ctx&
+        cc->Decrypt(c, keys.secretKey, &pt);
+        const auto v = pt->GetCKKSPackedValue();
+        double mr = 0.0, mi = 0.0;
+        for (const auto& z : v) {
+            mr = std::max(mr, std::abs(z.real()));
+            mi = std::max(mi, std::abs(z.imag()));
+        }
+        return {mr, mi};
+    }
+
+    // TP_PROBE=1: print {max|Re(A)|, max|Im(B)|} of a ct with a label (token-pair lane trace).
+    void tp_probe(const std::string& tag, const Ctx& ct) {
+        if (!std::getenv("TP_PROBE")) return;
+        auto ri = debug_max_abs_re_im(ct);
+        fprintf(stderr, "[tp_probe:%s] |Re(A)|=%.5g |Im(B)|=%.5g\n", tag.c_str(), ri.first, ri.second);
+    }
 
     void sync_ciphertext_cpu_from_device(Ctx& ct) {
         if (!ct || !ct->loaded) return;
@@ -603,6 +689,26 @@ struct CKKSContext {
     uint32_t sparse_bts_active = 0;
     std::set<uint32_t> sparse_precomp_slots;
 
+    // Sparse routes built / dropped at run time (SM_PERIODIC=2: Gp x tH slots); building needs the secret key.
+    std::vector<uint32_t> route_level_budget;
+    uint32_t route_correction_factor = 0;
+    void add_sparse_route(uint32_t s) {
+        if (s == 0 || sparse_precomp_slots.count(s)) return;
+        if (!keys.secretKey)
+            throw std::runtime_error("add_sparse_route: this session holds no secret key; route " + std::to_string(s) +
+                                     "'s bootstrap keys come from the client");
+        cc->EvalBootstrapSetup(route_level_budget, bts_dim1_from_env(), s, route_correction_factor);
+        cc->EvalBootstrapKeyGen(keys.secretKey, s);
+        cc->AddBootstrapRoute(keys.publicKey, s);
+        sparse_precomp_slots.insert(s);
+    }
+    size_t drop_sparse_route(uint32_t s) {
+        if (!sparse_precomp_slots.count(s)) return 0;
+        const size_t n = cc->DropBootstrapRoute(keys.publicKey, s);
+        sparse_precomp_slots.erase(s);
+        return n;
+    }
+
     // The slot count a fold wanting `s_wanted` can actually run at: `s_wanted` itself
     // when a precomp exists, else the smallest built s' > s_wanted (any larger power of
     // two is a multiple, so the caller can pre-ladder the gap: rotate+add at strides
@@ -685,17 +791,33 @@ struct CKKSContext {
         if (!pt) return;
         const PackSignature sig = analyze_packing(values);
         std::lock_guard<std::mutex> lk(tags_mtx);
-        pt_tags[(const void*)pt.get()] = packtag::from_signature(
+        packtag::PackTag t = packtag::from_signature(
             sig.slots, sig.period, sig.live_exact, sig.stride_exact, sig.window_exact,
             sig.offset_exact);
+        t.field = packtag::Field::Real;
+        pt_tags[(const void*)pt.get()] = t;
     }
     void tag_plaintext(const Ptx& pt, const std::vector<std::complex<double>>& values) const {
         if (!pt) return;
         const PackSignature sig = analyze_packing(values);
+        bool re = false, im = false;
+        for (const auto& v : values) {
+            re |= v.real() != 0.0;
+            im |= v.imag() != 0.0;
+        }
         std::lock_guard<std::mutex> lk(tags_mtx);
-        pt_tags[(const void*)pt.get()] = packtag::from_signature(
+        packtag::PackTag t = packtag::from_signature(
             sig.slots, sig.period, sig.live_exact, sig.stride_exact, sig.window_exact,
             sig.offset_exact);
+        t.field = im ? (re ? packtag::Field::Complex : packtag::Field::Imag) : packtag::Field::Real;
+        pt_tags[(const void*)pt.get()] = t;
+    }
+    // x + conj x is real and x - conj x imaginary whatever x holds: the realify steps of the complex packings
+    static packtag::PackTag conj_pair(packtag::PackTag t, const void* a, const void* b, const packtag::PackTag& ta,
+                                      const packtag::PackTag& tb, bool sub) {
+        if ((tb.conj_of && tb.conj_of == a) || (ta.conj_of && ta.conj_of == b))
+            t.field = sub ? packtag::Field::Imag : packtag::Field::Real;
+        return t;
     }
     packtag::PackTag tag_of(const Ptx& pt) const {
         if (!pt) return packtag::PackTag{};
@@ -777,6 +899,9 @@ struct CKKSContext {
         plan_sparse_slots.clear();
         plan_prescale.clear();
         plan_correction_factor.clear();
+        plan_raise_drop.clear();
+        plan_real_route.clear();
+        plan_shipped_order.clear();
         plan_offset.clear();
         expected_levels.clear();
         expected_producers.clear();
@@ -895,6 +1020,14 @@ struct CKKSContext {
                 ++hist[cf];
             }
             plan_correction_factor = plan.correction_factor;
+            plan_raise_drop = plan.raise_drop;
+            if (!plan_raise_drop.empty()) {
+                std::map<int, int> h;
+                for (const auto& kv : plan_raise_drop) ++h[kv.second];
+                std::cerr << "[plan_raise] " << plan_raise_drop.size() << " site(s) raise below the chain top:";
+                for (const auto& kv : h) std::cerr << " drop" << kv.first << "=" << kv.second;
+                std::cerr << " (needs FIDESLIB_BTS_RAISE_DROPS to cover them)\n";
+            }
             std::cerr << "[plan_cf] " << plan_correction_factor.size()
                       << " site(s) carry a per-site correction factor (chain deg=" << deg
                       << "), histogram:";
@@ -905,6 +1038,14 @@ struct CKKSContext {
         if (!plan_offset.empty())
             std::cerr << "[plan_offset] " << plan_offset.size()
                       << " site(s) carry an offset-transform DC\n";
+        plan_real_route = plan.real_route;
+        plan_shipped_order = plan.shipped_order;
+        if (!plan_shipped_order.empty())
+            std::cerr << "[plan_shipped] " << plan_shipped_order.size()
+                      << " dense site(s) bootstrap in the shipped order under StC-first\n";
+        if (!plan_real_route.empty())
+            std::cerr << "[plan_real] " << plan_real_route.size()
+                      << " dense site(s) refresh a real payload (needs FIDESLIB_BTS_REAL)\n";
 
         // Warn (once) when a planned plan is missing the level data it relies on.
         if (plan.expected_levels.empty() && planned_warned_.insert("no_expected_levels").second)
@@ -963,6 +1104,24 @@ struct CKKSContext {
     //
     //  THREADING: CorrectionScope mutates process-global ContextData, so a per-site CF is
     // only safe where bootstraps are serialised.
+    // The planned sparse route `s`, or the smallest built route the value's period allows when it outgrew `s`
+    // (SM_PERIODIC=2: the period grows with the cache, refreshing at `s` would fold it). Planned folds stay.
+    uint32_t planned_route_for(const Ctx& ct, uint32_t s) {
+        if (s == 0 || sparse_precomp_slots.empty()) return s;
+        const packtag::PackTag t = tag_of_ct(ct);
+        if (!t.known() || t.periodic_at(static_cast<int>(s)) || t.fold_collision_free_at(static_cast<int>(s))) return s;
+        uint32_t want = s;
+        while (want < static_cast<uint32_t>(t.period)) want <<= 1;
+        const uint32_t s2 = fold_slots_for(want);
+        if (s2 > s && sparse_precomp_slots.count(s2) && t.periodic_at(static_cast<int>(s2))) return s2;
+        static std::atomic<bool> warned{false};
+        if (t.period < t.slots && !warned.exchange(true))   // a periodic value whose route is not built
+            std::cerr << "[plan_route] a planned " << s << "-slot refresh carries a " << t.period
+                      << "-periodic value and no route >= " << want << " is built (SPARSE_BTS_SLOTS): refreshed at "
+                      << s << " as planned" << std::endl;
+        return s;
+    }
+
     void inner_bootstrap_planned(const std::string& var_name, Ctx& ct) {
         auto sit = plan_sparse_slots.find(var_name);
         auto pit = plan_prescale.find(var_name);
@@ -978,11 +1137,20 @@ struct CKKSContext {
             // The planner proved s-periodicity from the captured static pack tag;
             // install_plan_live validated s against the built precomps and cf against
             // the chain's deg guard.
-            FoldBtsScope fs(*this, sit != plan_sparse_slots.end()
-                                       ? sit->second : sparse_bts_active);
+            FoldBtsScope fs(*this, planned_route_for(ct, sit != plan_sparse_slots.end()
+                                                             ? sit->second : sparse_bts_active));
             CorrectionScope cs(*this,
                                cit != plan_correction_factor.end() ? cit->second : -1,
                                cit != plan_correction_factor.end());
+            auto rit = plan_raise_drop.find(var_name);
+            RaiseScope rs(*this, rit != plan_raise_drop.end() ? rit->second : 0);
+            RealScope rl(*this, plan_real_route.count(var_name) > 0);
+            ShippedScope so(*this, plan_shipped_order.count(var_name) > 0);
+            if (static const bool dbg = [] { const char* e = std::getenv("FIDESLIB_BTS_DEBUG_STC"); return e && std::atoi(e) > 0; }(); dbg)
+                std::cerr << "[stc_dbg] planned " << var_name << " shipped=" << plan_shipped_order.count(var_name)
+                          << " (" << plan_shipped_order.size() << " listed) real=" << plan_real_route.count(var_name)
+                          << " cf=" << (cit != plan_correction_factor.end() ? cit->second : -1)
+                          << " ctx=" << (cc->gpu.has_value() ? (void*)std::any_cast<FIDESlib::CKKS::Context&>(cc->gpu).get() : nullptr) << "\n";
             inner_bootstrap(ct, pit != plan_prescale.end() ? pit->second : 1.0);
         }
         // Adding a broadcast constant back cannot lower the output's period (a constant is
@@ -1051,6 +1219,9 @@ struct CKKSContext {
         oss << "[plan_deg_error] " << var_name << " expected deg " << it->second
             << " actual " << actual << " step=" << step_path()
             << " (planned mode is strict)";
+        // PLAN_DEG_WARN=1 (debugging a plan/run divergence): report every mismatch and go on
+        static const bool warn_only = std::getenv("PLAN_DEG_WARN") && std::atoi(std::getenv("PLAN_DEG_WARN")) > 0;
+        if (warn_only) { std::cerr << oss.str() << " [warn only]\n"; return; }
         throw fhe::PlanError(oss.str());
     }
 
@@ -1087,14 +1258,15 @@ struct CKKSContext {
             auto oit = plan_offset.find(var_name);
             std::fprintf(stderr,
                          "[planted_bts] var=%s s=%u prescale=%g cf=%d offset=%g "
-                         "in=%d out=%d in_deg=%d out_deg=%d fold=%d\n",
+                         "in=%d out=%d in_deg=%d out_deg=%d fold=%d drop=%d\n",
                          var_name.c_str(),
                          sit != plan_sparse_slots.end() ? sit->second : 0u,
                          pit != plan_prescale.end() ? pit->second : 1.0,
                          cit != plan_correction_factor.end() ? cit->second : -1,
                          oit != plan_offset.end() ? oit->second : 0.0,
                          in_level, (int)level_for_ct(ct),
-                         in_deg, out_deg, (int)in_route.fold);
+                         in_deg, out_deg, (int)in_route.fold,
+                         plan_raise_drop.count(var_name) ? plan_raise_drop.at(var_name) : 0);
         }
         record_primitive("auto_bootstrap", {var_name}, out, {in_level}, level_for_ct(ct), ct);
         // Post-refresh deg pin: final_named_degs keys are graph vars, and the sim's
@@ -1269,6 +1441,28 @@ struct CKKSContext {
                           const Ctx& output_ct) {
         FIDESlib::CudaNvtxRange _nvr_pw("pw::record6");
         if (op_tally_active) ++op_tally[op_type];
+        {   // PLAN_TRACE_STEP=<step path>: every op recorded in that step, as executed (plan/run divergence hunts)
+            static const char* trace = std::getenv("PLAN_TRACE_STEP");
+            if (trace && *trace && step_path() == trace) {
+                std::string ins;
+                for (size_t i = 0; i < inputs.size(); ++i)
+                    ins += inputs[i] + "@" + std::to_string(i < input_levels.size() ? input_levels[i] : -9) + " ";
+                // PLAN_TRACE_DECRYPT=1: also the output's decrypted max |z| (and max |Im|): where values go wrong
+                static const bool dec = std::getenv("PLAN_TRACE_DECRYPT") && std::getenv("PLAN_TRACE_DECRYPT")[0] == '1';
+                double mz = -1, mi = -1;
+                if (dec && output_ct) {
+                    try {
+                        Plaintext pt;
+                        Ctx c = output_ct;
+                        cc->Decrypt(c, keys.secretKey, &pt);
+                        mz = 0; mi = 0;
+                        for (const auto& z : pt->GetCKKSPackedValue()) { mz = std::max(mz, std::abs(z)); mi = std::max(mi, std::abs(z.imag())); }
+                    } catch (const std::exception&) {}
+                }
+                std::fprintf(stderr, "[trace] %s %s -> %s @%d d%d |z|=%.3e |im|=%.3e\n", op_type.c_str(), ins.c_str(),
+                             output.c_str(), output_level, output_ct ? (int)output_ct->GetNoiseScaleDeg() : -1, mz, mi);
+            }
+        }
         if (!graph_enabled()) {
             return;
         }
@@ -1404,18 +1598,33 @@ struct CKKSContext {
         // emit nothing — absent means dense to the planner, the sound direction.
         if (output_ct) {
             const packtag::PackTag tg = tag_of_ct(output_ct);
-            if (tg.known()) {
-                if (GraphNode* n = graph_builder->last_node()) {
-                    n->has_pack_tag = true;
-                    n->pack_period  = tg.period;
-                    n->pack_kind    = static_cast<int>(tg.support.kind);
-                    n->pack_offset  = tg.support.offset;
-                    n->pack_stride  = tg.support.stride;
-                    n->pack_count   = tg.support.count;
-                    n->pack_width   = tg.support.width;
-                }
+            if (GraphNode* n = graph_builder->last_node()) {
+                if (tg.known()) stamp_pack_tag(n, tg);
+                n->pack_field = static_cast<int>(tg.field);
             }
         }
+    }
+
+    static void stamp_pack_tag(GraphNode* n, const packtag::PackTag& tg) {
+        n->pack_field = static_cast<int>(tg.field);
+        n->has_pack_tag = true;
+        n->pack_period  = tg.period;
+        n->pack_kind    = static_cast<int>(tg.support.kind);
+        n->pack_offset  = tg.support.offset;
+        n->pack_stride  = tg.support.stride;
+        n->pack_count   = tg.support.count;
+        n->pack_width   = tg.support.width;
+    }
+
+    // A tag stamped after its producing op was recorded (tag_reduce: a rotate-and-sum ladder's
+    // output is periodic, which the ladder's own propagation does not derive) goes back onto
+    // that op's graph node too, so a planned refresh of the reduction output itself can route
+    // sparse instead of dense.
+    void restamp_graph_tag(const Ctx& ct) {
+        if (!ct || !graph_builder || !graph_builder->enabled()) return;
+        const packtag::PackTag tg = tag_of_ct(ct);
+        if (!tg.known()) return;
+        if (GraphNode* n = graph_builder->last_node_for(var_for_ct(ct))) stamp_pack_tag(n, tg);
     }
 
     uint32_t auto_bts_level_override = 24;  // decode sweet spot; set from CKKSContextOptions at build
@@ -1840,12 +2049,13 @@ struct CKKSContext {
     // ct *= i via the monomial x^{N/2}: deg- and level-preserving, no keyswitch. Recorded so
     // token-pair captures see the lane swap (decode never calls it).
     Ctx mult_i(const Ctx& ct) {
-        const packtag::PackTag _tg = tag_of_ct(ct);
+        const packtag::PackTag _tg = packtag::t_mult_i(tag_of_ct(ct));
         const int in_a_level = level_for_ct(ct);
         const std::string in_a = var_for_ct(ct);
         Ctx out_ct = ct->Clone();
         cc->EvalMultMonomialInPlace(out_ct, static_cast<uint32_t>(cc->GetRingDimension() / 2));
         const std::string out = set_new_var_for_ct(out_ct);
+        tag_ct(out_ct, _tg);   // before the graph node is stamped and a planted bootstrap can fire
         const int out_level = level_for_ct(out_ct);
         record_primitive("mult_i", {in_a}, out, {in_a_level}, out_level, out_ct);
         maybe_apply_planned_bootstrap_after(out, out_ct);
@@ -2059,6 +2269,55 @@ struct CKKSContext {
     // |m|<=10 wall). Arms ContextData::correctionFactorOverride around the scoped calls;
     // same single-threaded scoping discipline as SparseBtsScope. cf < deg still throws
     // the Bootstrap deg-guard, per call. No-op before LoadContext.
+    // Level-aware ModRaise for one planted bootstrap: the raise stops `drop` composite levels below the
+    // chain top (plan 'raise_drop'), so every stage runs on fewer limbs and the refresh lands that much
+    // deeper -- exactly the room the plan's simulation gave this site. Needs the matching DFT plaintext
+    // variant built at LoadContext (FIDESLIB_BTS_RAISE_DROPS); FIDESlib throws otherwise.
+    struct RaiseScope {
+        FIDESlib::CKKS::ContextData* g = nullptr;
+        int saved = 0;
+        RaiseScope(CKKSContext& ctx, int drop) {
+            if (drop <= 0 || !ctx.cc->gpu.has_value()) return;
+            g = std::any_cast<FIDESlib::CKKS::Context&>(ctx.cc->gpu).get();
+            saved = g->getBtsRaiseDrop();
+            g->setBtsRaiseDrop(drop);
+        }
+        ~RaiseScope() {
+            if (g) g->setBtsRaiseDrop(saved);
+        }
+    };
+
+    // A dense refresh of a real payload (plan 'real_route'): one EvalMod chain and the real StC stage 0, built at
+    // LoadContext under FIDESLIB_BTS_REAL; FIDESlib throws otherwise.
+    struct RealScope {
+        FIDESlib::CKKS::ContextData* g = nullptr;
+        bool saved = false;
+        RealScope(CKKSContext& ctx, bool on) {
+            if (!on || !ctx.cc->gpu.has_value()) return;
+            g = std::any_cast<FIDESlib::CKKS::Context&>(ctx.cc->gpu).get();
+            saved = g->getBtsRealPayload();
+            g->setBtsRealPayload(true);
+        }
+        ~RealScope() {
+            if (g) g->setBtsRealPayload(saved);
+        }
+    };
+
+    // A plan 'shipped_order' site: StC-first forbidden for this one bootstrap (FIDESlib ContextData::stcFirstForbid).
+    struct ShippedScope {
+        FIDESlib::CKKS::ContextData* g = nullptr;
+        bool saved = false;
+        ShippedScope(CKKSContext& ctx, bool on) {
+            if (!on || !ctx.cc->gpu.has_value()) return;
+            g = std::any_cast<FIDESlib::CKKS::Context&>(ctx.cc->gpu).get();
+            saved = g->getStcFirstForbid();
+            g->setStcFirstForbid(true);
+        }
+        ~ShippedScope() {
+            if (g) g->setStcFirstForbid(saved);
+        }
+    };
+
     struct CorrectionScope {
         FIDESlib::CKKS::ContextData* g = nullptr;
         int saved = -1;
@@ -2405,6 +2664,9 @@ struct CKKSContext {
     }
 
     Ctx eval_bootstrap_iter(const Ctx& ct, uint32_t numIterations = 1, uint32_t precision = 0) {
+        // BTS_RAISE_VARIANT=k (harness experiments only): run this bootstrap on the route's raise variant k
+        static const int raise_variant = [] { const char* e = std::getenv("BTS_RAISE_VARIANT"); return e && *e ? std::atoi(e) : 0; }();
+        RaiseScope rs(*this, raise_variant);
         Ctx y = cc->EvalBootstrap(ct, /*numIterations=*/1, /*precision=*/0);
         ++total_bootstraps;
         if (numIterations <= 1) {
@@ -2446,15 +2708,15 @@ struct CKKSContext {
         if (level_of(ct) < level_limit()) {
             return;
         }
-        if (placement_plan_enabled && !graph_scope_active()) {
+        if (placement_plan_enabled && (!graph_scope_active() || graph_scope_strict)) {
             // A ceiling-level ct the plan PREDICTED is not divergence: a planned
             // trajectory may legally touch level_limit when the next planned op
             // is the bootstrap itself (in the capture the auto fired here; the
             // cut carries it as the following deliberate/placement, e.g. the
             // fresh_recip deliberate after the GS chain). Only an UNPREDICTED
-            // ceiling is a plan/run divergence.
+            // ceiling is a plan/run divergence; nor is a shallower one (a PLAN_STEP_LANDING floor leaves headroom).
             auto it = expected_levels.find(var_for_ct(ct));
-            if (it != expected_levels.end() && it->second == level_of(ct)) {
+            if (it != expected_levels.end() && static_cast<int>(level_of(ct)) <= static_cast<int>(it->second)) {
                 return;
             }
             ++unplanned_bootstrap_count;
@@ -2476,7 +2738,8 @@ struct CKKSContext {
     }
 
     void inplace_add(Ctx& ct, const Ctx& other) {
-        const packtag::PackTag _tg = packtag::t_add(tag_of_ct(ct), tag_of_ct(other));
+        const packtag::PackTag _ta = tag_of_ct(ct), _tb = tag_of_ct(other);
+        const packtag::PackTag _tg = conj_pair(packtag::t_add(_ta, _tb), ct.get(), other.get(), _ta, _tb, false);
         const int in_a_level = level_for_ct(ct);
         const int in_b_level = level_for_ct(other);
         const std::string in_a = var_for_ct(ct);
@@ -2528,7 +2791,8 @@ struct CKKSContext {
     }
 
     Ctx add(const Ctx& ct, const Ctx& other) {
-        const packtag::PackTag _tg = packtag::t_add(tag_of_ct(ct), tag_of_ct(other));
+        const packtag::PackTag _ta = tag_of_ct(ct), _tb = tag_of_ct(other);
+        const packtag::PackTag _tg = conj_pair(packtag::t_add(_ta, _tb), ct.get(), other.get(), _ta, _tb, false);
 
         const int in_a_level = level_for_ct(ct);
         const int in_b_level = level_for_ct(other);
@@ -2584,7 +2848,8 @@ struct CKKSContext {
     }
 
     Ctx sub(const Ctx& ct, const Ctx& other) {
-        const packtag::PackTag _tg = packtag::t_add(tag_of_ct(ct), tag_of_ct(other));
+        const packtag::PackTag _ta = tag_of_ct(ct), _tb = tag_of_ct(other);
+        const packtag::PackTag _tg = conj_pair(packtag::t_add(_ta, _tb), ct.get(), other.get(), _ta, _tb, true);
 
         const int in_a_level = level_for_ct(ct);
         const int in_b_level = level_for_ct(other);
@@ -2641,7 +2906,8 @@ struct CKKSContext {
     }
 
     void inplace_sub(Ctx& ct, const Ctx& other) {
-        const packtag::PackTag _tg = packtag::t_add(tag_of_ct(ct), tag_of_ct(other));
+        const packtag::PackTag _ta = tag_of_ct(ct), _tb = tag_of_ct(other);
+        const packtag::PackTag _tg = conj_pair(packtag::t_add(_ta, _tb), ct.get(), other.get(), _ta, _tb, true);
         
         const int in_a_level = level_for_ct(ct);
         const int in_b_level = level_for_ct(other);
@@ -3007,8 +3273,48 @@ struct CKKSContext {
         return outs;
     }
 
+    // Whether every step has a loaded rotation key (in any of its equivalent forms: s, s mod slots, s mod slots - slots).
+    bool has_rot_keys(const std::vector<int32_t>& steps) const {
+        const auto& a = cc->rotation_indexes;
+        const int64_t n = static_cast<int64_t>(cc->GetRingDimension() / 2);
+        auto has = [&](int64_t v) { return std::find(a.begin(), a.end(), static_cast<int32_t>(v)) != a.end(); };
+        for (int32_t s : steps) {
+            if (s == 0) continue;
+            const int64_t m = ((static_cast<int64_t>(s) % n) + n) % n;
+            if (!has(s) && !has(m) && !has(m - n)) return false;
+        }
+        return true;
+    }
+
+    // a + sum_k rot(a, steps[k]) from one hoisted decomposition, summed in the extended basis with ONE ModDown: a
+    // radix group of a rotate-and-sum ladder (LADDER_RADIX_BITS, src/bindings/ops.cu). One recorded node,
+    // "rotate_sum" (level- and degree-neutral like a rotation).
+    Ctx rotate_sum(const Ctx& ct, const std::vector<int32_t>& steps) {
+        // the pack tag the rung-by-rung ladder produces (x <- x + rot(x, g) per rung; the rungs are the steps
+        // 2^i - 1 of the group), set before the node is recorded and before a planned refresh can fire on it
+        packtag::PackTag _tg = tag_of_ct(ct);
+        for (size_t i = 0; ((size_t(1) << i) - 1) < steps.size(); ++i)
+            _tg = packtag::t_add(_tg, packtag::t_rotate(_tg, steps[(size_t(1) << i) - 1]));
+        const int in_a_level = level_for_ct(ct);
+        if (!has_rot_keys(steps)) throw std::runtime_error("rotate_sum: a step has no loaded rotation key");
+        const std::string in_a = var_for_ct(ct);
+        std::string in_b = "rot(";
+        for (size_t i = 0; i < steps.size(); ++i) in_b += (i ? "," : "") + std::to_string(steps[i]);
+        in_b += ")";
+        Ctx out_ct = cc->EvalRotateSumHoisted(ct, steps);
+        tag_ct(out_ct, _tg);
+        const std::string out = set_new_var_for_ct(out_ct);
+        const int out_level = level_for_ct(out_ct);
+        record_primitive("rotate_sum", {in_a, in_b}, out, {in_a_level, -1}, out_level, out_ct);
+        maybe_apply_planned_bootstrap_after(out, out_ct);
+        verify_expected_level(out, "rotate_sum", level_of(out_ct));
+        tag_ct(out_ct, _tg);
+        return out_ct;
+    }
+
     Ctx conjugate(const Ctx& ct) {
-        const packtag::PackTag _tg = packtag::t_conjugate(tag_of_ct(ct));
+        packtag::PackTag _tg = packtag::t_conjugate(tag_of_ct(ct));
+        _tg.conj_of = ct.get();
 
         const int in_a_level = level_for_ct(ct);
         const std::string in_a = var_for_ct(ct);
@@ -3208,11 +3514,22 @@ struct CKKSContext {
         maybe_apply_planned_bootstrap_after(out, ct);
     }
 
+    // A refresh made outside the recorded ops (the PCMM): recorded as a deliberate bootstrap of `ins`, tag reset.
+    void record_external_bootstrap(Ctx& ct, const std::vector<std::string>& ins, const std::vector<int>& in_levels) {
+        ++total_bootstraps;
+        const std::string out = set_new_var_for_ct(ct);
+        tag_ct(ct, packtag::PackTag{});
+        record_primitive("deliberate_bootstrap", ins, out, in_levels, level_for_ct(ct), ct);
+        maybe_apply_planned_bootstrap_after(out, ct);
+    }
+    std::string var_name(const Ctx& ct) { return var_for_ct(ct); }
+
     void drop_to_level(Ctx& ct, int target_level) {
         const int cur = level_for_ct(ct);
-        if (target_level <= cur) return;
         const std::string in_a = var_for_ct(ct);
-        cc->DropToLevel(ct, static_cast<uint32_t>(target_level));
+        // recorded even when it is a no-op, so the names after it match the capture's
+        if (target_level > cur)
+            cc->DropToLevel(ct, static_cast<uint32_t>(target_level));
         const std::string out = set_new_var_for_ct(ct);
         record_primitive("level_reduce", {in_a}, out, {cur}, level_for_ct(ct), ct);
         maybe_apply_planned_bootstrap_after(out, ct);
@@ -3224,7 +3541,8 @@ struct CKKSContext {
     PackedCtx add(const PackedCtx& a, const PackedCtx& b) {
         check_packing(a.packing, b.packing);
         slotlayout::check_binary(a.ct, b.ct, "add");
-        return slotlayout::keep(a.ct, b.ct, tagged(add(a.ct, b.ct), a.packing, packtag::t_add(a.tag, b.tag)));
+        return slotlayout::keep(a.ct, b.ct, tagged(add(a.ct, b.ct), a.packing,
+                                                   conj_pair(packtag::t_add(a.tag, b.tag), a.ct.get(), b.ct.get(), a.tag, b.tag, false)));
     }
     // ct(+/x)pt: the ordinary algebra applies once the plaintext is tagged — identical tags
     // give lcm(P,P)=P and union/intersect of identical supports, i.e. the result keeps the
@@ -3241,7 +3559,8 @@ struct CKKSContext {
         check_packing(a.packing, b.packing);
         slotlayout::check_binary(a.ct, b.ct, "sub");
         // t_add is the sub rule too: period lcm + support union — sign is irrelevant.
-        return slotlayout::keep(a.ct, b.ct, tagged(sub(a.ct, b.ct), a.packing, packtag::t_add(a.tag, b.tag)));
+        return slotlayout::keep(a.ct, b.ct, tagged(sub(a.ct, b.ct), a.packing,
+                                                   conj_pair(packtag::t_add(a.tag, b.tag), a.ct.get(), b.ct.get(), a.tag, b.tag, true)));
     }
     PackedCtx sub(const PackedCtx& a, Ptx& pt)      { return slotlayout::keep(a.ct, tagged(sub(a.ct, pt),     a.packing, packtag::t_add(a.tag, tag_of(pt)))); }
     PackedCtx sub(const PackedCtx& a, double scalar){ return slotlayout::keep(a.ct, tagged(sub(a.ct, scalar), a.packing, packtag::t_add_scalar(a.tag, scalar))); }
@@ -3280,7 +3599,382 @@ struct CKKSContext {
         mult_add_many(res.ct, v_raw, s_raw);
         res.tag = tag_of_ct(res.ct);   // the Ctx-level replay updated the registry tag per lane
     }
+    // ---- Streamed-weight inner sum ----
+    // acc = Σ_i cts[i] * encode(vals[i]) with every plaintext encoded on the device at its
+    // ciphertext's level and folded into ONE accumulator (EvalMultPtSumEncode): no host
+    // plaintext objects, no per-product ciphertexts. The serial loop's node stream (mult, then
+    // per further term a phantom mult + add_inplace) is replayed with the loop's names, tags
+    // and plan verification, so a plan cut on either form fits the other. Usable when it cannot
+    // change observable semantics: not during a capture that records magnitudes op by op, every
+    // input NoiseLevel 1 at one level below the refresh ceiling, and no planned refresh on any
+    // name but the final accumulator's.
+    // planned mode with the safety net as a check only (maybe_bootstrap throws or returns, never refreshes)
+    bool planned_strict() const { return placement_plan_enabled && (!graph_scope_active() || graph_scope_strict); }
+    // maybe_bootstrap's planned-mode check for a product the fused sum never materializes
+    void planned_ceiling_check(const std::string& name, int level) {
+        if (auto_bts_suppressed || !planned_strict() || level < level_limit()) return;
+        auto it = expected_levels.find(name);
+        if (it != expected_levels.end() && level <= static_cast<int>(it->second)) return;
+        ++unplanned_bootstrap_count;
+        throw fhe::PlanError("[plan_bts_error] unplanned safety-net bootstrap at step=" + step_path() + " var=" + name +
+                             " level=" + std::to_string(level) + " (planned mode is strict)");
+    }
+    bool mult_pt_sum_usable(const std::vector<PackedCtx>& cts) {
+        // a capture records magnitudes op by op, except a structure-only one (magnitude_suppressed: the numpy fake
+        // fills them), which the replay records node for node
+        if ((graph_enabled() && !magnitude_capture_suppressed) || cts.empty()) return false;
+        const int lvl = level_for_ct(cts.front().ct);
+        for (const auto& c : cts)
+            if (!c.ct || c.ct->GetNoiseScaleDeg() != 1 || level_for_ct(c.ct) != lvl) return false;
+        // at the ceiling the loop's products would take the safety-net refresh, except in strict planned mode, where
+        // that net only checks the plan's prediction (replay_pt_sum repeats the check)
+        if (!auto_bts_suppressed && !planned_strict() && level_of(cts.front().ct) >= level_limit()) return false;
+        if (placement_plan_enabled && naming_active()) {
+            const size_t n2 = 2 * cts.size() - 1;
+            for (size_t k = 1; k < n2; ++k) {
+                const std::string name = graph_var_scope.empty()
+                    ? "v_" + std::to_string(graph_ct_counter + k)
+                    : (graph_var_scope + "_" + std::to_string(graph_var_scope_counter + k));
+                if (placement_after.find(name) != placement_after.end()) return false;
+            }
+        }
+        return true;
+    }
+    // The same from n raw rows of `width` values (dtype 0 float32, 1 float64, 2 complex64, 3 complex128).
+    PackedCtx mult_pt_sum_raw(const std::vector<PackedCtx>& cts, const void* rows, int dtype, size_t width) {
+        static const bool timing = std::getenv("PT_SUM_TIMING") != nullptr;
+        static double t_tag = 0; static long n_t = 0;
+        std::vector<Ctx> raw;
+        raw.reserve(cts.size());
+        for (const auto& c : cts) raw.push_back(c.ct);
+        Ctx acc = cc->EvalMultPtSumEncodeRaw(raw, rows, dtype, width);
+        const auto tb = std::chrono::steady_clock::now();
+        const bool cplx = dtype >= 2;
+        const size_t elem = (dtype == 0 ? 4 : dtype == 1 || dtype == 2 ? 8 : 16);
+        auto pt_tag = [&](size_t i) {
+            const char* row = static_cast<const char*>(rows) + i * width * elem;
+            PackSignature sig;
+            if (dtype == 0) sig = analyze_tag_fields((const float*)row, (const float*)nullptr, (int)width, 1);
+            else if (dtype == 1) sig = analyze_tag_fields((const double*)row, (const double*)nullptr, (int)width, 1);
+            else if (dtype == 2) sig = analyze_tag_fields((const float*)row, (const float*)row + 1, (int)width, 2);
+            else sig = analyze_tag_fields((const double*)row, (const double*)row + 1, (int)width, 2);
+            // rows shorter than the slot count are zero-padded, as the loop's resize does
+            const int slots = static_cast<int>(width) > 0 ? std::max<int>(sig.slots, 0) : 0;
+            packtag::PackTag t = packtag::from_signature(slots, sig.period, sig.live_exact, sig.stride_exact,
+                                                         sig.window_exact, sig.offset_exact);
+            t.field = (cplx && sig.im_amax != 0.0) ? (sig.amax != 0.0 ? packtag::Field::Complex : packtag::Field::Imag)
+                                                   : packtag::Field::Real;
+            return t;
+        };
+        replay_pt_sum(cts, acc, pt_tag);
+        if (timing) {
+            t_tag += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - tb).count();
+            if (++n_t % 50 == 0) std::cerr << "[pt_sum_timing raw] tags+replay " << t_tag / n_t << " ms/call\n";
+        }
+        return tagged(acc, cts.front().packing, tag_of_ct(acc));
+    }
+    // The same from plaintext COEFFICIENT rows (EvalMultCoeffRowsSum): rows[r * stride + k] float32 is plaintext
+    // r's coefficient k divided by the level's scaling factor, device-accessible (pinned host or device memory);
+    // tags[r] = (slots, period, live, stride, window, offset, field 0 real / 1 imag / 2 complex) is the tag the
+    // loop's encode of the plaintext's slot values would carry (pt_tag_fields).
+    PackedCtx mult_coeff_sum(const std::vector<PackedCtx>& cts, const float* rows, size_t stride, const int32_t* tags) {
+        static std::once_flag announced;
+        std::call_once(announced, [&] {
+            std::cerr << "[coeff_sum] active: weight inner sums from coefficient rows, n=" << cts.size() << "\n";
+        });
+        std::vector<Ctx> raw;
+        raw.reserve(cts.size());
+        for (const auto& c : cts) raw.push_back(c.ct);
+        Ctx acc = cc->EvalMultCoeffRowsSum(raw, rows, stride);
+        auto pt_tag = [&](size_t i) {
+            const int32_t* t = tags + 7 * i;
+            packtag::PackTag tg = packtag::from_signature(t[0], t[1], t[2], t[3], t[4], t[5]);
+            tg.field = t[6] == 2 ? packtag::Field::Complex : t[6] == 1 ? packtag::Field::Imag : packtag::Field::Real;
+            return tg;
+        };
+        replay_pt_sum(cts, acc, pt_tag);
+        return tagged(acc, cts.front().packing, tag_of_ct(acc));
+    }
+    unsigned long long coeff_rows_overflows() const { return cc->CoeffRowsOverflows(); }
+    // ---- Named-weight inner sum (LIN_PT_DOT) ----
+    // acc = Σ_i cts[i] * pts[i] over already-encoded plaintexts (the resident slot weights) in one fused kernel
+    // (EvalMultPtSum). The loop's node stream (mult, then per further term a phantom mult + add_inplace) is replayed with
+    // the plaintexts' own vars and tags, so plans and level checks see the loop. Usable where mult_pt_sum is and every
+    // plaintext sits at the ciphertexts' level (the loop's products then make no adjustment).
+    bool mult_slot_pt_sum_usable(const std::vector<PackedCtx>& cts, const std::vector<Ptx>& pts) {
+        if (pts.size() != cts.size() || !mult_pt_sum_usable(cts)) return false;
+        const int lvl = level_for_ct(cts.front().ct);
+        for (const auto& pt : pts)
+            if (!pt || level_for_pt(pt) != lvl) return false;
+        return true;
+    }
+    PackedCtx mult_slot_pt_sum(const std::vector<PackedCtx>& cts, std::vector<Ptx>& pts) {
+        static std::once_flag announced;
+        std::call_once(announced, [&] {
+            std::cerr << "[pt_dot] active: named-weight inner sums in one kernel, n=" << cts.size() << "\n";
+        });
+        std::vector<Ctx> raw;
+        raw.reserve(cts.size());
+        for (const auto& c : cts) raw.push_back(c.ct);
+        Ctx acc = cc->EvalMultPtSum(raw, pts);
+        replay_pt_sum(cts, acc, [&](size_t i) { return tag_of(pts[i]); }, [&](size_t i) { return var_for_pt(pts[i]); });
+        return slotlayout::keep(cts.front().ct, tagged(acc, cts.front().packing, tag_of_ct(acc)));
+    }
+    // the serial loop's node stream for an inner sum computed fused (see mult_pt_sum)
+    template <class TagFn>
+    void replay_pt_sum(const std::vector<PackedCtx>& cts, Ctx& acc, TagFn pt_tag) {
+        replay_pt_sum(cts, acc, pt_tag, [&](size_t) { return naming_active() ? next_pt("pt") : std::string("x"); });
+    }
+    // the same with the plaintexts' vars from `pt_var` (a named weight's own var: var_for_pt)
+    template <class TagFn, class VarFn>
+    void replay_pt_sum(const std::vector<PackedCtx>& cts, Ctx& acc, TagFn pt_tag, VarFn pt_var) {
+        for (size_t i = 0; i < cts.size(); ++i) {
+            const Ctx& x = cts[i].ct;
+            const packtag::PackTag prod_tg = packtag::t_mult(tag_of_ct(x), pt_tag(i));
+            const int in_x_level = level_for_ct(x);
+            const std::string in_x = var_for_ct(x);
+            const std::string in_pt = pt_var(i);
+            if (op_tally_active) ++op_tally["mult_pt"];
+            if (i == 0) {   // the first product IS the accumulator
+                tag_ct(acc, prod_tg);
+                const std::string out = set_new_var_for_ct(acc);
+                record_primitive("mult", {in_x, in_pt}, out, {in_x_level, in_x_level}, level_for_ct(acc), acc);
+                maybe_apply_planned_bootstrap_after(out, acc);
+                verify_expected_level(out, "mult", level_of(acc));
+                planned_ceiling_check(out, level_of(acc));
+                continue;
+            }
+            const std::string tmp_var = graph_var_scope.empty()
+                ? next_ct("v")
+                : (graph_var_scope + "_" + std::to_string(++graph_var_scope_counter));
+            record_primitive("mult", {in_x, in_pt}, {in_x_level, in_x_level}, tmp_var);
+            verify_expected_level(tmp_var, "mult", level_of(x));
+            planned_ceiling_check(tmp_var, level_of(acc));
+            const packtag::PackTag acc_tg = packtag::t_add(tag_of_ct(acc), prod_tg);
+            const int in_r_level = level_for_ct(acc);
+            const std::string in_r = var_for_ct(acc);
+            tag_ct(acc, acc_tg);
+            const std::string out = set_new_var_for_ct(acc);
+            record_primitive("add_inplace", {in_r, tmp_var}, out, {in_r_level, in_x_level}, level_for_ct(acc), acc);
+            maybe_apply_planned_bootstrap_after(out, acc);
+            verify_expected_level(out, "add_inplace", level_of(acc));
+            tag_ct(acc, acc_tg);
+        }
+    }
+    template <class V>
+    PackedCtx mult_pt_sum(const std::vector<PackedCtx>& cts, const std::vector<std::vector<V>>& vals) {
+        static std::once_flag announced;
+        std::call_once(announced, [&] {
+            std::cerr << "[pt_sum] active: device-encoded weight inner sums, n=" << cts.size() << "\n";
+        });
+        std::vector<Ctx> raw;
+        raw.reserve(cts.size());
+        for (const auto& c : cts) raw.push_back(c.ct);
+        std::vector<std::vector<std::complex<double>>> cv(vals.size());
+        for (size_t i = 0; i < vals.size(); ++i) cv[i].assign(vals[i].begin(), vals[i].end());
+        static const bool timing = std::getenv("PT_SUM_TIMING") != nullptr;
+        static double t_cv = 0, t_tag = 0; static long n_t = 0;
+        const auto ta = std::chrono::steady_clock::now();
+        Ctx acc = cc->EvalMultPtSumEncode(raw, cv);
+        const auto tb = std::chrono::steady_clock::now();
+        // the plaintexts' tags, as tag_plaintext computes them for the loop's encodes
+        auto pt_tag = [&](size_t i) {
+            const PackSignature sig = analyze_packing(vals[i]);
+            packtag::PackTag t = packtag::from_signature(sig.slots, sig.period, sig.live_exact, sig.stride_exact,
+                                                         sig.window_exact, sig.offset_exact);
+            bool im = false;
+            if constexpr (std::is_same_v<V, std::complex<double>>)
+                for (const auto& z : vals[i]) im |= z.imag() != 0.0;
+            t.field = im ? packtag::Field::Complex : packtag::Field::Real;
+            return t;
+        };
+        for (size_t i = 0; i < cts.size(); ++i) {
+            const Ctx& x = cts[i].ct;
+            const packtag::PackTag prod_tg = packtag::t_mult(tag_of_ct(x), pt_tag(i));
+            const int in_x_level = level_for_ct(x);
+            const std::string in_x = var_for_ct(x);
+            const std::string in_pt = naming_active() ? next_pt("pt") : "x";
+            if (op_tally_active) ++op_tally["mult_pt"];
+            if (i == 0) {   // the first product IS the accumulator
+                tag_ct(acc, prod_tg);
+                const std::string out = set_new_var_for_ct(acc);
+                record_primitive("mult", {in_x, in_pt}, out, {in_x_level, in_x_level}, level_for_ct(acc), acc);
+                maybe_apply_planned_bootstrap_after(out, acc);
+                verify_expected_level(out, "mult", level_of(acc));
+                planned_ceiling_check(out, level_of(acc));
+                continue;
+            }
+            const std::string tmp_var = graph_var_scope.empty()
+                ? next_ct("v")
+                : (graph_var_scope + "_" + std::to_string(++graph_var_scope_counter));
+            record_primitive("mult", {in_x, in_pt}, {in_x_level, in_x_level}, tmp_var);
+            verify_expected_level(tmp_var, "mult", level_of(x));
+            planned_ceiling_check(tmp_var, level_of(acc));
+            const packtag::PackTag acc_tg = packtag::t_add(tag_of_ct(acc), prod_tg);
+            const int in_r_level = level_for_ct(acc);
+            const std::string in_r = var_for_ct(acc);
+            tag_ct(acc, acc_tg);
+            const std::string out = set_new_var_for_ct(acc);
+            record_primitive("add_inplace", {in_r, tmp_var}, out, {in_r_level, in_x_level}, level_for_ct(acc), acc);
+            maybe_apply_planned_bootstrap_after(out, acc);
+            verify_expected_level(out, "add_inplace", level_of(acc));
+            tag_ct(acc, acc_tg);
+        }
+        if (timing) {
+            const auto tc = std::chrono::steady_clock::now();
+            t_tag += std::chrono::duration<double, std::milli>(tc - tb).count();
+            if (++n_t % 50 == 0)
+                std::cerr << "[pt_sum_timing] tags+replay " << t_tag / n_t << " ms/call\n";
+            (void)ta; (void)t_cv;
+        }
+        return tagged(acc, cts.front().packing, tag_of_ct(acc));
+    }
     PackedCtx mult(const PackedCtx& a, double scalar) { return slotlayout::keep(a.ct, tagged(mult(a.ct, scalar), a.packing, packtag::t_mult_scalar(a.tag, scalar))); }
+
+    // A traced straight-line program (perseus.impl.poly cheb programs) on the API calls the per-op path makes, without
+    // its per-op bookkeeping. regs = inputs, then one register per instruction (realize: none). Instructions
+    // (opcode, args): 0 square a | 1 mult a b | 2 add a b | 3 sub a b | 4 add a c | 5 mult a c | 6 wsum k a_1..a_k
+    // c_1..c_k | 7 realize a. Var names: one per op, 2 k - 1 per wsum (the per-op path's); returns {} (caller runs
+    // the per-op path) when a graph is recorded or a plan entry names one of them.
+    std::vector<PackedCtx> run_program(const std::vector<PackedCtx>& in, const std::vector<std::vector<double>>& prog,
+                                       const std::vector<int>& outs) {
+        if (graph_enabled() || cc->devices.empty() || in.empty())
+            return {};
+        size_t names = 0, regs = in.size();
+        for (const auto& ins : prog) {
+            const int op = (int)ins.at(0);
+            if (op < 0 || op > 7)
+                throw std::invalid_argument("run_program: unknown opcode " + std::to_string(op));
+            names += op == 7 ? 0 : op == 6 ? 2 * (size_t)ins.at(1) - 1 : 1;
+            regs += op == 7 ? 0 : 1;
+        }
+        if (outs.size() != 1 || (size_t)outs[0] + 1 != regs || regs == in.size())
+            return {};          // one output, the last op's: the only register the per-op path names last
+        if (naming_active()) {
+            for (size_t k = 1; k <= names; ++k) {
+                const std::string nm = graph_var_scope.empty()
+                    ? "v_" + std::to_string(graph_ct_counter + k)
+                    : graph_var_scope + "_" + std::to_string(graph_var_scope_counter + k);
+                if (placement_after.count(nm) || plan_rescale_after.count(nm))
+                    return {};
+            }
+        }
+        std::vector<Ctx> r;
+        std::vector<packtag::PackTag> tg;
+        for (const auto& p : in) { r.push_back(p.ct); tg.push_back(p.tag); }
+        auto dev = [&](Ctx& c) {
+            cc->LoadCiphertext(c);
+            return std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(cc->GetDeviceCiphertext(c->gpu)).get();
+        };
+        for (const auto& ins : prog) {
+            const int op = (int)ins.at(0);
+            auto R = [&](size_t i) -> Ctx& { return r.at((size_t)ins.at(i)); };
+            auto T = [&](size_t i) { return tg.at((size_t)ins.at(i)); };
+            switch (op) {
+            case 0: r.push_back(cc->EvalSquare(R(1))); tg.push_back(packtag::t_square(T(1))); break;
+            case 1: { Ctx o = cc->EvalMult(R(1), R(2)); auto t = packtag::t_mult(T(1), T(2)); r.push_back(o); tg.push_back(t); break; }
+            case 2: case 3: {
+                Ctx o = op == 2 ? cc->EvalAdd(R(1), R(2)) : cc->EvalSub(R(1), R(2));
+                auto t = conj_pair(packtag::t_add(T(1), T(2)), R(1).get(), R(2).get(), T(1), T(2), op == 3);
+                r.push_back(o); tg.push_back(t); break;
+            }
+            case 4: { Ctx o = cc->EvalAdd(R(1), ins.at(2)); auto t = packtag::t_add_scalar(T(1), ins.at(2)); r.push_back(o); tg.push_back(t); break; }
+            case 5: { Ctx o = cc->EvalMult(R(1), ins.at(2)); auto t = packtag::t_mult_scalar(T(1), ins.at(2)); r.push_back(o); tg.push_back(t); break; }
+            case 6: {
+                const size_t k = (size_t)ins.at(1);
+                std::vector<FIDESlib::CKKS::Ciphertext*> ds;
+                std::vector<double> ws;
+                int lv = INT_MAX;
+                packtag::PackTag t = packtag::t_mult_scalar(T(2), ins.at(2 + k));
+                for (size_t j = 0; j < k; ++j) {
+                    Ctx& c = R(2 + j);
+                    cc->LoadCiphertext(c);
+                    if (c->GetNoiseScaleDeg() == 2) cc->RescaleInPlace(c);
+                    auto* d = dev(c);
+                    lv = std::min(lv, d->getLevel());
+                    ds.push_back(d);
+                    ws.push_back(ins.at(2 + k + j));
+                    if (j) t = packtag::t_add(t, packtag::t_mult_scalar(T(2 + j), ins.at(2 + k + j)));
+                }
+                Ctx o = R(2)->Clone();
+                auto* od = dev(o);
+                if (od->getLevel() > lv) od->dropToLevel(lv);
+                od->evalLinearWSumMutable((uint32_t)k, ds, ws);
+                r.push_back(o); tg.push_back(t); break;
+            }
+            case 7: { Ctx& c = R(1); cc->LoadCiphertext(c); if (c->GetNoiseScaleDeg() == 2) cc->RescaleInPlace(c); break; }
+            default: throw std::invalid_argument("run_program: unknown opcode " + std::to_string(op));
+            }
+            if (op != 7) tag_ct(r.back(), tg.back());
+        }
+        if (naming_active()) {
+            if (graph_var_scope.empty()) graph_ct_counter += names;
+            else graph_var_scope_counter += names;
+        }
+        std::vector<PackedCtx> res;
+        for (int i : outs) {
+            Ctx& c = r.at((size_t)i);
+            if (naming_active()) {   // the program's last name is the output's (one output per program)
+                const std::string nm = graph_var_scope.empty() ? "v_" + std::to_string(graph_ct_counter)
+                                                               : graph_var_scope + "_" + std::to_string(graph_var_scope_counter);
+                ct_vars[static_cast<const void*>(c.get())] = nm;
+                maybe_apply_planned_bootstrap_after(nm, c);
+                verify_expected_level(nm, "program", level_of(c));
+            }
+            res.push_back(slotlayout::keep(in.at(0).ct, tagged(c, in.at(0).packing, tg.at((size_t)i))));
+        }
+        return res;
+    }
+
+    // sum_i ts[i] cs[i]: the loop mult(t, c) + inplace_add, or (IMPL_WSUM=1, no graph recorded, no plan entry on the
+    // loop's intermediates) one FIDESlib evalLinearWSum. The fused path rescales deg-2 inputs in place (value-preserving,
+    // what multScalar does on a copy) and consumes the loop's 2n - 1 var names.
+    PackedCtx wsum_scalar(const std::vector<PackedCtx>& ts, const std::vector<double>& cs) {
+        const size_t n = ts.size();
+        auto loop = [&] {
+            PackedCtx r = mult(ts[0], cs[0]);
+            for (size_t i = 1; i < n; ++i) inplace_add(r, mult(ts[i], cs[i]));
+            return r;
+        };
+        static const bool on = [] { const char* e = std::getenv("IMPL_WSUM"); return e && std::atoi(e) > 0; }();
+        if (!on || n < 2 || graph_enabled() || cc->devices.empty())
+            return loop();
+        const size_t names = 2 * n - 1;
+        if (naming_active()) {
+            for (size_t k = 1; k <= names; ++k) {
+                const std::string nm = graph_var_scope.empty()
+                    ? "v_" + std::to_string(graph_ct_counter + k)
+                    : graph_var_scope + "_" + std::to_string(graph_var_scope_counter + k);
+                if (placement_after.count(nm) || plan_rescale_after.count(nm))
+                    return loop();
+            }
+        }
+        std::vector<FIDESlib::CKKS::Ciphertext*> dev;
+        int lv = INT_MAX;
+        for (const auto& t : ts) {
+            Ctx c = t.ct;
+            cc->LoadCiphertext(c);
+            if (c->GetNoiseScaleDeg() == 2) cc->RescaleInPlace(c);
+            auto* d = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(cc->GetDeviceCiphertext(c->gpu)).get();
+            lv = std::min(lv, d->getLevel());
+            dev.push_back(d);
+        }
+        Ctx o = ts[0].ct->Clone();
+        auto* od = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(cc->GetDeviceCiphertext(o->gpu)).get();
+        if (od->getLevel() > lv) od->dropToLevel(lv);
+        od->evalLinearWSumMutable((uint32_t)n, dev, cs);
+        packtag::PackTag tg = packtag::t_mult_scalar(ts[0].tag, cs[0]);
+        for (size_t i = 1; i < n; ++i) tg = packtag::t_add(tg, packtag::t_mult_scalar(ts[i].tag, cs[i]));
+        tag_ct(o, tg);
+        if (naming_active()) {
+            if (graph_var_scope.empty()) graph_ct_counter += names - 1;
+            else graph_var_scope_counter += names - 1;
+        }
+        const std::string out = set_new_var_for_ct(o);
+        maybe_apply_planned_bootstrap_after(out, o);
+        verify_expected_level(out, "add_inplace", level_of(o));
+        return slotlayout::keep(ts[0].ct, tagged(o, ts[0].packing, tg));
+    }
 
     // The raw inplace ops compute the proper transfer tag in the ct registry; sync the
     // PackedCtx FIELD from it afterwards so the two views never diverge. A stale field
@@ -3312,6 +4006,14 @@ struct CKKSContext {
     PackedCtx clone(const PackedCtx& a) { return slotlayout::keep(a.ct, tagged(clone(a.ct), a.packing, a.tag)); }
 
     PackedCtx rotate(const PackedCtx& a, int32_t index) { return tagged(rotate(a.ct, index), a.packing, packtag::t_rotate(a.tag, index)); }
+    // A radix group of a rotate-and-sum ladder; `rungs` are the plain ladder's gaps it replaces (the pack tag the
+    // rung-by-rung ladder would have produced: x <- x + rot(x, g) per rung).
+    PackedCtx rotate_sum(const PackedCtx& a, const std::vector<int32_t>& steps, const std::vector<int32_t>& rungs) {
+        (void)rungs;   // the Ctx-level rotate_sum derives the same rungs from the steps
+        Ctx out = rotate_sum(a.ct, steps);
+        const packtag::PackTag tg = tag_of_ct(out);
+        return slotlayout::keep(a.ct, tagged(std::move(out), a.packing, tg));
+    }
     std::vector<PackedCtx> rotate_hoisted(const PackedCtx& a, const std::vector<int32_t>& steps) {
         std::vector<Ctx> raw = rotate_hoisted(a.ct, steps);
         std::vector<PackedCtx> out;
@@ -3321,7 +4023,11 @@ struct CKKSContext {
                                  packtag::t_rotate(a.tag, steps[i])));
         return out;
     }
-    PackedCtx conjugate(const PackedCtx& a) { return slotlayout::keep(a.ct, tagged(conjugate(a.ct), a.packing, packtag::t_conjugate(a.tag))); }
+    PackedCtx conjugate(const PackedCtx& a) {
+        packtag::PackTag t = packtag::t_conjugate(a.tag);
+        t.conj_of = a.ct.get();
+        return slotlayout::keep(a.ct, tagged(conjugate(a.ct), a.packing, t));
+    }
     void inplace_rotate(PackedCtx& a, int32_t index)    { inplace_rotate(a.ct, index); a.tag = tag_of_ct(a.ct); }
 
     PackedCtx im_cleanse(const PackedCtx& a) { return add(a, conjugate(a)); }
@@ -3345,7 +4051,7 @@ struct CKKSContext {
     PackedCtx pair_pack(const PackedCtx& a_re, const PackedCtx& b_im) {
         return PackedCtx{ pair_pack(a_re.ct, b_im.ct), a_re.packing };
     }
-    PackedCtx mult_i(const PackedCtx& a) { return tagged(mult_i(a.ct), a.packing, a.tag); }
+    PackedCtx mult_i(const PackedCtx& a) { return tagged(mult_i(a.ct), a.packing, packtag::t_mult_i(a.tag)); }
 
     // Repack two independently-computed real halves (token-pair): strip the Im contamination each
     // half accrued, pack A + i*B, cancel the cleanses' 2x. Levels must already agree.
@@ -3562,19 +4268,28 @@ inline void log_ckks_params(const CC& cc, const CKKSContextOptions& o, uint32_t 
     const int num_limbs  = mult_depth + 1;
     const double logQ = o.first_mod_bits + static_cast<double>(mult_depth) * scale;   // uniform towers
 
+    // OpenFHE's HEStd_ternary table (stdlatticeparms.cpp), checked against the actual Q*P
     auto budget128 = [](int lN) -> double {
         switch (lN) { case 13: return 218; case 14: return 438; case 15: return 881;
-                      case 16: return 1761; case 17: return 3523; default: return -1.0; }
+                      case 16: return 1747; case 17: return 3523; default: return -1.0; }
     };
     const double b      = budget128(o.logN);
     const bool   sparse = (o.h_weight > 0);
+    double logQP = 0;
+    if (cc->cpu.has_value()) {
+        const auto& lcc = std::any_cast<const lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(cc->cpu);
+        auto rns = std::dynamic_pointer_cast<lbcrypto::CryptoParametersRNS>(lcc->GetCryptoParameters());
+        for (const auto& m : rns->GetElementParams()->GetParams()) logQP += std::log2(m->GetModulus().ConvertToDouble());
+        if (rns->GetParamsP())
+            for (const auto& m : rns->GetParamsP()->GetParams()) logQP += std::log2(m->GetModulus().ConvertToDouble());
+    }
 
     std::string sec;
-    if (b < 0)
+    if (b < 0 || logQP == 0)
         sec = "HEStd_128_classic enforced (budget for this logN unknown)";
     else
-        sec = "HEStd_128_classic enforced & OK (logQ " + std::to_string((long)logQ)
-            + " <= uniform-ternary budget " + std::to_string((long)b) + ")";
+        sec = std::string("HEStd_128_classic ") + (logQP <= b ? "OK" : "VIOLATED") + " (logQP "
+            + std::to_string((long)std::ceil(logQP)) + " <= uniform-ternary budget " + std::to_string((long)b) + ")";
 
     std::cerr << "[ckks_params] ===== CKKS crypto context =====\n"
               << "  logN=" << o.logN << "  ringDim=" << ring_dim << "  slots=" << slots << "\n"
@@ -3587,8 +4302,8 @@ inline void log_ckks_params(const CC& cc, const CKKSContextOptions& o, uint32_t 
               << "  correction_factor=" << o.correction_factor
               << "  bts_iters=" << o.bts_iterations << "  bts_prec=" << o.bts_precision
               << "  auto_bts_level=" << o.auto_bts_level_override << "\n"
-              << "  secret=" << (sparse ? "SPARSE_ENCAPSULATED" : "UNIFORM_TERNARY")
-              << " h=" << o.h_weight << " (OpenFHE accounts UNIFORM_TERNARY)"
+              << "  secret=" << (sparse ? "SPARSE_ENCAPSULATED (uniform ternary main key; raise under an h=32 key "
+                                          "switched in at q_0..q_{d-1}*P)" : "UNIFORM_TERNARY")
               << "  dnum=" << o.num_large_digits
               << "  complex_payload=" << o.ckks_complex_payload << "\n"
               << "  security: " << sec << "\n"
@@ -3723,7 +4438,7 @@ make_ckks_context(const CKKSContextOptions& o = {})
             uint32_t btp_slots = (bootstrap_slots == 0) ? slots : bootstrap_slots;
             // Setup is parameter-only precomputation (public): always re-run. KeyGen needs
             // the secret key: only on the keygen side. dim1={0,0} = OpenFHE's auto BSGS split.
-            cc->EvalBootstrapSetup(level_budget, {0, 0}, btp_slots, correction_factor);
+            cc->EvalBootstrapSetup(level_budget, bts_dim1_from_env(), btp_slots, correction_factor);
             if (!from_keys) cc->EvalBootstrapKeyGen(ctx->keys.secretKey, btp_slots);
             // One extra precomp + keygen per distinct requested sparse slot count (fold
             // reductions want several: e.g. 512 for the softmax denominator, 32 for the
@@ -3735,14 +4450,32 @@ make_ckks_context(const CKKSContextOptions& o = {})
                     ? level_budget : sparse_level_budget;
                 for (uint32_t s : sparse_bts_slots_list) {
                     if (s == 0 || s >= slots || !built.insert(s).second) continue;
-                    cc->EvalBootstrapSetup(slb, {0, 0}, s, correction_factor);
+                    cc->EvalBootstrapSetup(slb, bts_dim1_from_env(), s, correction_factor);
                     if (!from_keys) cc->EvalBootstrapKeyGen(ctx->keys.secretKey, s);
                 }
             }
         }
 
+        // Lever 1b (AKS, DEPRECATED 2026-10-12: slower here and insecure keygen; FIDESlib refuses it unless
+        // FIDESLIB_AKS_ALLOW_INSECURE=1): hold the sparse encapsulation secret before the GPU load reads the keys
+        if (!from_keys && enable_bootstrap) {
+            const char* e = std::getenv("FIDESLIB_AKS");
+            if (e && std::atoi(e) > 0) cc->RegenerateEncapsulationKeys(ctx->keys.secretKey);
+        }
         cc->deferred_rotation_indexes = deferred_rot_steps;
         if (!skip_gpu_load) cc->LoadContext(ctx->keys.publicKey);
+        // Lever 1b: aggregated key switching for CtS stage 0 (FIDESLIB_AKS=1, deprecated; needs FIDESLIB_BTS_SHIFT>=1).
+        if (!skip_gpu_load && !from_keys && enable_bootstrap) {
+            const char* e = std::getenv("FIDESLIB_AKS");
+            if (e && std::atoi(e) > 0) cc->LoadAksKeys(ctx->keys.secretKey);
+            const char* d = std::getenv("FIDESLIB_DIAG_SK");  // noise-flooding-free diagnostic decryptions
+            if (d && std::atoi(d) > 0) cc->LoadDiagSecret(ctx->keys.secretKey);
+        }
+        // Level-adaptive relinearization keys (FIDESLIB_LAR=1): wide digits over the idle top primes at mid levels.
+        if (!skip_gpu_load && !from_keys) {
+            const char* e = std::getenv("FIDESLIB_LAR");
+            if (e && std::atoi(e) > 0) cc->LoadLarKeys(ctx->keys.secretKey);
+        }
         // Setup-time pre-capture of cached bootstrap graphs. Inside heavy so BOTH branches
         // get it; LoadContext just ran, so the GPU context and precomputes are live. No-op
         // unless FIDESlib's graph journal is configured (FIDESLIB_BTS_GRAPH / _JOURNAL).
@@ -3760,6 +4493,8 @@ make_ckks_context(const CKKSContextOptions& o = {})
     ctx->bts_precision           = o.bts_precision;
     ctx->auto_bts_level_override = o.auto_bts_level_override;
     ctx->complex_payload         = o.ckks_complex_payload;
+    ctx->route_level_budget = o.sparse_level_budget.empty() ? o.level_budget : o.sparse_level_budget;
+    ctx->route_correction_factor = o.correction_factor;
     for (uint32_t s : o.sparse_bts_slots_list)
         if (s > 0 && s < slots) ctx->sparse_precomp_slots.insert(s);
     // Routing default = the FIRST configured entry (what SparseBtsScope arms).

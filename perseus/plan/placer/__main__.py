@@ -61,6 +61,8 @@ def main() -> None:
                    help="how far a prescale may reach when one is allowed")
     p.add_argument("--mag-safety", type=float,
                    help="margin kappa on every magnitude the graph recorded")
+    p.add_argument("--slim-cubic", type=float, dest="slim_cubic",
+                   help="StC-first order: price each site's sine cubic (2 pi m 2^-CF)^2/6 x this (1 = measured)")
     p.add_argument("--emit-offset", action="store_true", default=None,
                    help="emit the offset transform alongside each placement")
     p.add_argument("--no-prescale", action="store_false", default=None,
@@ -72,6 +74,25 @@ def main() -> None:
                    help="max bits of restore amplification a prescale may spend")
     p.add_argument("--quality-weight", type=float,
                    help="the pre-score weight in the cut (0 = count-first, default)")
+    p.add_argument("--depth-weight", type=float,
+                   help="price each cut site by how many levels its refresh restores, blended "
+                        "by this weight (0 = count-only, the default and what every shipped "
+                        "plan uses)")
+    p.add_argument("--depth-form", type=str, choices=["ratio", "linear", "ab", "ms"],
+                   help="how --depth-weight prices a site: ratio = budget/restored, "
+                        "linear = the levels not regained, ab = landing yield plus wasted runway")
+    p.add_argument("--depth-a", type=float, help="ab form: landing-yield coefficient (default 1)")
+    p.add_argument("--depth-b", type=float, help="ab form: early-refresh coefficient (default 1)")
+    p.add_argument("--bts-ms", type=str,
+                   help="measured bootstrap latency per route for --depth-form ms, "
+                        "e.g. 0:28.77,512:18.59,1:16.10 (0 = dense; this is the 32-bit "
+                        "chain, the 64-bit one is 0:36.69,512:23.59,1:19.95)")
+    p.add_argument("--ms-discount", type=float,
+                   help="how much of a sparse route's extra restored runway to credit back "
+                        "(0 = pure milliseconds, 1 = milliseconds per unit of runway, default)")
+    p.add_argument("--level-weight", type=float,
+                   help="charge a refresh for the depth of its input: capacity is scaled by "
+                        "1 + w x depth/envelope (0 = off, default)")
     p.add_argument("--sparse-slots", type=str,
                    help="runtime sparse precomps, e.g. 512,1")
     p.add_argument("--sparse-bts-out", type=str,
@@ -96,6 +117,19 @@ def main() -> None:
                    dest="dissolve_hints",
                    help="explicitly bind each hint's threshold decision into the plan "
                         "(the default; kept so scripts can state it)")
+    p.add_argument("--raise-drop-max", dest="raise_drop_max", type=int, default=None,
+                   help="level-aware ModRaise: max composite levels a placed site may raise short of the chain top (0 = off)")
+    p.add_argument("--raise-drop-landing-max", dest="raise_drop_landing_max", type=int, default=None,
+                   help="deepest absolute landing for a raise-dropped site (default 44 = AUTO_BTS_LEVEL - unit)")
+    p.add_argument("--raise-drop-routes", dest="raise_drop_routes", type=lambda s: tuple(int(x) for x in s.split(",") if x), default=None,
+                   help="routes (slot counts, 0 = dense) that may take a raise drop; default 0,512")
+    p.add_argument("--real-route", dest="real_route", action="store_true", default=None,
+                   help="refresh dense sites whose slots the capture tagged real with one EvalMod chain "
+                        "(plan 'real_route'; run with FIDESLIB_BTS_REAL=1)")
+    p.add_argument("--raise-drop-set", dest="raise_drop_set", type=lambda s: tuple(int(x) for x in s.split(",") if x), default=None,
+                   help="the drops the runtime builds variants for (FIDESLIB_BTS_RAISE_DROPS), e.g. 1,3,5: a site's drop is rounded down to one of them")
+    p.add_argument("--raise-drop-env-rule", dest="raise_drop_env_rule", type=str, default=None,
+                   choices=["effective", "nominal"], help="envelope rule for the raise-drop slack")
     p.add_argument("--site-bts-out-file", dest="site_bts_out_file", type=str,
                    help="JSON {block_dir: {var: absolute_out_level}} of measured "
                         "per-site refresh landings (landing feedback)")
@@ -103,6 +137,12 @@ def main() -> None:
                    dest="rescale_opt",
                    help="phase 2: search planted-realize anchors at deg-raising joins, "
                         "keep them when the re-cut plan needs no more bootstraps")
+    p.add_argument("--shared-realize", action="store_true", default=None, dest="shared_realize",
+                   help="realize anchors on deg-2 values read by two or more products / key switches, kept when the "
+                        "re-cut plan needs no more bootstraps")
+    p.add_argument("--ks-realize", action="store_true", default=None, dest="ks_realize",
+                   help="realize anchors on the deg-2 inputs of rotations/conjugations, kept when the re-cut plan "
+                        "needs no more bootstraps (cheaper key switches)")
     p.add_argument("--boundary-realize", action="store_true", default=None,
                    dest="boundary_realize",
                    help="realize a deg-2 terminal exit so the next block enters deg-1 "
@@ -114,7 +154,24 @@ def main() -> None:
     p.add_argument("--first-entry-deg", type=int,
                    help="pending-rescale degree the first refresh enters at")
     p.add_argument("--placer", type=str,
-                   help="min_cut (default) or a baseline: orion|dacapo|fhelipe")
+                   help="min_cut (default), ilp (the same decision solved exactly as a "
+                        "mixed-integer program; needs scipy) or a baseline: "
+                        "orion|dacapo|fhelipe")
+    p.add_argument("--ilp-time-limit", type=float,
+                   help="placer ilp: solver time cap per block in seconds (default 300); "
+                        "on timeout the best placement found is kept, with its gap")
+    p.add_argument("--ilp-gap", type=float,
+                   help="placer ilp: relative optimality gap at which the solver may stop "
+                        "(default 0 = prove the optimum)")
+    p.add_argument("--ilp-objective", type=str, choices=["total", "placed", "ms"],
+                   help="placer ilp: minimise placed refreshes plus fired hints (total, "
+                        "default), placed refreshes only (placed, the min-cut's objective), "
+                        "or bootstrap milliseconds, each refresh at its route's --bts-ms "
+                        "latency (ms)")
+    p.add_argument("--ilp-free-exit", action="store_false", default=None,
+                   dest="ilp_cap_exit",
+                   help="placer ilp: let the final block exit deeper than the min-cut's plan "
+                        "(off by default: that exit feeds the unplanned encrypted argmax)")
     p.add_argument("--prune", action="store_true", default=None,
                    help="remove redundant refreshes from the final plan, any placer")
     p.add_argument("--baseline-depth-cap", type=float, dest="baseline_depth_cap",
@@ -139,6 +196,12 @@ def main() -> None:
             (pair.split(":") for pair in args.pop("sparse_bts_out").split(",") if pair))
     else:
         args.pop("sparse_bts_out", None)
+    if args.get("bts_ms") is not None:
+        args["bts_ms"] = tuple(
+            (int(k), float(v)) for k, v in
+            (pair.split(":") for pair in args.pop("bts_ms").split(",") if pair))
+    else:
+        args.pop("bts_ms", None)
     if args.get("hint_veto_steps_csv") is not None:
         args["hint_veto_steps"] = tuple(
             s for s in args.pop("hint_veto_steps_csv").split(",") if s)

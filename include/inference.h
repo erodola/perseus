@@ -1,4 +1,7 @@
 #pragma once
+#include <cstdint>
+#include <cstdlib>
+namespace FIDESlib { void ForgetDevicePlaintextDump(uint32_t handle); }   // FIDESlib api/CryptoContext.cpp
 #include <filesystem>
 #include <fstream>
 
@@ -17,6 +20,7 @@
 #include <unordered_set>
 #include <vector>
 #include <string>
+#include <string_view>
 #include <iostream>
 #include <functional>
 #include <cstdlib>
@@ -142,6 +146,18 @@ struct Inference {
     void begin_stage_block(int owner) { cc()->BeginStageBlockOwned(owner); }
     void release_stage_block(int owner) { cc()->ReleaseStageBlock(owner); }
     void set_persistent_staging(bool on) { cc()->SetPersistentStaging(on); }
+    // BERT's multi-consume staging: one staged plaintext feeds several consumers.
+    void set_stage_multi_consume(bool on) { cc()->SetStageMultiConsume(on); }
+    // IMPL_NODUMP_ERASE (default 1; 0 restores the dump): a plaintext erased from the encode cache (a per-step mask) is freed without its host
+    // dump (2 x D2H + two legacy-stream syncs per plaintext otherwise)
+    static bool nodump_erase() {
+        static const bool v = [] { const char* e = std::getenv("IMPL_NODUMP_ERASE"); return !e || std::atoi(e) > 0; }();   // default on
+        return v;
+    }
+    void erase_plaintext(Ptx& pt) {
+        if (nodump_erase() && pt && pt->loaded && pt->gpu != 0) FIDESlib::ForgetDevicePlaintextDump(pt->gpu);
+        evict_plaintext(pt);
+    }
     void evict_plaintext(Ptx& pt) {
         if (!pt || !pt->loaded || pt->gpu == 0) return;
         cc()->EvictDevicePlaintext(pt->gpu);
@@ -159,6 +175,12 @@ struct Inference {
     uint32_t pending_rescale_primes(const Ctx& ct) const {
         if (fhe) return fhe->pending_rescale_primes(ct);
         return (ct && ct->GetNoiseScaleDeg() == 2) ? 1u : 0u;
+    }
+
+    // Give a plaintext a graph name if it does not already have one, so a captured graph
+    // reports it by name instead of by an anonymous literal.
+    void name_graph_pt_if_absent(const Ptx& pt, const std::string& name) {
+        if (fhe) fhe->name_pt_if_absent(pt, name);
     }
 
     template <class Vec>
@@ -431,7 +453,7 @@ struct Inference {
     bool erase_enc_cache(const std::string& tag, uint32_t lv) {
         auto it = enc_cache.find(enc_cache_key(tag, lv, 1));
         if (it == enc_cache.end()) return false;
-        if (it->second) evict_plaintext(it->second);
+        if (it->second) erase_plaintext(it->second);
         enc_cache.erase(it);
         return true;
     }
@@ -441,12 +463,66 @@ struct Inference {
         size_t n = 0;
         for (auto it = enc_cache.begin(); it != enc_cache.end(); ) {
             if (it->first.compare(0, prefix.size(), prefix) == 0) {
-                if (it->second) evict_plaintext(it->second);
+                if (it->second) erase_plaintext(it->second);
                 it = enc_cache.erase(it);
                 ++n;
             } else {
                 ++it;
             }
+        }
+        return n;
+    }
+
+    // PF_MASK_HOST_CACHE=1 (default 0): erasing a tag frees only the device copies and keeps the entries. A device
+    // encode is dumped to pinned host memory at its first eviction (FIDESlib), so its next use at that level reloads it
+    // by H2D instead of encoding it again: every (tag, level) a warm-up pass encoded is a hit in the timed pass.
+    static bool mask_host_cache() {
+        static const bool v = [] { const char* e = std::getenv("PF_MASK_HOST_CACHE"); return e && std::atoi(e) > 0; }();
+        return v;
+    }
+
+    // PF_MASK_PREFETCH: the encode-cache keys starting with `prefix` whose plaintext is on the device
+    std::vector<std::string> enc_cache_loaded_keys(const std::string& prefix) const {
+        std::vector<std::string> keys;
+        for (const auto& kv : enc_cache)
+            if (kv.second && kv.second->loaded && kv.first.compare(0, prefix.size(), prefix) == 0)
+                keys.push_back(kv.first);
+        return keys;
+    }
+
+    // PF_MASK_PREFETCH: reload the dumped plaintexts of `keys` that are off the device, ahead of their use, on
+    // FIDESlib's non-blocking prefetch stream; one device fence first (the pool hands out blocks freed on the legacy
+    // stream without an event). Returns the plaintexts reloaded.
+    size_t prefetch_enc_cache(const std::vector<std::string>& keys) {
+        size_t n = 0;
+        bool fenced = false;
+        for (const auto& k : keys) {
+            auto it = enc_cache.find(k);
+            if (it == enc_cache.end() || !it->second || it->second->loaded) continue;
+            if (!fenced) {
+                cudaDeviceSynchronize();
+                fenced = true;
+            }
+            n += cc()->PrefetchPlaintext(it->second) ? 1 : 0;
+        }
+        return n;
+    }
+
+    // erase_enc_cache_all for each tag; under PF_MASK_HOST_CACHE one pass over the cache (it keeps every entry, so a
+    // scan per tag would be tags x cache) that evicts the loaded ones. Returns the entries erased / evicted.
+    size_t erase_enc_cache_tags(const std::vector<std::string>& tags) {
+        size_t n = 0;
+        if (!mask_host_cache()) {
+            for (const auto& t : tags) n += erase_enc_cache_all(t);
+            return n;
+        }
+        const std::unordered_set<std::string_view> drop(tags.begin(), tags.end());
+        for (auto& kv : enc_cache) {
+            if (!kv.second || !kv.second->loaded) continue;
+            const size_t at = kv.first.rfind("#L");
+            if (at == std::string::npos || !drop.count(std::string_view(kv.first).substr(0, at))) continue;
+            evict_plaintext(kv.second);
+            ++n;
         }
         return n;
     }

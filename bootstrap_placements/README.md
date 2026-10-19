@@ -44,6 +44,17 @@ plan above has one except the ablations and `python/orion_dense`: on full-size b
 Orion's choices cannot fit block 0's first LayerNorm in the level budget from that starting
 point, even after repair, so generation refuses that plan.
 
+The HEAT GPT-2 ([`gladia/heat-gpt2-small-openwebtext`](https://huggingface.co/gladia/heat-gpt2-small-openwebtext),
+approximations in `configs/model/approximation/gpt2_heat_n32`) has two plans, both computed from
+`graphs/gpt2_heat_decode_python_n32` on the 32-bit parameters with the cheaper bootstraps and
+redundant ones removed, and both with the block-0 plan for generation. They run with the HEAT
+weights, config and reference outputs (README, step 1).
+
+| directory | placement algorithm | bootstraps / token |
+|---|---|---|
+| `gpt2_heat_decode_python_n32_ilp` | exact (`--placer ilp`) | 259 |
+| `gpt2_heat_decode_python_n32` | minimum cut (the default) | 267 |
+
 Notes.
 * The 32-bit plans estimate each bootstrap's error from measurements; the 64-bit plans use a
   formula (`PLAN_ACC_CHAIN=`).
@@ -102,3 +113,45 @@ encrypted argmax; `deploy.py` turns those into a plan the same way the DaCapo sc
 The solver iterates over Python sets of node names, so its choices depend on Python's hash seed;
 the recipe fixes `PYTHONHASHSEED=0`. Both scripts remove redundant bootstraps unless
 `PLAN_PRUNE=0`; the shipped DaCapo and Orion plans are the ones without that removal.
+
+## Chebyshev GELU main plan (32-bit)
+
+Since the per-block Chebyshev GELU, the main 32-bit plan `gpt2_decode_python_n32` evaluates each block's GELU as one
+Chebyshev series on 1.25x the block's input range (degree 63 to 511, 7 to 10 levels) instead of the composite THOR
+polynomial (two composed series, about 12 levels), with the same 1/xmax fold into the up projection. The shallower
+GELU lets the MLP chain fit between refreshes: 184 bootstraps per token instead of 191, about 0.14 s per token
+faster, at a mean KL of a few 1e-4 against the plaintext model instead of about 1e-4. The configs live in
+`configs/model/approximation/gpt2_base_n32`; a plan names its configs in a `configs=` line of its PLAN_CMD.txt, and
+an n32 plan without the line (every plan cut before this one, the prefill plans included) runs the composite GELU of
+`gpt2_base_n32_thor`. To switch back, run `--plan bootstrap_placements/gpt2_decode_python_n32_thor` (the previous
+main plan); the last composite-GELU state is the `composite-gelu` branch and the `composite-gelu-3.98s` tag.
+
+## StC-first main plan (32-bit)
+
+The main 32-bit plans run their full-size refreshes StC-first: the
+slots-to-coefficients transform is applied to the input at the bottom of the chain, before the
+raise, CoeffsToSlots and EvalMod (`FIDESLIB_BTS_STC_FIRST=2`, set by the plan's `runtime=` line).
+That is about 0.18 s per token faster than the shipped order, at a mean KL of about 1e-4 against
+the plaintext model instead of about 1e-6. To switch back, run the previous main plan:
+`--plan bootstrap_placements/gpt2_decode_python_n32_shipped` (shipped order everywhere).
+`gpt2_decode_python_n32_stcf_accurate` is the middle ground: StC-first except the residual-stream
+refreshes and the K/V push (mean KL about 3e-5, about 0.05 s per token faster than shipped). The
+StC-first plans are cut from `graphs/gpt2_decode_python_n32_stcf`.
+
+The main plan also raises the 512-slot refreshes one composite level below the top
+(`FIDESLIB_BTS_RAISE_DROP=512:1` in its `runtime=` line, `PLAN_SPARSE_BTS_OUT=1:16,512:26` in its
+recipe): those bootstraps run on two fewer limbs and land one level lower, at the same precision
+and the same bootstrap count, about 0.065 s per token faster. To switch back, run
+`--plan bootstrap_placements/gpt2_decode_python_n32_top512` (the 512-slot route raised to the top).
+
+`gpt2_decode_python_n32_smcheb` is an option, off by default: the softmax reciprocal rounds run Chebyshev-scaled
+Goldschmidt on exact per-cache-length bands (`SM_CHEB_GS=1`, in its `runtime=` line; graph
+`graphs/gpt2_decode_python_n32_smcheb`). It keeps the softmax accurate past 32 cached tokens, where the default
+seeds drift, at about 0.01 s per token faster and a mean KL about 2-3x the main plan's within 32 tokens.
+
+## Channel-blocked prefill plans (32-bit)
+
+`gpt2_prefill_python_n32_blocked`, `llama31_8b_prefill_python_n32_blocked` and `llama31_8b_prefill_python_n32_blocked_gqa`
+are 128-token PCMM prefills on the channel-blocked layout (`PF_LAYOUT=blocked`: 512 channels and 128 tokens per
+ciphertext, whole heads per block; `_gqa` keeps each Llama KV head once, `PF_GQA=1`). Their switches are in the
+`runtime=` line, so `--plan` alone runs them: GPT-2 0.46 s per token, Llama 3.8 s (blocked) and 3.5 s (GQA).

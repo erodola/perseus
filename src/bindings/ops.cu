@@ -1,6 +1,8 @@
 // perseus._core op layer: Inference, PackedCtx, data plane, weights, configs,
 // packing-dispatched ops, GPT-2 composites, graph/plan controls.
 #include "attention.h"
+#include "CKKS/Plaintext.cuh"   // device_registry: the plaintext registry entries' limbs
+#include "CudaUtils.cuh"   // FIDESlib::pinnedHostAlloc
 #include "checks.h"
 #include "ckks_primitives.h"
 #include "npconv.h"
@@ -16,6 +18,7 @@
 #include <pybind11/stl.h>
 #include "residency_pipeline.h"
 #include <future>
+#include <optional>
 #include <chrono>
 #include <tuple>
 
@@ -138,6 +141,21 @@ Ptx cached_any_at(Inference& inf, const std::string& tag, const perseus_np::AnyV
     inf.enc_cache.emplace(key, pt);
     return pt;
 }
+
+// cached_any_at with the slot vector read only on a miss (under the GIL): a hit, every use after the first, skips the
+// per-call numpy -> std::vector copy of the whole slot vector.
+Ptx cached_lazy(Inference& inf, const std::string& tag, const py::array& values, const PackedCtx& ct, bool tagged) {
+    static const bool eager = [] { const char* e = std::getenv("PERSEUS_MASK_EAGER"); return e && *e && *e != '0'; }();
+    if (!eager) {           // PERSEUS_MASK_EAGER=1: the old path (convert on every call), for A/B
+        const auto [lv, nsd] = inf.encode_like_params(ct.ct);
+        auto it = inf.enc_cache.find(Inference::enc_cache_key(tag, lv, nsd));
+        if (it != inf.enc_cache.end()) { ++inf.enc_cache_hit; return it->second; }
+    }
+    auto v = perseus_np::to_any(values);
+    py::gil_scoped_release nogil;
+    v.resize(static_cast<size_t>(inf.slots));
+    return cached_any_at(inf, tag, v, ct, tagged);
+}
 }  // namespace
 
 void bind_ops(py::module_& m) {
@@ -198,8 +216,20 @@ void bind_ops(py::module_& m) {
              py::arg("ct"), py::arg("level_threshold"), py::arg("account_pending_rescale") = false,
              py::arg("iterations") = 1,
              "Bootstrap `ct` if its level exceeds `level_threshold`; iterations=2 as for bootstrap.")
+        .def("drop_to_level", static_cast<void (CKKSContext::*)(PackedCtx&, int)>(&CKKSContext::drop_to_level),
+             py::arg("ct"), py::arg("level"), kRelease,
+             "Drop `ct` to `level` in place (a value-preserving modulus reduction, recorded as "
+             "level_reduce) when it is above it; level_hint only records a planner hint.")
         .def("level_hint", static_cast<void (CKKSContext::*)(PackedCtx&, int)>(&CKKSContext::level_hint),
              py::arg("ct"), py::arg("level"), "Drop `ct` to `level` if it is above it.")
+        .def("record_external_bootstrap",
+             [](CKKSContext& c, PackedCtx& p, const std::vector<std::string>& ins, const std::vector<int>& lv) {
+                 c.record_external_bootstrap(p.ct, ins, lv);
+             },
+             py::arg("ct"), py::arg("inputs"), py::arg("input_levels"), kRelease,
+             "Record `ct` (refreshed outside the recorded ops: the PCMM) as a deliberate bootstrap of `inputs`.")
+        .def("var_name", [](CKKSContext& c, const PackedCtx& p) { return c.var_name(p.ct); }, py::arg("ct"),
+             "The graph var naming `ct`.")
         // ── leaf primitives for Python-authored ops ────────────────────────────
         .def("rotate", static_cast<PackedCtx (CKKSContext::*)(const PackedCtx&, int32_t)>(&CKKSContext::rotate),
              py::arg("ct"), py::arg("steps"), kRelease,
@@ -220,6 +250,40 @@ void bind_ops(py::module_& m) {
                  const int32_t sign = start < 0 ? -1 : 1;
                  int32_t gap = start < 0 ? -start : start;
                  if (gap >= stop) return c.add(ct, 0.0);        // empty ladder: a clone
+                 // LADDER_RADIX_BITS = b >= 2: the rungs in groups of b from the bottom, each group as
+                 // x + sum_j rot(x, j h), j < 2^len (h its first gap), from one hoisted decomposition and one
+                 // ModDown (perseus.impl.layout.ladder_chunks is the same rule); a group without all its keys,
+                 // and a 1-rung group, run rung by rung
+                 static const int radix_bits = [] {
+                     const char* e = std::getenv("LADDER_RADIX_BITS");
+                     return e ? std::atoi(e) : 0;
+                 }();
+                 if (radix_bits >= 2) {
+                     std::vector<int32_t> gaps;
+                     for (int32_t g = gap; g < stop; g *= 2) gaps.push_back(g);
+                     PackedCtx acc = ct;
+                     bool have = false;
+                     for (size_t i0 = 0; i0 < gaps.size(); i0 += radix_bits) {
+                         const size_t n = std::min<size_t>(radix_bits, gaps.size() - i0);
+                         std::vector<int32_t> steps, rungs;
+                         for (int32_t j = 1; j < (1 << n); ++j) steps.push_back(sign * j * gaps[i0]);
+                         for (size_t r = 0; r < n; ++r) rungs.push_back(sign * gaps[i0 + r]);
+                         if (n > 1 && c.has_rot_keys(steps)) {
+                             acc = c.rotate_sum(have ? acc : ct, steps, rungs);
+                             have = true;
+                             continue;
+                         }
+                         for (int32_t g : rungs) {
+                             if (!have) {
+                                 acc = c.add(ct, c.rotate(ct, g));
+                                 have = true;
+                             } else {
+                                 c.inplace_add(acc, c.rotate(acc, g));
+                             }
+                         }
+                     }
+                     return acc;
+                 }
                  PackedCtx acc = c.add(ct, c.rotate(ct, sign * gap));
                  for (gap *= 2; gap < stop; gap *= 2)
                      c.inplace_add(acc, c.rotate(acc, sign * gap));
@@ -289,6 +353,19 @@ void bind_ops(py::module_& m) {
              "acc += sum_j vs[j] * ss[j] with ONE relinearization when the runtime's fused lane "
              "accumulate applies (returns True), else the plain loop; the recorded op stream is "
              "the loop's either way.")
+        .def("mult_scalar_sum",
+             [](CKKSContext& c, const std::vector<PackedCtx>& ts, const std::vector<double>& cs) {
+                 if (ts.empty() || ts.size() != cs.size())
+                     throw std::invalid_argument("mult_scalar_sum: ts and cs must be non-empty and of equal length");
+                 py::gil_scoped_release nogil;
+                 return c.wsum_scalar(ts, cs);
+             },
+             py::arg("ts"), py::arg("cs"),
+             "sum_i ts[i] * cs[i]: the loop of mult(t, c) + inplace_add in one call (same op stream; IMPL_WSUM=1: one "
+             "evalLinearWSum kernel when nothing records the loop's intermediates).")
+        .def("run_program", &CKKSContext::run_program, py::arg("inputs"), py::arg("prog"), py::arg("outs"), kRelease,
+             "A traced straight-line program on the API calls without per-op bookkeeping (CKKSContext::run_program); "
+             "[] = run the per-op path instead.")
         .def("conjugate", static_cast<PackedCtx (CKKSContext::*)(const PackedCtx&)>(&CKKSContext::conjugate),
              py::arg("ct"), kRelease, "Complex conjugate of every slot (identity on real payloads).")
         .def("negate", static_cast<PackedCtx (CKKSContext::*)(const PackedCtx&)>(&CKKSContext::negate),
@@ -315,7 +392,22 @@ void bind_ops(py::module_& m) {
              "defensively at every phase entry.")
         .def_property("magnitude_suppressed",
              [](const CKKSContext& c) { return c.magnitude_capture_suppressed; },
-             [](CKKSContext& c, bool v) { c.magnitude_capture_suppressed = v; });
+             [](CKKSContext& c, bool v) { c.magnitude_capture_suppressed = v; })
+        // graph-variable naming scope: with a scope set, new ciphertexts are named <scope>_<n>
+        // (n = the scope's own counter) instead of v_<n> from the block-wide counter, so a
+        // step's names do not move when an earlier step issues more ops (a plan stays bound
+        // across token positions whose op counts differ). Setting the scope keeps the counter;
+        // a caller entering a new scope saves and resets both, and restores them on exit.
+        .def_property("graph_scope",
+             [](const CKKSContext& c) { return c.graph_var_scope; },
+             [](CKKSContext& c, const std::string& s) { c.graph_var_scope = s; })
+        .def_property("graph_scope_counter",
+             [](const CKKSContext& c) { return c.graph_var_scope_counter; },
+             [](CKKSContext& c, uint64_t n) { c.graph_var_scope_counter = n; })
+        // naming-only scopes (perseus.impl's step-scoped names): planned mode stays strict under them
+        .def_property("graph_scope_strict",
+             [](const CKKSContext& c) { return c.graph_scope_strict; },
+             [](CKKSContext& c, bool v) { c.graph_scope_strict = v; });
 
     // ── data types ─────────────────────────────────────────────────────────
     py::enum_<InferenceMode>(m, "InferenceMode")
@@ -338,6 +430,8 @@ void bind_ops(py::module_& m) {
     py::class_<PackedCtx>(m, "PackedCtx")
         .def_property_readonly("level", [](const PackedCtx& p) { return level_of(p.ct); })
         .def_property_readonly("noise_deg", [](const PackedCtx& p) { return p.ct->GetNoiseScaleDeg(); })
+        .def_property_readonly("on_device", [](const PackedCtx& p) { return p.ct && p.ct->loaded; },
+                               "Whether the ciphertext's device copy exists (false once parked by kv_evict).")
         .def_property_readonly("packing", [](const PackedCtx& p) { return std::string(to_string(p.packing.kind)); })
         .def("__repr__", [](const PackedCtx& p) {
             return "<PackedCtx " + std::string(to_string(p.packing.kind)) +
@@ -535,6 +629,7 @@ void bind_ops(py::module_& m) {
         .def_readwrite("n_tok", &Inference::n_tok)
         .def_readwrite("n_tok_imag", &Inference::n_tok_imag)
         .def_readwrite("token_pair", &Inference::token_pair)
+        .def_readwrite("bidirectional", &Inference::bidirectional)
         .def_readwrite("use_cache", &Inference::use_cache)
         .def_readwrite("cache_weights", &Inference::cache_weights)
         .def_readwrite("block_prefix", &Inference::block_prefix)
@@ -662,6 +757,120 @@ void bind_ops(py::module_& m) {
              "ct * values (slot-wise): `values` is encoded as a plaintext at ct's level; "
              "shorter than the slot count is zero-filled; a complex array encodes a complex "
              "plaintext.")
+        .def("mult_pt_sum_raw",
+             [](Inference& inf, const std::vector<PackedCtx>& cts, const py::array& values) {
+                 // C-contiguous (n, width) float32 / float64 / complex64 / complex128, width <= slots
+                 if (values.ndim() != 2 || static_cast<size_t>(values.shape(0)) != cts.size() || cts.empty())
+                     throw std::invalid_argument("mult_pt_sum_raw: values must be (len(cts), width)");
+                 if (!(values.flags() & py::array::c_style))
+                     throw std::invalid_argument("mult_pt_sum_raw: values must be C-contiguous");
+                 const auto k = values.dtype().kind();
+                 const auto sz = values.dtype().itemsize();
+                 const int dtype = (k == 'f' && sz == 4) ? 0 : (k == 'f' && sz == 8) ? 1 : (k == 'c' && sz == 8) ? 2
+                                 : (k == 'c' && sz == 16) ? 3 : -1;
+                 if (dtype < 0) throw std::invalid_argument("mult_pt_sum_raw: float32/64 or complex64/128 only");
+                 const size_t w = static_cast<size_t>(values.shape(1));
+                 if (w != static_cast<size_t>(inf.slots))
+                     throw std::invalid_argument("mult_pt_sum_raw: rows must hold exactly the slot count");
+                 if (!inf.fhe->mult_pt_sum_usable(cts)) return py::object(py::none());   // caller falls back
+                 const void* ptr = values.data();
+                 PackedCtx out;
+                 { py::gil_scoped_release nogil; out = inf.fhe->mult_pt_sum_raw(cts, ptr, dtype, w); }
+                 return py::cast(std::move(out));
+             },
+             py::arg("cts"), py::arg("values"),
+             "sum_i cts[i] * values[i] with every row encoded on the device from the raw buffer (no host "
+             "conversion) and folded into one accumulator; the loop's op stream is replayed. Returns None when "
+             "the fused path does not apply (capture, mixed levels, a planned refresh inside): use mult_pt_sum.")
+        .def("mult_coeff_sum",
+             [](Inference& inf, const std::vector<PackedCtx>& cts, const py::array& rows, const py::array& tags) {
+                 // rows: (len(cts), N) float32 with a unit inner stride, in pinned host or device-visible memory
+                 // (pinned_empty); tags: (len(cts), 7) int32 from pt_tag_fields
+                 if (rows.ndim() != 2 || static_cast<size_t>(rows.shape(0)) != cts.size() || cts.empty())
+                     throw std::invalid_argument("mult_coeff_sum: rows must be (len(cts), N)");
+                 if (rows.dtype().kind() != 'f' || rows.dtype().itemsize() != 4 || rows.strides(1) != 4)
+                     throw std::invalid_argument("mult_coeff_sum: rows must be float32 with contiguous rows");
+                 if (static_cast<size_t>(rows.shape(1)) != static_cast<size_t>(2 * inf.slots))
+                     throw std::invalid_argument("mult_coeff_sum: rows must hold the ring degree's coefficients");
+                 if (tags.ndim() != 2 || tags.shape(0) != rows.shape(0) || tags.shape(1) != 7 ||
+                     tags.dtype().kind() != 'i' || tags.dtype().itemsize() != 4 || !(tags.flags() & py::array::c_style))
+                     throw std::invalid_argument("mult_coeff_sum: tags must be C-contiguous (len(cts), 7) int32");
+                 cudaPointerAttributes at{};
+                 if (cudaPointerGetAttributes(&at, rows.data()) != cudaSuccess || at.type == cudaMemoryTypeUnregistered) {
+                     cudaGetLastError();
+                     throw std::invalid_argument("mult_coeff_sum: rows must live in pinned host or device memory");
+                 }
+                 if (!inf.fhe->mult_pt_sum_usable(cts)) return py::object(py::none());   // caller falls back
+                 const float* ptr = static_cast<const float*>(rows.data());
+                 const size_t stride = static_cast<size_t>(rows.strides(0)) / 4;
+                 const int32_t* tg = static_cast<const int32_t*>(tags.data());
+                 PackedCtx out;
+                 { py::gil_scoped_release nogil; out = inf.fhe->mult_coeff_sum(cts, ptr, stride, tg); }
+                 return py::cast(std::move(out));
+             },
+             py::arg("cts"), py::arg("rows"), py::arg("tags"),
+             "sum_i cts[i] * pt_i where pt_i's coefficients are rows[i] times the level's scaling factor (rows: "
+             "coeff_rows of the slot values, in pinned_empty memory), encoded and multiplied on the device in "
+             "batches; the loop's op stream is replayed with tags[i] as the plaintexts' tags. None when the fused "
+             "path does not apply (capture, mixed levels, a planned refresh inside): use mult_pt_sum.")
+        .def_property_readonly("coeff_rows_overflows", [](Inference& inf) { return inf.fhe->coeff_rows_overflows(); },
+             "Coefficients mult_coeff_sum clamped since the start (nonzero: some row exceeded the int64 range).")
+        .def("mult_pt_sum",
+             [](Inference& inf, const std::vector<PackedCtx>& cts, const py::array& values) {
+                 if (values.ndim() != 2 || static_cast<size_t>(values.shape(0)) != cts.size() || cts.empty())
+                     throw std::invalid_argument("mult_pt_sum: values must be (len(cts), slots), cts non-empty");
+                 const auto t_in = std::chrono::steady_clock::now();
+                 const size_t n = cts.size(), w = static_cast<size_t>(values.shape(1));
+                 if (w > static_cast<size_t>(inf.slots))
+                     throw std::invalid_argument("mult_pt_sum: more values than slots");
+                 std::vector<perseus_np::AnyVec> vs(n);
+                 if (values.dtype().kind() == 'c') {
+                     py::array_t<std::complex<double>, py::array::c_style | py::array::forcecast> a(values);
+                     const auto r = a.unchecked<2>();
+                     for (size_t i = 0; i < n; ++i) {
+                         vs[i].cplx = true;
+                         vs[i].c.assign(&r(i, 0), &r(i, 0) + w);
+                     }
+                 } else {
+                     py::array_t<double, py::array::c_style | py::array::forcecast> a(values);
+                     const auto r = a.unchecked<2>();
+                     for (size_t i = 0; i < n; ++i) vs[i].re.assign(&r(i, 0), &r(i, 0) + w);
+                 }
+                 py::gil_scoped_release nogil;
+                 static const bool timing = std::getenv("PT_SUM_TIMING") != nullptr;
+                 static double t_conv = 0; static long n_conv = 0;
+                 if (timing) {
+                     t_conv += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t_in).count();
+                     if (++n_conv % 50 == 0)
+                         std::cerr << "[pt_sum_timing] numpy->rows " << t_conv / n_conv << " ms/call\n";
+                 }
+                 // the device-encoded fused path when it cannot change what the loop records
+                 if (std::getenv("IMPL_PT_SUM_FUSED") && std::atoi(std::getenv("IMPL_PT_SUM_FUSED")) > 0
+                     && inf.fhe->mult_pt_sum_usable(cts)) {
+                     const bool cplx = vs[0].cplx;
+                     if (cplx) {
+                         std::vector<std::vector<std::complex<double>>> rows(n);
+                         for (size_t i = 0; i < n; ++i) { vs[i].resize(static_cast<size_t>(inf.slots)); rows[i] = std::move(vs[i].c); }
+                         return inf.fhe->mult_pt_sum(cts, rows);
+                     }
+                     std::vector<std::vector<double>> rows(n);
+                     for (size_t i = 0; i < n; ++i) { vs[i].resize(static_cast<size_t>(inf.slots)); rows[i] = std::move(vs[i].re); }
+                     return inf.fhe->mult_pt_sum(cts, rows);
+                 }
+                 std::optional<PackedCtx> acc;
+                 for (size_t i = 0; i < n; ++i) {
+                     vs[i].resize(static_cast<size_t>(inf.slots));
+                     Ptx pt = encode_any_at(inf, vs[i], cts[i]);
+                     PackedCtx p = inf.fhe->mult(cts[i], pt);
+                     if (!acc) acc.emplace(std::move(p));
+                     else inf.fhe->inplace_add(*acc, p);
+                 }
+                 return std::move(*acc);
+             },
+             py::arg("cts"), py::arg("values"),
+             "sum_i cts[i] * values[i] (each row encoded at its ciphertext's level, like mult_pt): "
+             "the baby-step inner sum of a streamed-weight linear in one call. The recorded op stream "
+             "is the loop's (mult, then inplace_add), so a plan cut on either form fits the other.")
         .def("mult_const",
              [](Inference& inf, const PackedCtx& ct, double re, double im) {
                  py::gil_scoped_release nogil;
@@ -728,6 +937,26 @@ void bind_ops(py::module_& m) {
                  return inf.fhe->mult(ct, pt);
              },
              py::arg("ct"), py::arg("name"), "ct * the named slot plaintext (uploaded on first use).")
+        .def("mult_slot_pt_sum",
+             [](Inference& inf, const std::vector<PackedCtx>& cts, const std::vector<std::string>& names) {
+                 if (cts.empty() || cts.size() != names.size())
+                     throw std::invalid_argument("mult_slot_pt_sum: one name per ciphertext, cts non-empty");
+                 py::gil_scoped_release nogil;
+                 std::vector<Ptx> pts;
+                 pts.reserve(names.size());
+                 for (size_t i = 0; i < names.size(); ++i) pts.push_back(slot_pt_at(inf, names[i], cts[i]));
+                 if (inf.fhe->mult_slot_pt_sum_usable(cts, pts)) return inf.fhe->mult_slot_pt_sum(cts, pts);
+                 PackedCtx acc = inf.fhe->mult(cts[0], pts[0]);
+                 for (size_t i = 1; i < cts.size(); ++i) {
+                     PackedCtx p = inf.fhe->mult(cts[i], pts[i]);
+                     inf.fhe->inplace_add(acc, p);
+                 }
+                 return acc;
+             },
+             py::arg("cts"), py::arg("names"),
+             "sum_i cts[i] * the named slot plaintext names[i]: the baby-step inner sum of a resident-weight linear "
+             "in one fused kernel where the runtime allows (LIN_PT_DOT), else the loop. The recorded op stream is the "
+             "loop's (mult, then inplace_add) either way.")
         .def("add_slot_pt",
              [](Inference& inf, const PackedCtx& ct, const std::string& name) {
                  py::gil_scoped_release nogil;
@@ -758,10 +987,12 @@ void bind_ops(py::module_& m) {
         // ── slot-period stamps (what the C++ reductions do with packtag::t_reduce_*) ─────
         .def("tag_reduce",
              [](Inference& inf, PackedCtx& ct, int stride) {
-                 const auto top = packtag::PackTag::top(inf.slots);
+                 auto top = packtag::PackTag::top(inf.slots);
+                 top.field = inf.fhe->tag_of_ct(ct.ct).field;
                  ct.tag = stride <= 1 ? packtag::t_reduce_all(top)
                                       : packtag::t_reduce_stride(top, stride);
                  inf.fhe->tag_ct(ct.ct, ct.tag);
+                 inf.fhe->restamp_graph_tag(ct.ct);   // the recorded ladder output, too
              },
              py::arg("ct"), py::arg("stride"),
              "Stamp `ct` as the output of a rotate-and-sum reduction: constant over the slots "
@@ -836,23 +1067,45 @@ void bind_ops(py::module_& m) {
         .def("mult_cached",
              [](Inference& inf, const PackedCtx& ct, const std::string& tag,
                 const py::array& values, bool tagged) {
-                 auto v = perseus_np::to_any(values);
+                 Ptx pt = cached_lazy(inf, tag, values, ct, tagged);
                  py::gil_scoped_release nogil;
-                 v.resize(static_cast<size_t>(inf.slots));
-                 Ptx pt = cached_any_at(inf, tag, v, ct, tagged);
                  inf.load_plaintext(pt);
                  return inf.fhe->mult(ct, pt);
              },
              py::arg("ct"), py::arg("tag"), py::arg("values"), py::arg("tagged") = true,
              "ct * the plaintext cached under `tag` at ct's level (encode_at_cached: encoded "
              "on a miss, uploaded on first use, shared by every later use at that level).")
+        .def("mult_cached_sum",
+             [](Inference& inf, std::vector<PackedCtx> cts, const std::vector<std::string>& tags,
+                const std::vector<py::array>& values, bool tagged) -> py::object {
+                 if (cts.empty() || tags.size() != cts.size() || values.size() != cts.size())
+                     throw std::invalid_argument("mult_cached_sum: cts, tags and values must have one entry each");
+                 {
+                     py::gil_scoped_release nogil;
+                     for (auto& c : cts) inf.fhe->realize_pending_rescale_raw(c.ct);
+                 }
+                 std::vector<Ptx> pts;
+                 for (size_t i = 0; i < cts.size(); ++i) pts.push_back(cached_lazy(inf, tags[i], values[i], cts[i], tagged));
+                 PackedCtx out;
+                 bool ok = false;
+                 {
+                     py::gil_scoped_release nogil;
+                     for (auto& p : pts) inf.load_plaintext(p);
+                     ok = inf.fhe->mult_slot_pt_sum_usable(cts, pts);
+                     if (ok) out = inf.fhe->mult_slot_pt_sum(cts, pts);
+                 }
+                 if (!ok) return py::none();
+                 return py::cast(std::move(out));
+             },
+             py::arg("cts"), py::arg("tags"), py::arg("values"), py::arg("tagged") = true,
+             "sum_i cts[i] * the plaintext cached under tags[i] at cts[i]'s level, in one kernel (EvalMultPtSum, the "
+             "loop's node stream replayed); deg-2 inputs are realized in place first (what each product does on a "
+             "copy). None: not usable here (mixed levels, capture, a planned refresh inside), loop instead.")
         .def("add_cached",
              [](Inference& inf, const PackedCtx& ct, const std::string& tag,
                 const py::array& values, bool tagged) {
-                 auto v = perseus_np::to_any(values);
+                 Ptx pt = cached_lazy(inf, tag, values, ct, tagged);
                  py::gil_scoped_release nogil;
-                 v.resize(static_cast<size_t>(inf.slots));
-                 Ptx pt = cached_any_at(inf, tag, v, ct, tagged);
                  inf.load_plaintext(pt);
                  return inf.fhe->add(ct, pt);
              },
@@ -863,17 +1116,11 @@ void bind_ops(py::module_& m) {
                 const std::vector<py::array>& values) {
                  if (tags.size() != values.size())
                      throw std::invalid_argument("mult_cached_many: tags and values differ in length");
-                 std::vector<perseus_np::AnyVec> vs;
-                 vs.reserve(values.size());
-                 for (const auto& a : values) vs.push_back(perseus_np::to_any(a));
-                 py::gil_scoped_release nogil;
                  std::vector<Ptx> pts;
                  pts.reserve(tags.size());
-                 for (size_t i = 0; i < tags.size(); ++i) {
-                     vs[i].resize(static_cast<size_t>(inf.slots));
-                     pts.push_back(cached_any_at(inf, tags[i], vs[i], ct, true));
-                     inf.load_plaintext(pts.back());
-                 }
+                 for (size_t i = 0; i < tags.size(); ++i) pts.push_back(cached_lazy(inf, tags[i], values[i], ct, true));
+                 py::gil_scoped_release nogil;
+                 for (auto& p : pts) inf.load_plaintext(p);
                  std::vector<PackedCtx> out;
                  out.reserve(pts.size());
                  if (!pts.empty() && inf.fhe->lane_batch_usable(ct.ct, pts)) {
@@ -946,11 +1193,42 @@ void bind_ops(py::module_& m) {
         .def("erase_pts",
              [](Inference& inf, const std::vector<std::string>& tags) {
                  py::gil_scoped_release nogil;
-                 size_t n = 0;
-                 for (const auto& t : tags) n += inf.erase_enc_cache_all(t);
-                 return n;
+                 return inf.erase_enc_cache_tags(tags);
              },
-             py::arg("tags"), "Drop these tags from the cache at every level (device copies freed).")
+             py::arg("tags"), "Drop these tags from the cache at every level (device copies freed; under "
+             "PF_MASK_HOST_CACHE=1 the entries stay, their device encodes dumped to the host for the next use).")
+        .def("recycled_polys",
+             [](Inference& inf, bool release) {
+                 auto& cc = inf.cc();
+                 if (!cc->gpu.has_value()) return py::make_tuple(static_cast<size_t>(0), 0.0);
+                 auto& g = *std::any_cast<FIDESlib::CKKS::Context&>(cc->gpu);
+                 auto [n, bytes] = g.auxilarPolyStats();
+                 if (release) {
+                     py::gil_scoped_release nogil;
+                     g.releaseAuxilarPolys();
+                 }
+                 return py::make_tuple(static_cast<size_t>(n), static_cast<double>(bytes) / (1 << 30));
+             },
+             py::arg("release") = false,
+             "FIDESlib's polynomial recycler (destroyed ciphertexts' polynomials kept with their limbs for reuse): "
+             "(polynomials, GiB); `release` frees them (also done automatically when the device is full).")
+        .def("add_sparse_route",
+             [](Inference& inf, uint32_t s) {
+                 py::gil_scoped_release nogil;
+                 inf.fhe->add_sparse_route(s);
+             },
+             py::arg("slots"),
+             "Build the sparse bootstrap route of `slots` slots now (OpenFHE setup + keys, device tables + keys), "
+             "for a layout whose period grew (SM_PERIODIC=2); needs the session's secret key.")
+        .def("drop_sparse_route",
+             [](Inference& inf, uint32_t s) {
+                 py::gil_scoped_release nogil;
+                 return inf.fhe->drop_sparse_route(s);
+             },
+             py::arg("slots"), "Drop a sparse route: its device tables and the rotation keys only it uses.")
+        .def_property_readonly("sparse_routes", [](const Inference& inf) {
+                 return std::vector<uint32_t>(inf.fhe->sparse_precomp_slots.begin(), inf.fhe->sparse_precomp_slots.end());
+             }, "The sparse bootstrap routes built.")
         .def("enc_cache_stats",
              [](const Inference& inf) {
                  py::dict d;
@@ -961,6 +1239,18 @@ void bind_ops(py::module_& m) {
                  return d;
              },
              "Cache size and the hit / miss counters of encode_at_cached.")
+        .def("enc_cache_keys",
+             [](const Inference& inf) {
+                 std::vector<std::string> keys;
+                 keys.reserve(inf.enc_cache.size());
+                 for (const auto& kv : inf.enc_cache) keys.push_back(kv.first);
+                 return keys;
+             },
+             "The encode cache's keys (tag#L<level>:d<degree>).")
+        .def("enc_cache_loaded_keys", &Inference::enc_cache_loaded_keys, py::arg("prefix"),
+             "PF_MASK_PREFETCH: the encode-cache keys starting with `prefix` whose plaintext is on the device.")
+        .def("prefetch_enc_cache", &Inference::prefetch_enc_cache, py::arg("keys"),
+             "PF_MASK_PREFETCH: reload the dumped plaintexts of `keys` ahead of use, on a non-blocking stream.")
         .def("sum_slots",
              [](Inference& inf, const PackedCtx& ct, int width) {
                  if (width < 1 || (width & (width - 1)))
@@ -1009,6 +1299,73 @@ void bind_ops(py::module_& m) {
         cudaMemGetInfo(&free_b, &total_b);
         return static_cast<double>(free_b) / (1 << 30);
     }, "Free memory on the current CUDA device, in GiB (cudaMemGetInfo).");
+    m.def("pinned_empty", [](size_t rows, size_t cols) {
+        // page-locked, device-mapped host memory (kernels read it in place) as a float32 numpy array
+        // (FIDESlib::pinnedHostAlloc: cudaHostAlloc, or registered anonymous memory under FIDESLIB_PINNED_ANON=1)
+        const size_t bytes = std::max<size_t>(rows * cols * sizeof(float), 1);
+        void* p = FIDESlib::pinnedHostAlloc(bytes, true);
+        if (!p)
+            throw std::runtime_error("pinned_empty: pinned allocation failed for " + std::to_string(bytes) + " bytes");
+        py::capsule owner(p, [](void* q) { FIDESlib::pinnedHostFree(q); });
+        return py::array_t<float>({rows, cols}, {cols * sizeof(float), sizeof(float)}, static_cast<float*>(p), owner);
+    }, py::arg("rows"), py::arg("cols"),
+       "A (rows, cols) float32 array in pinned, device-mapped host memory (cudaHostAlloc): the backing store "
+       "Inference.mult_coeff_sum reads weight coefficient rows from.");
+    m.def("pt_tag_fields", [](const py::array& values) {
+        // the plaintext tag mult_pt_sum_raw derives from each slot-value row, as 7 int32 fields
+        if (values.ndim() != 2 || !(values.flags() & py::array::c_style))
+            throw std::invalid_argument("pt_tag_fields: values must be a C-contiguous 2-D array");
+        const auto k = values.dtype().kind();
+        const auto sz = values.dtype().itemsize();
+        const int dtype = (k == 'f' && sz == 4) ? 0 : (k == 'f' && sz == 8) ? 1 : (k == 'c' && sz == 8) ? 2
+                        : (k == 'c' && sz == 16) ? 3 : -1;
+        if (dtype < 0) throw std::invalid_argument("pt_tag_fields: float32/64 or complex64/128 only");
+        const size_t n = values.shape(0), w = values.shape(1);
+        const size_t elem = (dtype == 0 ? 4 : dtype == 1 || dtype == 2 ? 8 : 16);
+        py::array_t<int32_t> out({n, (size_t)7});
+        auto o = out.mutable_unchecked<2>();
+        const char* base = static_cast<const char*>(values.data());
+        for (size_t i = 0; i < n; ++i) {
+            const char* row = base + i * w * elem;
+            PackSignature sig;
+            if (dtype == 0) sig = analyze_tag_fields((const float*)row, (const float*)nullptr, (int)w, 1);
+            else if (dtype == 1) sig = analyze_tag_fields((const double*)row, (const double*)nullptr, (int)w, 1);
+            else if (dtype == 2) sig = analyze_tag_fields((const float*)row, (const float*)row + 1, (int)w, 2);
+            else sig = analyze_tag_fields((const double*)row, (const double*)row + 1, (int)w, 2);
+            o(i, 0) = std::max<int>(sig.slots, 0); o(i, 1) = sig.period; o(i, 2) = sig.live_exact;
+            o(i, 3) = sig.stride_exact; o(i, 4) = sig.window_exact; o(i, 5) = sig.offset_exact;
+            o(i, 6) = (dtype >= 2 && sig.im_amax != 0.0) ? (sig.amax != 0.0 ? 2 : 1) : 0;
+        }
+        return out;
+    }, py::arg("values"), "Per row of slot values, the plaintext tag fields mult_coeff_sum takes.");
+    m.def("gpu_pool_stats", []() {
+        int dev = 0;
+        cudaGetDevice(&dev);
+        const auto st = FIDESlib::GPUpoolStatsOf(dev);
+        const double gb = 1 << 30;
+        return py::dict(py::arg("reserved_gb") = st.reserved / gb, py::arg("idle_gb") = st.idle / gb,
+                        py::arg("trimmable_gb") = st.trimmable / gb, py::arg("slabs") = st.slabs,
+                        py::arg("cuda_reserved_gb") = st.cuda_reserved / gb, py::arg("cuda_used_gb") = st.cuda_used / gb);
+    }, "FIDESlib's pooled allocator on the current device: the GiB its slabs reserve, the idle part, and the part "
+       "in wholly idle slabs (what gpu_pool_trim releases).");
+    m.def("gpu_pool_by_size", []() {
+        int dev = 0;
+        cudaGetDevice(&dev);
+        return FIDESlib::GPUpoolBySize(dev);
+    }, "Per pooled block size: [block bytes, reserved bytes, in-use bytes, slabs].");
+    m.def("gpu_pool_trace", [](int depth) {
+        int dev = 0;
+        cudaGetDevice(&dev);
+        return FIDESlib::GPUpoolTrace(dev, depth);
+    }, py::arg("depth") = 6,
+       "FIDESLIB_POOL_TRACE=1 only: live pooled bytes per allocation call chain, largest first.");
+    m.def("gpu_pool_trim", []() {
+        int dev = 0;
+        cudaGetDevice(&dev);
+        py::gil_scoped_release nogil;
+        return static_cast<double>(FIDESlib::GPUpoolTrim(dev)) / (1 << 30);
+    }, "Hand FIDESlib's wholly idle slabs back to the CUDA stream-ordered pool, which every allocation draws from; "
+       "returns the GiB released. Also done automatically before an allocation fails.");
     m.def("make_inference", [](const InferenceOptions& o) { return make_inference(o); },
           py::arg("options") = InferenceOptions{}, kRelease,
           "Build a generic Inference session from `options`: CKKS context, model sizes and packing.");
