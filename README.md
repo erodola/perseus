@@ -42,14 +42,17 @@ our 32-bit port of the GPU CKKS library [FIDESlib](https://github.com/CAPS-UMU/F
 included as a submodule. It also shrinks the key-switching keys, the large public keys that
 rotations and multiplications need, so that they fit in GPU memory.
 
-## This branch
+## Beyond the paper
 
-`dev` is `main` plus work the paper does not report: ViT-B/16 and BERT-base running encrypted
-end to end, the GPU test suite under `tests/dev`, the approximation configs of the other models,
-the notebooks, and an exact placement algorithm, `--placer ilp`, which solves the same placement
-problem as a mixed-integer program (`docs/PLACER_ILP.md`), and the HEAT GPT-2, a GPT-2 fine-tuned
-for encryption, with its recorded forward pass and plans (`bootstrap_placements/README.md`).
-Changes to shared code are made on `main` first and then brought over here.
+The repository also holds work the paper does not report:
+- Llama-3.1-8B, ViT-B/16 and BERT-base running encrypted end to end (their latest numbers are
+  under [Results](#latest-numbers)).
+- The GPU test suite under `tests/dev`, the approximation configs of the other models, and the
+  notebooks.
+- An exact placement algorithm, `--placer ilp`, which solves the same placement problem as a
+  mixed-integer program (`docs/PLACER_ILP.md`).
+- The HEAT GPT-2, a GPT-2 fine-tuned for encryption, with its recorded forward pass and plans
+  (`bootstrap_placements/README.md`).
 
 ## Results
 
@@ -66,8 +69,9 @@ dimension of 2<sup>16</sup> and 128-bit security.
   </a>
 </p>
 
-Perseus runs on two CKKS parameter sets. The 32-bit one, the default, represents each level
-with a pair of 27-bit primes (27 levels); the 64-bit reference uses 28 levels of 53-bit primes.
+The table is the paper's. Perseus runs on two CKKS parameter sets. The 32-bit one, the default,
+represents each level with a pair of 27-bit primes (27 levels); the 64-bit reference uses 28
+levels of 53-bit primes.
 
 Half of every key-switching key is pseudo-random: the runtime recomputes it on the GPU from a
 seed instead of storing it, and stores the other half bit-packed. The effect on the 32-bit row:
@@ -77,6 +81,28 @@ seed instead of storing it, and stores the other half bit-packed. The effect on 
 | recomputed half + bit-packed half (default) | 11.86 | 32.55 GiB |
 | recomputed half only (`FIDESLIB_KSK_PACK=0`) | 12.19 (+3%) | 34.49 GiB |
 | bit-packed half only (`FIDESLIB_KSK_REGEN=0`) | 14.18 (+20%) | 41.61 GiB |
+
+### Latest numbers
+
+The runtime and the plans have moved on since the paper. These are the end-to-end walls at tag
+[`table-2026-10-19`](https://github.com/gladia-research-group/perseus/tree/table-2026-10-19), on
+the same GPU with the 32-bit parameters and 128-bit security. Accuracy is measured against the
+float64 models.
+
+| model | task | wall | accuracy |
+|---|---|---|---|
+| Llama-3.1-8B | 128-token prefill | 111.0 s | top-1 124–127 / 128, median KL ≈ 5e-5 |
+| GPT-2 small | 128-token prefill | 37.4 s | top-1 125 / 128 |
+| GPT-2 small | generation, per token | 3.78 s | top-1 14–16 / 16 (misses are rank-1 near ties) |
+| BERT-base | 128-token sentence classification (SST-2) | 40.2 s | float64 label, KL ≤ 1e-9 |
+| ViT-B/16 (224 × 224) | one image | 123.2 s | top-1 4 / 4 |
+
+- Each wall excludes key generation, weight encoding, encryption and decryption.
+- The GPT-2 per-token time includes the encrypted argmax that picks the next token on the server.
+- The Llama prefill times a second pass, after an untimed warm-up on another input. The other
+  rows are timed cold.
+- [`scripts/repro/`](scripts/repro) has one script per row.
+  [`docs/RESULTS_2026-10-19.md`](docs/RESULTS_2026-10-19.md) gives the protocol and every run.
 
 [`bootstrap_placements/README.md`](bootstrap_placements/README.md) lists every plan in the
 repository, including the variants that use only full-size bootstraps and the ablations, with
