@@ -28,22 +28,19 @@
 \begin{tbl}
 % no padding around the rules, so the Perseus column's fill runs unbroken from rule to rule
 \renewcommand{\arraystretch}{1.3}\setlength{\aboverulesep}{0pt}\setlength{\belowrulesep}{0pt}\setlength{\extrarowheight}{2pt}
-\begin{tabular}{llPrl}
+\begin{tabular}{llP}
 \toprule
-\textbf{Model} & \textbf{Task} & \textbf{Perseus} & \multicolumn{2}{l}{\textbf{Fastest prior result}} \\
+\textbf{Model} & \textbf{Task} & \textbf{Encrypted} \\
 \midrule
-Llama-3-8B & prefill, 128-token prompt & \textbf{111.0 s} & 116.0 s\nt{\dagger} & Sylph, RTX PRO 6000 \\
-Llama-3-8B & decode, one token & \textbf{21.1 s} & 31.0 s\nt{\dagger} & Sylph, RTX PRO 6000 \\
-GPT-2 small & prefill, 128-token prompt & \textbf{33.9 s} & 18520.0 s & AR-HE, H100 \\
-GPT-2 small & decode, one token & \textbf{3.78 s} & 68.0 s & EncryptedLLM, A100 \\
-ViT-B/16 & one $224\times224$ image & \textbf{123.2 s} & 2259.0 s & ATLAS, RTX 4090 \\
-BERT-base & 128-token input & \textbf{38.4 s} & 43.6 s\nt{\S} & Cerium, RTX PRO 6000 \\
+Llama-3-8B & prefill, 128-token prompt & \textbf{111.0 s} \\
+Llama-3-8B & decode, one token (512-token context) & \textbf{21.1 s} \\
+GPT-2 small & prefill, 128-token prompt & \textbf{33.9 s} \\
+GPT-2 small & decode, one token & \textbf{3.78 s} \\
+ViT-B/16 & one $224\times224$ image & \textbf{123.2 s} \\
+BERT-base & 128-token input & \textbf{38.4 s} \\
 \bottomrule
 \end{tabular}
-\tcap{Perseus is measured end to end on one NVIDIA RTX PRO 6000 with 128-bit security, and is open source. The fastest
-prior result is the fastest entry in the tables below, on its own hardware. $^\dagger$Composed from per-block timings,
-not run end to end; $^\S$replicated from the released code on our GPU. Decode contexts: Perseus 512 and Sylph 128 tokens
-(Llama), Perseus 32 and EncryptedLLM 128 tokens (GPT-2).}
+\tcap{\centering End to end on one NVIDIA RTX PRO 6000, 128-bit security.}
 \end{tbl}
 
 \begin{tbl}

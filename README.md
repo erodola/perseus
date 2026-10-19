@@ -16,83 +16,42 @@
 
 <p align="center">
   <a href="#results">Results</a> ·
-  <a href="#whats-inside">What's inside</a> ·
-  <a href="#reproduce-the-numbers">Reproduce</a> ·
+  <a href="#reproduce">Reproduce</a> ·
   <a href="#0-install">Install</a> ·
   <a href="#python-api">Python API</a> ·
-  <a href="#citation">Citation</a> ·
-  <a href="https://github.com/gladia-research-group/FIDESlib32bits">FIDESlib32bits runtime</a>
+  <a href="#citation">Citation</a>
 </p>
 
-Perseus runs transformers under fully homomorphic encryption (FHE) on a single GPU. The server
-computes on a prompt, an image or a sentence that it never sees in the clear, and only the key
-holder can read the result. Models, data layouts, encrypted nonlinear functions and the placement
-of bootstraps are all Python, so a new model or technique is Python code, not a new CUDA codebase:
-BERT's encrypted forward pass is about 150 lines, Llama-3's prefill about 500. The GPU work runs on
-[FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits), our 32-bit port of the
-CKKS library [FIDESlib](https://github.com/CAPS-UMU/FIDESlib).
-
-On one NVIDIA RTX PRO 6000, Perseus takes an encrypted 128-token prompt through **Llama-3-8B in
-111 s**. That is 3.1× faster than Cerium, the fastest open-source framework, on the same GPU.
-It decodes an encrypted Llama-3-8B token in **21.1 s** at a 512-token context.
+Perseus runs transformers under fully homomorphic encryption on a single GPU: the server computes
+on data it never sees in the clear. Models, packings, nonlinear approximations and bootstrap
+placement are plain Python, on top of
+[FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits), our 32-bit GPU port
+of [FIDESlib](https://github.com/CAPS-UMU/FIDESlib).
 
 <p align="center">
   <a href="assets/paper-tables-overview-light.png">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-overview-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-overview-light.png">
-      <img src="assets/paper-tables-overview-light.png" alt="Perseus against the fastest prior result. Llama-3-8B prefill of a 128-token prompt: 111.0 s against Sylph's 116.0 s (composed timings). Llama-3-8B decode of one token: 21.1 s against Sylph's 31.0 s (composed). GPT-2 small prefill: 33.9 s against AR-HE's 18520.0 s on H100. GPT-2 small decode: 3.78 s against EncryptedLLM's 68.0 s on A100. ViT-B/16, one image: 123.2 s against ATLAS's 2259.0 s on RTX 4090. BERT-base, 128 tokens: 38.4 s against Cerium's 43.6 s on the same GPU." width="707">
+      <img src="assets/paper-tables-overview-light.png" alt="Perseus, encrypted, end to end on one RTX PRO 6000 with 128-bit security. Llama-3-8B: prefill of a 128-token prompt 111.0 s, decode of one token at a 512-token context 21.1 s. GPT-2 small: prefill 33.9 s, decode 3.78 s per token. ViT-B/16: 123.2 s per image. BERT-base: 38.4 s for 128 tokens." width="707">
     </picture>
   </a>
 </p>
 
 ## What's inside
 
-Perseus covers the whole encrypted inference stack, and adds one optimization at each of its three
-levels.
-
-- **Python, all the way down to the kernels.**
-  - Each model is a Python program on `perseus.impl`: GPT-2, Llama-3, BERT and ViT in
-    `examples/*_from_primitives`.
-  - Packings, encrypted LayerNorm, RMSNorm, softmax, GELU and SiLU, and linear layers are Python
-    you can read and change.
-  - The planner reads a record of the model's encrypted forward pass and decides where its
-    bootstraps go.
-- **In-kernel key regeneration** (cryptographic level).
-  - The uniformly random half of every key-switching key is regenerated, from a ChaCha12 seed,
-    inside the two kernels that use it. The other half is stored bit-packed.
-  - Key storage halves. On GPT-2 decoding, GPU memory drops from 41.6 to 32.6 GiB and the time
-    per token by 16%.
-- **Complex Cachemir packing** (data level).
-  - Cachemir's layout for the key/value cache, extended to the complex slots of CKKS.
-  - Each ciphertext carries two real vectors, which roughly doubles the throughput of many
-    operations and roughly halves their memory.
-- **Packing- and magnitude-aware bootstrap placement** (model level).
-  - Perseus records one encrypted forward pass, with the layout and the largest magnitude of
-    every value, and places the bootstraps with an iterated minimum cut.
-  - Each bootstrap gets the scaling its values allow. A cheaper sparse bootstrap is used wherever
-    a ciphertext holds only a few distinct values.
-  - Against DaCapo, Orion and Fhelipe on the same runtime, GPT-2 runs 416 bootstraps per token
-    instead of 584–894 ([placement study](docs/PLACEMENT_STUDY.md)).
-- **Numbers you can rerun.**
-  - Every Perseus result below, except the Llama-3 decode, has a script in
-    [`scripts/repro/`](scripts/repro).
-  - The tag [`table-2026-10-19`](https://github.com/gladia-research-group/perseus/tree/table-2026-10-19)
-    freezes the code and the plans.
-  - [`docs/RESULTS_2026-10-19.md`](docs/RESULTS_2026-10-19.md) lists every run.
-
-Also in the repository:
-- an exact placement algorithm, `--placer ilp`, which solves the same problem as a mixed-integer
-  program (`docs/PLACER_ILP.md`);
-- the HEAT GPT-2, fine-tuned for encryption, with its plans (`bootstrap_placements/README.md`);
-- a client/server split that keeps the secret key on the client (`docs/SECURITY_MODEL.md`);
-- a GPU test suite (`tests/dev`) and notebooks.
+- **Python end to end.** GPT-2, Llama-3, BERT and ViT are Python programs on `perseus.impl`
+  (`examples/*_from_primitives`), with readable packings, nonlinearities and layers.
+- **In-kernel key regeneration.** Half of every key-switching key is regenerated on the GPU from a
+  ChaCha12 seed instead of being stored.
+- **Complex Cachemir packing.** Two real vectors per ciphertext, in the complex slots of CKKS.
+- **Packing- and magnitude-aware bootstrap placement.** GPT-2 runs 416 bootstraps per token,
+  against 584–894 for DaCapo, Orion and Fhelipe ([study](docs/PLACEMENT_STUDY.md)).
 
 ## Results
 
-All Perseus numbers are measured end to end on one NVIDIA RTX PRO 6000 (96 GB). They use the
-32-bit CKKS parameters (ring dimension 2<sup>16</sup>) and 128-bit security. Prior results are
-reported on their own hardware, or replicated on ours where the code is released.
+One NVIDIA RTX PRO 6000, 128-bit security. Prior results on their own hardware, or replicated on
+ours where the code is released.
 
 <p align="center">
   <a href="assets/paper-tables-llama-prefill-light.png">
@@ -144,17 +103,13 @@ reported on their own hardware, or replicated on ours where the code is released
   </a>
 </p>
 
-- Every Perseus time excludes key generation, encryption and decryption.
-- The prefill rows and BERT time a pass after an untimed warm-up on another input. ViT is the
-  median over four images.
-- The GPT-2 decode includes the encrypted argmax that picks the next token on the server.
-- The tables' sources are in `assets/paper-tables.tex`.
+Times exclude key generation, encryption and decryption. The protocol and every run are in
+[`docs/RESULTS_2026-10-19.md`](docs/RESULTS_2026-10-19.md).
 
-## Reproduce the numbers
+## Reproduce
 
-Each script runs one Perseus row on one GPU and prints its `SUMMARY` line with the time and the
-accuracy against the float64 model. Build first ([Install](#0-install)). `NODE` and `MEMS` bind
-the host side to the GPU's NUMA node, which the published numbers used.
+After the [install](#0-install), each script prints one row's time and its accuracy against the
+float64 model (`NODE`/`MEMS` bind it to the GPU's NUMA node):
 
 ```bash
 GPU=0 NODE=1 MEMS=1,2 bash scripts/repro/llama_prefill128.sh   # Llama-3-8B, 128-token prefill
@@ -164,16 +119,8 @@ GPU=0 bash scripts/repro/bert_base.sh                           # BERT-base, 128
 GPU=0 bash scripts/repro/vit_base.sh                            # ViT-B/16, four EuroSAT images
 ```
 
-- `BERT_WARMUP=1` and `GPT2_PF_WARMUP=1` give the warm-up protocol of the tables. Without them,
-  BERT and GPT-2 prefill are timed cold.
-- Every switch a run needs is stored in its plan (`bootstrap_placements/*/PLAN_CMD.txt`). No
-  environment file is needed beyond `scripts/local_env.sh`.
-- Llama-3-8B needs access to `meta-llama/Llama-3.1-8B` on Hugging Face.
-- Llama-3-8B, BERT and ViT do not fit in 48 GB of GPU memory (they were measured on 96 GB). They
-  use up to about 160 GB of host memory.
-- Run one model per GPU on an otherwise quiet machine. A run that shuts down while another one is
-  running stalls it for a few seconds. [`docs/RESULTS_2026-10-19.md`](docs/RESULTS_2026-10-19.md)
-  explains the protocol.
+BERT and GPT-2 prefill match the tables with `BERT_WARMUP=1` / `GPT2_PF_WARMUP=1`. Llama-3-8B
+needs access to `meta-llama/Llama-3.1-8B`; Llama, BERT and ViT were measured on a 96 GB GPU.
 
 ## Layout
 
