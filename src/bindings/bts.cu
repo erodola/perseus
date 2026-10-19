@@ -122,6 +122,15 @@ void bind_bts(py::module_& root) {
     m.def("mismatches", &mismatches, py::arg("a"), py::arg("b"), kRelease,
           "Residues that differ between two device ciphertexts (both polynomials, every limb); -1 = different shape.");
     m.def("sync", [] { cudaDeviceSynchronize(); }, kRelease);
+    m.def("ks_lane",
+          [](int lane) {
+              const int old = FC::ContextData::ksLane();
+              FC::ContextData::ksLane() = lane;
+              return old;
+          },
+          py::arg("lane"),
+          "Set the calling thread's key-switch workspace lane (0 or 1: independent work on different lanes does not "
+          "serialize on one workspace); returns the previous lane.");
 
     // Coefficient residues of a device ciphertext and back. ContextData's layout differs in this TU (NCCL members):
     // moduli come from the OpenFHE parameters, N from the data.
@@ -390,6 +399,10 @@ void bind_bts(py::module_& root) {
           py::arg("ct"), py::arg("slots"), py::arg("out_limb"), py::arg("factor") = 1.0, py::arg("skip_mask") = 0,
           py::arg("nf_ref") = 0.0, kRelease,
           "Slot -> coefficient transform outside a bootstrap, rescaled output at limb index out_limb.");
+    m.def("finish_stc_first", [](DeviceCt& d, FC::BtsState& s, uint64_t mul) { FC::btsFinishStcFirst(d.get(), s, mul); },
+          py::arg("ct"), py::arg("st"), py::arg("mul") = 1, kRelease,
+          "mod_raise, fold, cts_stage x n_cts, eval_mod, stc_first_output, then mult_int(mul) if mul > 1 (one CUDA graph "
+          "per shape under FIDESLIB_FINISH_GRAPH=1).");
     m.def("mod_raise", [](DeviceCt& d, FC::BtsState& s) { FC::btsModRaise(d.get(), s); }, py::arg("ct"),
           py::arg("st"), kRelease);
     m.def("fold", [](DeviceCt& d, const FC::BtsState& s) { FC::btsFold(d.get(), s); }, py::arg("ct"), py::arg("st"),

@@ -474,6 +474,8 @@ class CapFhe(FakeFhe):
         ct.level, ct.noise_deg = self.landing[s]
         if s == 0 and ct.level and self.stc_first() and self._in_level <= self.stc_entry:
             ct.level -= self.stc_drop
+        if s == 0 and getattr(self, "raise_drop", 0):    # a deliberate refresh under a raise variant (PF_SM_R_RAISE)
+            ct.level += self.unit * self.raise_drop
         ct.tag = t_bootstrap(ct.tag, s, self.slots)
         self.n_bootstraps += 1
         self.total_bootstraps += 1

@@ -4471,6 +4471,11 @@ make_ckks_context(const CKKSContextOptions& o = {})
             const char* d = std::getenv("FIDESLIB_DIAG_SK");  // noise-flooding-free diagnostic decryptions
             if (d && std::atoi(d) > 0) cc->LoadDiagSecret(ctx->keys.secretKey);
         }
+        // Level-adaptive relinearization keys (FIDESLIB_LAR=1): wide digits over the idle top primes at mid levels.
+        if (!skip_gpu_load && !from_keys) {
+            const char* e = std::getenv("FIDESLIB_LAR");
+            if (e && std::atoi(e) > 0) cc->LoadLarKeys(ctx->keys.secretKey);
+        }
         // Setup-time pre-capture of cached bootstrap graphs. Inside heavy so BOTH branches
         // get it; LoadContext just ran, so the GPU context and precomputes are live. No-op
         // unless FIDESlib's graph journal is configured (FIDESLIB_BTS_GRAPH / _JOURNAL).

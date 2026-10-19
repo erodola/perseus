@@ -346,6 +346,11 @@ _EVICT_SITES = ("",)        # every mask: each block re-encodes at its own level
 
 
 _POOL_TRIM = os.environ.get("PF_POOL_TRIM", "1") not in ("", "0")
+# PF_POOL_TRIM_BELOW_GB=x: trim the pools (a device-wide sync) only when free device memory is below x GB
+_POOL_TRIM_BELOW_GB = float(os.environ.get("PF_POOL_TRIM_BELOW_GB", "1e9"))
+# PF_POOL_TRIM_EVERY=k: the trim (a device-wide sync) on every k-th block end only
+_POOL_TRIM_EVERY = int(os.environ.get("PF_POOL_TRIM_EVERY", "1"))
+_trim_count = [0]
 _EVICT_BELOW_GB = float(os.environ.get("PF_EVICT_BELOW_GB", "12"))     # evict/trim only below this
 # PF_EVICT_UNUSED=1: evict only the masks the block did not use (all of them below PF_EVICT_ALL_BELOW_GB)
 _EVICT_UNUSED = os.environ.get("PF_EVICT_UNUSED", "1") not in ("", "0")
@@ -361,7 +366,9 @@ def evict_block_masks(rt):
     can = _EVICT and hasattr(rt.ops, "erase_pts")
     if _EVICT_UNUSED and can:
         n = rt.evict_unused()
-        if _POOL_TRIM and hasattr(core, "gpu_pool_trim"):
+        _trim_count[0] += 1
+        if _POOL_TRIM and hasattr(core, "gpu_pool_trim") and core.device_free_gb() < _POOL_TRIM_BELOW_GB \
+                and _trim_count[0] % _POOL_TRIM_EVERY == 0:
             core.gpu_pool_trim()
         if not hasattr(core, "device_free_gb") or core.device_free_gb() >= _EVICT_ALL_BELOW_GB:
             return n

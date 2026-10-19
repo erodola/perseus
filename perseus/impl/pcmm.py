@@ -333,24 +333,40 @@ def _record_calib(name, ys):
 # PF_PCMM_PHASES=1 (diagnostic: syncs every phase): per-phase wall of the output finishes, printed at exit
 _PHASES = {} if os.environ.get("PF_PCMM_PHASES", "0") not in ("", "0") else None
 _INTERLEAVE = int(os.environ.get("PF_PCMM_INTERLEAVE", "0") or 0)
+# PF_MM_SYNC=1 (diagnostic): device syncs around the PCMM / CCMM stages so t_in / t_mm / t_out time them; off, stream
+# order carries the work (-4.9 s of 161 on the Llama 128-token prefill)
+MM_SYNC = any(os.environ.get(k, "0") not in ("", "0") for k in ("PF_MM_SYNC", "PF_MM_TSYNC"))   # PF_MM_TSYNC: dev's name
+# PF_FINISH_GRAPH=1: each output refresh as one bts.finish_stc_first call (a CUDA graph per shape with
+# FIDESLIB_FINISH_GRAPH=1) instead of the per-stage calls
+FINISH_GRAPH = os.environ.get("PF_FINISH_GRAPH", "0") not in ("", "0")
 # PF_PCMM_RAISE="gate_up:1,qkv:3": the finishes of those linears raise d composite levels below the top (the route's raise
 # variant, their outputs land 2 d level units deeper, where the consumer has the slack); "gate_up:1:0-23" only on blocks 0..23
 _RAISE = [e.split(":") for e in os.environ.get("PF_PCMM_RAISE", "").split(",") if e]
-_TSYNC = os.environ.get("PF_MM_TSYNC", "0") not in ("", "0")    # fences for the phase timings
-# PF_PCMM_RAISE_UP=d[:lo-hi]: gate_up's up half (outputs n_out/2..) raises d instead (on blocks lo..hi)
-_RAISE_UP = os.environ.get("PF_PCMM_RAISE_UP", "").split(":") if os.environ.get("PF_PCMM_RAISE_UP") else None
+# PF_PCMM_RAISE_HI: PF_PCMM_RAISE's syntax for the second half of a linear's outputs (gate_up: the up half, whose
+# refresh only feeds the GLU product, can land lower than the gate half that feeds the SiLU)
+_RAISE_HI = [e.split(":") for e in os.environ.get("PF_PCMM_RAISE_HI", "").split(",") if e]
+# PF_PCMM_RAISE_UP=d[:lo-hi] (pr9's spelling of the same lever): PF_PCMM_RAISE_HI=gate_up:d[:lo-hi]
+if os.environ.get("PF_PCMM_RAISE_UP"):
+    _RAISE_HI.append(["gate_up"] + os.environ["PF_PCMM_RAISE_UP"].split(":"))
 # PF_PCMM_BATCH=K (2..4): the output finishes in groups of K, each CtS stage batched (bts.cts_stage_batch)
 _BATCH = int(os.environ.get("PF_PCMM_BATCH", "0") or 0)
 if _BATCH > 4:
     raise ValueError(f"PF_PCMM_BATCH={_BATCH}: at most 4")
-# PF_PCMM_BATCH_DROPS=1: with per-output drops (PF_PCMM_RAISE_UP), batch the outputs of each drop together
+# PF_PCMM_BATCH_DROPS=1: with per-output drops (PF_PCMM_RAISE_HI), batch the outputs of each drop together
 _BATCH_DROPS = os.environ.get("PF_PCMM_BATCH_DROPS", "0") not in ("", "0")
+# PF_PCMM_LANES=n: consecutive output finishes rotate over n key-switch workspaces (bts.ks_lane; 1 means 2, at most 4), so
+# independent refreshes do not serialize on one workspace and overlap on the GPU
+_DBG = os.environ.get("PF_PCMM_DBG", "0") not in ("", "0")   # diagnostic: first call's input / output fingerprints
+# PF_FUSE_PROBE=dir (diagnostic): the first b0.out call's inputs decrypted before and after the StC-first input
+# transform (slot vectors of the coefficient-form ciphertexts) -> dir/pcmm_out_in.npz
+_PROBE = os.environ.get("PF_FUSE_PROBE", "")
+_LANES = min(max(int(os.environ.get("PF_PCMM_LANES", "0") or 0), 2), 4) if os.environ.get("PF_PCMM_LANES", "0") not in ("", "0") else 0
 
 
-def _raise_of(lin):
+def _raise_of(lin, table=None):
     parts = (lin.name or "").split(".")
     blk = int(parts[0][1:]) if len(parts) > 1 and parts[0][1:].isdigit() else None
-    for e in _RAISE:
+    for e in (_RAISE if table is None else table):
         if e[0] != parts[-1]:
             continue
         if len(e) > 2:
@@ -361,12 +377,12 @@ def _raise_of(lin):
     return 0
 
 
-def _raise_out(lin, m):
-    """The raise drop of lin's output m."""
-    if _RAISE_UP and (lin.name or "").endswith(".gate_up") and m >= lin.n_out // 2:
-        blk = int(lin.name.split(".")[0][1:])
-        if len(_RAISE_UP) < 2 or int(_RAISE_UP[1].split("-")[0]) <= blk <= int(_RAISE_UP[1].split("-")[1]):
-            return int(_RAISE_UP[0])
+def _drop_of(lin, m):
+    """Output m's raise drop: PF_PCMM_RAISE_HI's for the second half when it names lin, else PF_PCMM_RAISE's."""
+    if _RAISE_HI and m >= lin.n_out // 2:
+        hi = _raise_of(lin, _RAISE_HI)
+        if hi:
+            return hi
     return _raise_of(lin)
 
 
@@ -424,6 +440,8 @@ class Pcmm:
         self.keys = None
         self.times = np.zeros(6)
         self.calls = 0
+        self.calls_dbg = 0
+        self._dbg_seen = set()
         self.keygen_s = self.t_in = self.t_mm = self.t_out = 0.0
         # StC-first entry / landing levels: measured on the GPU, n32 values on the fake (PF_PCMM_CAP / _LAND)
         self.cap = int(os.environ.get("PF_PCMM_CAP", "0")) or None
@@ -480,8 +498,14 @@ class Pcmm:
             print(f"[pcmm_verify] {lin.name} n_in={lin.n_in} n_out={lin.n_out} shift={lin.shift} "
                   f"max|y|={max(float(np.abs(w).max()) for w in want):.3g} err={err:.3g} "
                   f"level={ops.level(outs[0])} drop={_raise_of(lin)}", flush=True)
-        for y in outs:
-            self.fhe.record_external_bootstrap(y, names, levels)
+        lands = [None] * len(outs)
+        if self.bts is None and getattr(self.fhe, "pcmm_landing", None) is not None:
+            # the fake's per-output landing (its raise drop), not the session's one PCMM landing: the GPU lands a
+            # dropped finish 2 levels per drop lower, and a plan made on the capture checks those levels
+            lands = [(self.land + 2 * _drop_of(lin, m), self.fhe.pcmm_landing[1]) for m in range(len(outs))]
+        for y, ld in zip(outs, lands):
+            self.fhe.record_external_bootstrap(y, names, levels, landing=ld) if ld else \
+                self.fhe.record_external_bootstrap(y, names, levels)
         self.calls += 1
         return [ops.rotate(y, 1) for y in outs]
 
@@ -497,7 +521,7 @@ class Pcmm:
             for c in range(lin.n_in):
                 blk = Wi[m * nch:(m + 1) * nch, c * nch:(c + 1) * nch].astype(np.float64)[inv[:, None], inv[None, :]]
                 y += blk @ X[c]
-            o = FakeCt(np.roll(y.reshape(-1) / lin.w_scale, 1), self.land + 2 * _raise_out(lin, m), 1, xr[0].packing)
+            o = FakeCt(np.roll(y.reshape(-1) / lin.w_scale, 1), self.land + 2 * _drop_of(lin, m), 1, xr[0].packing)
             if hasattr(xr[0], "ptag"):       # fakecap: outputs reuse the input handles (spares: input 0)
                 o.ptag = xr[m if m < lin.n_in else 0].ptag
             outs.append(o)
@@ -520,39 +544,56 @@ class Pcmm:
     def _device_cf(self, xr, lin):
         ops, bts, S = self.ops, self.bts, self.ops.inf.slots
         stamp = lin.w_scale * (1 << lin.shift)
-        if _TSYNC:
+        if MM_SYNC:
             bts.sync()
         t0 = time.perf_counter()
         devs, outs, out_devs, states = [], [], [], []
         spare = []
         drop = _raise_of(lin)
-        drops = [_raise_out(lin, m) for m in range(lin.n_out)]
+        drops = [_drop_of(lin, m) for m in range(lin.n_out)]
+        mixed = any(v != drop for v in drops)
 
-        def fin_state(d, drop=drop):        # the finish's state, from the route's raise variant under a drop
-            if not drop:
+        def fin_state(d, dr=drop):        # the finish's state, from the route's raise variant under a drop
+            if not dr:
                 return bts.begin(d, S, False, True)
-            old = bts.raise_scope(self.fhe, drop)
+            old = bts.raise_scope(self.fhe, dr)
             try:
                 return bts.begin(d, S, False, True)
             finally:
                 bts.raise_scope(self.fhe, old)
+        probe = _PROBE and lin.name == "b0.out" and not getattr(self, "_probed", False)
+        if probe:
+            bts.sync()
+            pre = [ops.decrypt_slots_complex(x) for x in xr]
         for x in xr:
             d = bts.device(self.fhe, x)
             st = bts.begin(d, S, False, True)
-            m = len(outs)
-            stf = (fin_state(d, drops[m]) if drops[m] else st) if m < lin.n_out else st
+            dm = drops[min(len(outs), lin.n_out - 1)]
+            stf = fin_state(d, dm) if dm else st
             if not spare and lin.n_out > lin.n_in:   # the spare outputs' states, taken at the input level
-                spare = [fin_state(d, drops[k]) for k in range(lin.n_out - 1, lin.n_in - 1, -1)]
+                spare = [fin_state(d, drops[m]) for m in range(lin.n_in, lin.n_out)]
             if not st.stc_first:
                 raise RuntimeError("pcmm: the dense route is not StC-first (FIDESLIB_BTS_STC_FIRST=2)")
             bts.scale_noise_factor(d, stamp)
             bts.stc_first_input(d, st, True)
+            if _DBG and lin.name not in self._dbg_seen:
+                bts.sync()
+                v = np.asarray(self.ops.decrypt_slots(x))
+                print(f"[pcmm_dbg] {lin.name} in{len(devs)} after stc: nf {bts.noise_factor(d):.6e} lvl {d.level} "
+                      f"mean|v| {np.abs(v).mean():.6e} v0 {v[0]:.6e} v5 {v[5]:.6e}", flush=True)
             devs.append(d)
             if len(outs) < lin.n_out:
                 outs.append(x)
                 out_devs.append(d)
                 states.append(stf)
-        if _TSYNC:
+        if probe:
+            self._probed = True
+            bts.sync()
+            np.savez(os.path.join(_PROBE, "pcmm_out_in.npz"), pre=np.array(pre),
+                     post=np.array([ops.decrypt_slots_complex(x) for x in xr]),
+                     nf=np.array([bts.noise_factor(d) for d in devs]), level=np.array([d.level for d in devs]),
+                     stamp=stamp, w_scale=lin.w_scale)
+        if MM_SYNC:
             bts.sync()
         t1 = time.perf_counter()
         self.t_in += t1 - t0
@@ -563,56 +604,98 @@ class Pcmm:
             y = bts.clone(outs[0])
             outs.append(y)
             out_devs.append(bts.device(self.fhe, y))
-            states.append(spare.pop())
+            states.append(spare.pop(0))
         # outputs overwrite inputs only after every input is consumed (pcmmMulti's contract)
         tm = bts.pcmm_multi_planes(devs, out_devs[:lin.n_out], self.keys, lin.Wd, nf_out)
+        if _DBG and lin.name not in self._dbg_seen:
+            self._dbg_x = outs[0]
         self.times += np.asarray(tm)
         t2 = time.perf_counter()
         self.t_mm += t2 - t1
         ph = _PHASES is not None
-        old_drop = bts.raise_scope(self.fhe, drop) if drop else None
-        try:
-            self._finish_all(out_devs, states, lin, ph, drops if len(set(drops)) > 1 else None)
-        finally:
-            if drop:
-                bts.raise_scope(self.fhe, old_drop)
-        if _TSYNC:
+        if mixed and _BATCH > 1 and _BATCH_DROPS:    # the outputs of each drop batched, under that drop's variant
+            for dv in dict.fromkeys(drops[:lin.n_out]):
+                idx = [m for m in range(lin.n_out) if drops[m] == dv]
+                old_drop = bts.raise_scope(self.fhe, dv)
+                try:
+                    _finish_batched(bts, [out_devs[m] for m in idx], [states[m] for m in idx], lin.shift, ph)
+                finally:
+                    bts.raise_scope(self.fhe, old_drop)
+        elif mixed:                    # PF_PCMM_RAISE_HI: each output's finish under its own raise variant
+            for m in range(lin.n_out):
+                old_drop = bts.raise_scope(self.fhe, drops[m])
+                try:
+                    self._finish_one(out_devs[m], states[m], lin, ph, m)
+                finally:
+                    bts.raise_scope(self.fhe, old_drop)
+        else:
+            old_drop = bts.raise_scope(self.fhe, drop) if drop else None
+            try:
+                self._finish_all(out_devs, states, lin, ph)
+            finally:
+                if drop:
+                    bts.raise_scope(self.fhe, old_drop)
+        if MM_SYNC:
             bts.sync()
         self.t_out += time.perf_counter() - t2
         if self.land is None and not drop:
             self.land = ops.level(outs[0])
+        if _DBG and lin.name not in self._dbg_seen:
+            self._dbg_seen.add(lin.name)
+            bts.sync()
+            v = np.asarray(self.ops.decrypt_slots(outs[0]))
+            print(f"[pcmm_dbg] {lin.name} out0: nf {bts.noise_factor(out_devs[0]):.6e} mean|v| {np.abs(v).mean():.6e} "
+                  f"v0 {v[0]:.6e} v5 {v[5]:.6e}", flush=True)
         return outs[:lin.n_out]
 
-    def _finish_all(self, out_devs, states, lin, ph, drops=None):
+    def _finish_all(self, out_devs, states, lin, ph):
         bts = self.bts
-        if drops is not None and _BATCH > 1 and _BATCH_DROPS:
-            n = lin.n_out
-            for dv in dict.fromkeys(drops[:n]):
-                idx = [m for m in range(n) if drops[m] == dv]
-                old = bts.raise_scope(self.fhe, dv)
-                try:
-                    _finish_batched(bts, [out_devs[m] for m in idx], [states[m] for m in idx], lin.shift, ph)
-                finally:
-                    bts.raise_scope(self.fhe, old)
-            return
-        if drops is not None:            # per-output drops: one output at a time, each in its scope
-            for m in range(lin.n_out):
-                old = bts.raise_scope(self.fhe, drops[m])
-                try:
-                    self._finish_one(out_devs[m], states[m], lin, ph)
-                finally:
-                    bts.raise_scope(self.fhe, old)
-            return
         if _BATCH > 1:
             _finish_batched(bts, out_devs[:lin.n_out], states[:lin.n_out], lin.shift, ph)
             return
         if _INTERLEAVE > 1 and not ph:
             self._finish_interleaved(out_devs[:lin.n_out], states[:lin.n_out], lin.shift)
         for m in (range(0) if _INTERLEAVE > 1 and not ph else range(lin.n_out)):
-            self._finish_one(out_devs[m], states[m], lin, ph)
+            self._finish_one(out_devs[m], states[m], lin, ph, m)
 
-    def _finish_one(self, d, st, lin, ph):
+    def _finish_one(self, d, st, lin, ph, m=0):
+        if _LANES:
+            old = self.bts.ks_lane(m % _LANES)
+            try:
+                self._finish_one_lane(d, st, lin, ph)
+            finally:
+                self.bts.ks_lane(old)
+        else:
+            self._finish_one_lane(d, st, lin, ph)
+
+    def _finish_one_lane(self, d, st, lin, ph):
         bts = self.bts
+        x = getattr(self, "_dbg_x", None)
+        if x is not None:
+            self._dbg_x = None
+
+            def fp(tag):
+                bts.sync()
+                v = np.asarray(self.ops.decrypt_slots(x))
+                print(f"[pcmm_dbg] finish {tag:8s} nf {bts.noise_factor(d):.6e} lvl {d.level} mean|v| "
+                      f"{np.abs(v).mean():.6e} v0 {v[0]:.6e}", flush=True)
+            fp("in")
+            bts.mod_raise(d, st)
+            fp("raise")
+            bts.fold(d, st)
+            for k in range(st.n_cts):
+                bts.cts_stage(d, st, k)
+                fp(f"cts{k}")
+            bts.eval_mod(d, st)
+            fp("evalmod")
+            bts.stc_first_output(d, st)
+            fp("stc_out")
+            if lin.shift:
+                bts.mult_int(d, 1 << lin.shift)
+            return
+        if FINISH_GRAPH and not ph:
+            bts.finish_stc_first(d, st, 1 << lin.shift if lin.shift else 1)
+            return
         tp = _phase(bts, None) if ph else None
         bts.mod_raise(d, st)
         tp = _phase(bts, "raise", tp) if ph else None

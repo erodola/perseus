@@ -34,10 +34,54 @@ def page_tokens(p: int) -> int:
 
 def page_meta(p: int):
     """(tq, tk, query valid, kc): kc = the keys a query row sees over pages 0..p (BOS included)."""
+    if _META_CACHE:
+        m = _meta_cache.get(p)
+        if m is None:
+            m = _meta_cache[p] = tuple(_frozen(a) for a in _page_meta(p))
+        return m
+    return _page_meta(p)
+
+
+def _page_meta(p: int):
     tq, tk = sc.packed_meta(page_tokens(p))
     qv = tq >= 0
     kc = np.where(qv, PAGE * p + tq + (2 if p == 0 else 1), 1)
     return tq, tk, qv, kc
+
+
+# PF_SM_META_CACHE=1 (default 0): page_meta and the reciprocal rounds' per-slot seed vectors are built once per page
+# (and softmax config) and reused: pure functions of their key, ~12 ms of host Python each that the GPU waits on. The
+# warm-up pass builds them; the cached arrays are read-only.
+_META_CACHE = __import__("os").environ.get("PF_SM_META_CACHE", "0") not in ("", "0")
+_meta_cache = {}
+_seed_cache = {}
+
+
+def _frozen(a):
+    a.setflags(write=False)
+    return a
+
+
+def _round_seeds(cfg, p: int, kc, cheb: bool, gs_first):
+    """Per reciprocal round: (av, bv, iters, cv) over the page's slots (the values the round loop builds inline)."""
+    key = (p, cheb, gs_first, repr(cfg))
+    out = _seed_cache.get(key)
+    if out is not None:
+        return out
+    ks = sorted(set(kc.tolist()))
+    rnd = {k: (smcheb.rounds(cfg, k) if cheb else _recip_rounds(_KcExtrapolated(cfg), k, gs_first)) for k in ks}
+    out = []
+    for r in range(len(rnd[ks[0]])):
+        per = [rnd[int(k)][r] for k in kc]
+        av = _frozen(np.array([q[0] * q[3] for q in per]))
+        bv = _frozen(np.array([q[1] * q[3] * q[3] for q in per]))
+        cv = None
+        if cheb:
+            cv = ([_frozen(np.array([q[4][0][i] for q in per])) for i in range(per[0][2] - 1)],
+                  _frozen(np.array([q[4][1] for q in per])))
+        out.append((av, bv, per[0][2], cv))
+    _seed_cache[key] = out
+    return out
 
 
 def _valid(p: int, diag: bool, tq, tk, qv, o: int):
@@ -54,6 +98,32 @@ _RSTAT = __import__("os").environ.get("PF_PAGED_RSTAT", "0") not in ("", "0")
 _STREAM = __import__("os").environ.get("PF_PAGED_STREAM", "0") not in ("", "0")
 # PF_PAGED_DEVKV=1: a page's own K / V stay on the device for its diagonal block; host copies only for later pages
 _DEVKV = __import__("os").environ.get("PF_PAGED_DEVKV", "0") not in ("", "0")
+# PF_SM_EXP_EPS=2e-6: the softmax exp series' coefficient trim (relative to the largest; default poly.CHEB_COEFF_EPS
+# 1e-6). Layers whose degree-7 coefficient sits just above 1e-6 (14, 29 at d1 = 8) evaluate one level deeper and
+# refresh every score ciphertext before the first normalisation; 2e-6 cuts them to degree 6 like their neighbours
+_EXP_EPS = float(__import__("os").environ.get("PF_SM_EXP_EPS", "0") or 0) or None
+# PF_SM_R_RAISE=d: the last round's deliberate R refreshes (PF_SM_R_REFRESH / PF_SM_R_ITER) raise d composite levels
+# below the top (the route's raise variant; FIDESLIB_BTS_RAISE_DROPS must list d): their outputs have 3-4 levels of
+# slack before the unpack products. The capture lands them d levels lower too (CapFhe.raise_drop)
+_R_RAISE = int(__import__("os").environ.get("PF_SM_R_RAISE", "0") or 0)
+
+
+def _r_refresh(ops, x):
+    if not _R_RAISE:
+        return ops.bootstrap_real(x)
+    bts, fhe = getattr(ops.core, "bts", None), ops.fhe
+    if bts is not None:
+        old = bts.raise_scope(fhe, _R_RAISE)
+        try:
+            return ops.bootstrap_real(x)
+        finally:
+            bts.raise_scope(fhe, old)
+    old = getattr(fhe, "raise_drop", 0)
+    fhe.raise_drop = _R_RAISE
+    try:
+        return ops.bootstrap_real(x)
+    finally:
+        fhe.raise_drop = old
 
 
 def _dbg_softmax(rt, Sd, Pd, p, al, tq, tk, qv):
@@ -142,11 +212,11 @@ def attention_paged(rt, Q, K, V, cfg, ch: Chunks, B: Blocks, page: int, store: l
         if merge:           # the scores carry alpha (unmerge's scale): the domain map's product rode its masks
             s = rt.add_mask(s, site + ("score", cfg.clip_lo, mean, "pre"),
                             lambda: al * np.where(valid, -mean, cfg.clip_lo - mean) - be)
-            z = eval_chebyshev(ops, s, cfg.cheb_coeffs, -1.0, 1.0)
+            z = eval_chebyshev(ops, s, cfg.cheb_coeffs, -1.0, 1.0, _EXP_EPS)
         else:
             s = rt.add_mask(s, site + ("score", cfg.clip_lo, mean),
                             lambda: np.where(valid, -mean, cfg.clip_lo - mean))
-            z = eval_chebyshev(ops, s, cfg.cheb_coeffs, cfg.cheb_a / sf, cfg.cheb_b / sf)
+            z = eval_chebyshev(ops, s, cfg.cheb_coeffs, cfg.cheb_a / sf, cfg.cheb_b / sf, _EXP_EPS)
         for _ in range(cfg.log2delta1):
             z = ops.square(z)
         z = im_cleanse(ops, z)
@@ -171,10 +241,12 @@ def attention_paged(rt, Q, K, V, cfg, ch: Chunks, B: Blocks, page: int, store: l
 
     with rt.step("softmax"):
         cheb = getattr(ops, "sm_cheb_gs", False)
-        ks = sorted(set(kc.tolist()))
-        rnd = {k: (smcheb.rounds(cfg, k) if cheb else _recip_rounds(_KcExtrapolated(cfg), k, ops.sm_gs_first))
-               for k in ks}
-        n_rounds = len(rnd[ks[0]])
+        seeds = _round_seeds(cfg, p, kc, cheb, ops.sm_gs_first) if _META_CACHE else None
+        if seeds is None:
+            ks = sorted(set(kc.tolist()))
+            rnd = {k: (smcheb.rounds(cfg, k) if cheb else _recip_rounds(_KcExtrapolated(cfg), k, ops.sm_gs_first))
+                   for k in ks}
+        n_rounds = len(seeds) if seeds is not None else len(rnd[ks[0]])
         Y = Z
         P = None
         for r in range(n_rounds):
@@ -198,13 +270,16 @@ def attention_paged(rt, Q, K, V, cfg, ch: Chunks, B: Blocks, page: int, store: l
                     Zr.append(zj)
                     acc = _acc(rt, acc, [D])
             D = ops.rotate_and_sum(acc[0], 1 << 12, sc.SLOTS)
-            per = [rnd[int(k)][r] for k in kc]
-            av = np.array([q[0] * q[3] for q in per])
-            bv = np.array([q[1] * q[3] * q[3] for q in per])
-            iters = per[0][2]
-            cv = None
-            if cheb:
-                cv = ([np.array([q[4][0][i] for q in per]) for i in range(iters - 1)], np.array([q[4][1] for q in per]))
+            if seeds is not None:
+                av, bv, iters, cv = seeds[r]
+            else:
+                per = [rnd[int(k)][r] for k in kc]
+                av = np.array([q[0] * q[3] for q in per])
+                bv = np.array([q[1] * q[3] * q[3] for q in per])
+                iters = per[0][2]
+                cv = None
+                if cheb:
+                    cv = ([np.array([q[4][0][i] for q in per]) for i in range(iters - 1)], np.array([q[4][1] for q in per]))
             R = sm.recip_slots(rt, D, av, bv, iters, ("sm", layer, r, "pg", p), cv)
             if layer == _DBG_LAYER or (_RSTAT and r == n_rounds - 1):
                 rv = np.real(ops.decrypt_slots_complex(R))[qv]
@@ -217,12 +292,12 @@ def attention_paged(rt, Q, K, V, cfg, ch: Chunks, B: Blocks, page: int, store: l
                         R = ops.mult(R, 1.0 / sc_r)
                     if sm.R_ITER:
                         y = ops.copy(R)
-                        ops.bootstrap_real(y)
+                        _r_refresh(ops, y)
                         e = ops.add(ops.mult(ops.sub(R, y), float(2 ** sm.R_ITER_P)), 0.25)
-                        ops.bootstrap_real(e)
+                        _r_refresh(ops, e)
                         R = ops.add(y, ops.mult(ops.add(e, -0.25), float(2.0 ** -sm.R_ITER_P)))
                     else:
-                        ops.bootstrap_real(R)
+                        _r_refresh(ops, R)
                 Rh = ops.rotate(R, 16)
                 mk = ("sm.unpack",) if sc_r == 1.0 else ("sm.unpack", sc_r)
 

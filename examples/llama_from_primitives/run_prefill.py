@@ -14,6 +14,16 @@ import numpy as np
 DEFAULT_CONFIGS = "configs/model/approximation/llama31_8b_n32/configs.json"
 
 
+def _memdbg(tag):
+    """PF_MEMDBG_SETUP=1 (diagnostic, no device sync): device free memory and pool reservation after a setup stage."""
+    if not os.environ.get("PF_MEMDBG_SETUP"):
+        return
+    from perseus import _core
+    if hasattr(_core, "device_free_gb"):
+        st = _core.gpu_pool_stats() if hasattr(_core, "gpu_pool_stats") else {}
+        print(f"[memdbg] {tag}: free={_core.device_free_gb():.2f}GB pool={st.get('reserved_gb', 0):.2f}GB", flush=True)
+
+
 def main(argv=None):
     from examples.gpt2_from_primitives.run_decode import gpu_busy
     ap = argparse.ArgumentParser()
@@ -59,7 +69,7 @@ def main(argv=None):
     gt = None if a.fake else hf.oracle_logits(toks, cache)
     # the prefill keeps the host wait on device-encoded plaintexts that FIDESlib f12c06e restored for this path;
     # the decode runs without it (FIDESLIB_ENCODE_NOSYNC default 1). --set FIDESLIB_ENCODE_NOSYNC=1 overrides.
-    over = {"FIDESLIB_ENCODE_NOSYNC": "0", **env.plan_runtime(a.plan, "n32"), "LLAMA_PACKING": "cachemir_complex",
+    over = {"FIDESLIB_ENCODE_NOSYNC": os.environ.get("FIDESLIB_ENCODE_NOSYNC", "0"), **env.plan_runtime(a.plan, "n32"), "LLAMA_PACKING": "cachemir_complex",
             **dict(kv.split("=", 1) for kv in a.set)}
     for k, v in over.items():          # a plan's PF_* switches (the arm it was made for); the shell's win
         if k.startswith("PF_"):
@@ -71,8 +81,11 @@ def main(argv=None):
             os.environ["PF_PCMM_CALIB_IN"] = cal
     ccmm_on = os.environ.get("PF_ATTN", "") == "ccmm"
     if pcmm or ccmm_on:
+        # FIDESLIB_CTS_ALT_BUDGET=5: the dropped finishes' raise variants take a 5-stage CtS one level higher (same
+        # landing, ~1 ms less per finish); 0 = the shipped 4-stage CtS everywhere
         over = {"FIDESLIB_BTS_STC_FIRST": "2", "FIDESLIB_BTS_STC_FIRST_ROUTES": "dense",
-                "FIDESLIB_BTS_STC_FIRST_STAGED_ONLY": os.environ.get("PF_PCMM_STAGED_ONLY", "1"), **over}
+                "FIDESLIB_BTS_STC_FIRST_STAGED_ONLY": os.environ.get("PF_PCMM_STAGED_ONLY", "1"),
+                "FIDESLIB_CTS_ALT_BUDGET": os.environ.get("FIDESLIB_CTS_ALT_BUDGET", "5"), **over}
     if a.capture:
         os.environ["FHE_GRAPH_DIR"] = a.capture
         os.environ.setdefault("FHE_GRAPH_CAPTURE_TOKEN", "1")
@@ -105,7 +118,9 @@ def main(argv=None):
             print(f"[llama-prefill] rotation keys from the plan's graph: {len(rot)}", flush=True)
         sess = env.open_session(dims, a.device, complex_payload=True, extra_rot_steps=rot, base=not pruned, **over)
         inf = sess.inf
+        _memdbg("session + keys")
         env.bootstrap_setup(inf.fhe, over, cpp_bootstrap=a.cpp_bootstrap)
+        _memdbg("bootstrap setup")
     loaded = {int(s) % dims.N for s in inf.fhe.loaded_rot_steps}
     missing = [] if a.fake else sorted((set() if pruned else set(env.rotation_audit(inf.fhe, dims)))
                                        | ({s % dims.N for s in rot} - loaded))
@@ -175,6 +190,7 @@ def main(argv=None):
             model.pcmm_weights(b)
         engine(model.rt).prepare(dims.dim)
         print(f"[llama-prefill] pcmm weights + keys {time.time() - t_pre:.1f}s", flush=True)
+        _memdbg("pcmm weights + keys")
     if ccmm_on:
         from perseus.impl.ccmm import engine as ccmm_engine
         t_pre = time.time()
@@ -182,6 +198,45 @@ def main(argv=None):
         ce.prepare(dims.dim)
         print(f"[llama-prefill] ccmm keys + calibration {time.time() - t_pre:.1f}s c_unit={ce.c_unit} land={ce.land}",
               flush=True)
+        _memdbg("ccmm keys + calibration")
+    # PF_WARMUP=1: one untimed prefill of a different prompt (the second openwebtext document, same length) first: the
+    # masks are generated and encoded, the bootstrap raise variants and StC caches built and the pools grown -- setup
+    # that does not depend on the prompt. The summary's wall and bootstrap count are the timed pass's.
+    bts_w = 0
+    if os.environ.get("PF_WARMUP", "0") not in ("", "0") and not a.fake and os.environ.get("PF_PAGED", "0") not in ("", "0"):
+        wpath = os.path.join(os.path.dirname(hf.__file__), "..", "..", ".cache", "windows", "owt_512_0.npy")
+        wdoc = np.load(wpath)[1] if os.path.exists(wpath) else hf.text_windows(2, 512)[1]
+        wtoks = [int(t) for t in wdoc[:len(toks)]]
+        assert wtoks[0] == int(toks[0]) and wtoks != [int(t) for t in toks]
+        t_w = time.time()
+        bw = [int(inf.fhe.total_bootstraps)]
+
+        def on_warm_block(p, b, Xs, ch, s):
+            if os.environ.get("PF_ENC_MISS_KEYS", "0") not in ("", "0"):
+                tb = int(inf.fhe.total_bootstraps)
+                print(f"[llama-prefill] warm-up page {p} block {b} {s:.2f}s bts={tb - bw[0]}", flush=True)
+                bw[0] = tb
+        model.prefill_paged(wtoks, on_block=on_warm_block)
+        bts_w = int(inf.fhe.total_bootstraps)
+        b0[0] = bts_w
+        print(f"[llama-prefill] warm-up prefill (other prompt) {time.time() - t_w:.1f}s bts={bts_w}", flush=True)
+        _memdbg("after warm-up")
+        # PF_MASK_HOST_CACHE=1: every mask's device copy evicted (dumped to the host) now, so no first-eviction dump
+        # (D2H + stream syncs) lands in the timed pass
+        if os.environ.get("PF_MASK_HOST_CACHE", "0") not in ("", "0"):
+            t_e = time.time()
+            n_e = model.rt.evict_masks(("",))
+            print(f"[llama-prefill] masks to host {n_e} {time.time() - t_e:.1f}s", flush=True)
+    enc0 = inf.enc_cache_stats() if hasattr(inf, "enc_cache_stats") else None
+    # PF_ENC_MISS_KEYS=1 (diagnostic): print the cache keys the timed pass added (its misses, when nothing is erased)
+    keys0 = set(inf.enc_cache_keys()) if os.environ.get("PF_ENC_MISS_KEYS", "0") not in ("", "0") else None
+    # PF_CUDA_PROFILER_RANGE=1 (diagnostic): cudaProfilerStart / Stop around the timed pass, for
+    # nsys --capture-range=cudaProfilerApi (the warm-up pass stays out of the trace)
+    prof = None
+    if os.environ.get("PF_CUDA_PROFILER_RANGE", "0") not in ("", "0"):
+        import ctypes
+        prof = ctypes.CDLL("libcudart.so.13", mode=ctypes.RTLD_GLOBAL)
+        prof.cudaProfilerStart()
     t1 = time.time()
     if os.environ.get("PF_PAGED", "0") not in ("", "0"):
         def on_page_block(p, b, Xs, ch, s):
@@ -199,11 +254,23 @@ def main(argv=None):
             print(line, flush=True)
         pages, rec = model.prefill_paged(toks, on_block=on_page_block)
         wall = time.time() - t1
+        enc1 = inf.enc_cache_stats() if enc0 is not None else None
         hid = np.concatenate([model.hidden_rows(X, c) for X, c in pages])[:a.tokens]
     else:
         Xs, ch, rec = model.prefill(toks, on_block=on_block)
         wall = time.time() - t1
+        enc1 = inf.enc_cache_stats() if enc0 is not None else None
         hid = None
+    if prof is not None:
+        prof.cudaProfilerStop()
+    if enc0 is not None:
+        print(f"[llama-prefill] enc_cache timed pass: hits={enc1['hits'] - enc0['hits']} "
+              f"misses={enc1['misses'] - enc0['misses']} size={enc1['size']}", flush=True)
+    if keys0 is not None:
+        for k in sorted(set(inf.enc_cache_keys()) - keys0):
+            tag = k.rsplit("#L", 1)[0]
+            had = sorted(x[len(tag):] for x in keys0 if x.rsplit("#L", 1)[0] == tag)
+            print(f"[llama-prefill] timed-pass miss {k} warm-up had {' '.join(had) or '-'}", flush=True)
     pc = getattr(model.rt, "pcmm", None)
     if pc is not None:
         print(f"[pcmm] calls={pc.calls} cap={pc.cap} land={pc.land} keygen={pc.keygen_s:.1f}s split->out ms: "
@@ -219,7 +286,7 @@ def main(argv=None):
         rows, out = report(plain_logits(model, model.hidden_rows(Xs, ch) if hid is None else hid), gt[1:a.tokens + 1])
         print("[llama-prefill] per-position KL " + " ".join(f"{r['kl']:.3g}" for r in rows), flush=True)
     print(f"[llama-prefill] SUMMARY T={a.tokens} wall={wall:.1f}s per_token={wall / a.tokens:.3f}s "
-          f"bts={int(inf.fhe.total_bootstraps)} top1={out.get('top1')}/{a.tokens} "
+          f"bts={int(inf.fhe.total_bootstraps) - bts_w} top1={out.get('top1')}/{a.tokens} "
           f"medianKL={out.get('medianKL', float('nan')):.4g} maxKL={out.get('maxKL', float('nan')):.4g} "
           f"free={rec.get('free_gb')}GB", flush=True)
     if a.profile and hasattr(model.rt.ops, "report"):

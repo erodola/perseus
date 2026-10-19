@@ -22,6 +22,23 @@ from . import prefix as PX
 from .model import LlamaModel, dist_report
 from .weights import rotation_of
 
+# PF_MASK_PREFETCH=1 (default 0): a block's device-resident masks are recorded at its end, before the eviction; a later
+# pass (the timed one after PF_WARMUP) reloads that set from the host dumps at the block's start on a non-blocking
+# stream, so the H2D overlaps the block instead of fencing every blocking stream at each mask's first use
+_MASK_PREFETCH = os.environ.get("PF_MASK_PREFETCH", "0") not in ("", "0")
+
+
+def _mask_prefetch(model, key):
+    sets = model.__dict__.setdefault("_mask_sets", {})
+    keys = sets.get(key) if _MASK_PREFETCH else None
+    if keys and hasattr(model.inf, "prefetch_enc_cache"):
+        model.__dict__["_mask_prefetched"] = model.__dict__.get("_mask_prefetched", 0) + model.inf.prefetch_enc_cache(keys)
+
+
+def _mask_record(model, key):
+    if _MASK_PREFETCH and hasattr(model.inf, "enc_cache_loaded_keys"):
+        model.__dict__.setdefault("_mask_sets", {})[key] = model.inf.enc_cache_loaded_keys("mask.")
+
 
 def real_linear(lin: EncodedLinear, name: str, part=None) -> EncodedLinear:
     """A real EncodedLinear from a slot cache entry: `part` "re" / "im" of a complex linear, or output-unpacked."""
@@ -253,12 +270,14 @@ class LlamaPrefill(LlamaModel):
                 cap = self.enter_stage(b, 1)
                 BL.name_blocked(self.inf, Xs)
                 kvs = None if on_kv is None else [{} for _ in range(B.Kkv)]
+                _mask_prefetch(self, b)
                 with self.rt.step(f"blk{b}"):
                     Xs = llama_prefill_block_blocked(self.rt, Xs, self.pcmm_weights(b), self.cfgs.block(b), ch,
                                                      self.rope, self.prefix_kv(b), B, kvs, layer=b)
                 self.exit_stage(b, cap)
                 if on_kv is not None:
                     on_kv(b, [x["K"] for x in kvs], [x["V"] for x in kvs])
+                _mask_record(self, b)
                 evict_block_masks(self.rt)
                 if on_block is not None:
                     on_block(b, Xs, time.time() - t0)
@@ -271,9 +290,11 @@ class LlamaPrefill(LlamaModel):
             blk = llama_prefill_block_pcmm if _PCMM else llama_prefill_block
             cap = self.enter_stage(b, 1)
             name_inputs(self.inf, Xs)
+            _mask_prefetch(self, b)
             with self.rt.step(f"blk{b}"):
                 Xs = blk(self.rt, Xs, w, self.cfgs.block(b), ch, self.rope, self.prefix_kv(b))
             self.exit_stage(b, cap)
+            _mask_record(self, b)
             evict_block_masks(self.rt)
             if on_block is not None:
                 on_block(b, Xs, time.time() - t0)
@@ -308,6 +329,7 @@ class LlamaPrefill(LlamaModel):
                 self.rt.rearm_plan = None if plan is None else (lambda plan=plan: self.core.install_plan_live(self.inf, plan))
                 BL.name_blocked(self.inf, Xs)
                 kvs = None if on_kv is None else [{} for _ in range(B.Kkv)]
+                _mask_prefetch(self, (p, b))
                 with self.rt.step(f"blk{b}"):
                     Xs = llama_prefill_block_blocked(self.rt, Xs, self.pcmm_weights(b), self.cfgs.block(b), ch,
                                                      self.rope, self.prefix_kv(b), B, kvs, layer=b,
@@ -316,6 +338,7 @@ class LlamaPrefill(LlamaModel):
                 self.exit_stage(b, cap)
                 if on_kv is not None:
                     on_kv(p, b, [x["K"] for x in kvs], [x["V"] for x in kvs])
+                _mask_record(self, (p, b))
                 evict_block_masks(self.rt)
                 if on_block is not None:
                     on_block(p, b, Xs, ch, time.time() - t0)

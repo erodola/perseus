@@ -17,6 +17,10 @@ CONFIGS = "configs/model/approximation/bert_base_n32_t128/configs.json"
 # the arm's switches (a plan's runtime line carries them; the shell wins)
 ARM = {"PF_LAYOUT": "blocked", "PF_LINEAR": "pcmm", "LN_CHEB": "1", "SM_CHEB_GS": "1", "GELU_FOLD": "1",
        "IMPL_SCOPED_NAMES": "1"}
+# the fastest measured config is the default (sync-free encodes / PCMM / CCMM + StC-first power-of-two cache keys: BERT
+# A/B 2026-10-18, -2.1 s, same accuracy); the shell or --set overrides each
+FAST = {"FIDESLIB_ENCODE_NOSYNC": "1", "FIDESLIB_CCMM_ASYNC": "1", "FIDESLIB_PCMM_NOSYNC": "1",
+        "FIDESLIB_ENCODE_PINNED_RING": "256", "FIDESLIB_STC_POW2_KEY": "1"}
 
 
 def inputs(a, T):
@@ -61,8 +65,8 @@ def main(argv=None):
         print(f"GPU {a.device} has other processes: {busy}; refusing (use --force)", file=sys.stderr)
         return 2
     from examples.gpt2_from_primitives import env
-    over = {"FIDESLIB_ENCODE_NOSYNC": "0", **ARM, **env.plan_runtime(a.plan, "n32"), "GPT2_PACKING": "cachemir",
-            **dict(kv.split("=", 1) for kv in a.set)}
+    over = {**{k: os.environ.get(k, v) for k, v in FAST.items()}, **ARM, **env.plan_runtime(a.plan, "n32"),
+            "GPT2_PACKING": "cachemir", **dict(kv.split("=", 1) for kv in a.set)}
     for k, v in over.items():
         if k.startswith("PF_"):
             os.environ.setdefault(k, str(v))
@@ -139,7 +143,20 @@ def main(argv=None):
         print(f"[bert] ccmm c_unit={ce.c_unit} land={ce.land}", flush=True)
     print(f"[bert] configs={a.configs} weights+keys {time.time() - t_pre:.1f}s", flush=True)
     rows_out = []
-    for name, ids, n, label in inputs(a, a.tokens):
+    ins = inputs(a, a.tokens)
+    # BERT_WARMUP=1 (default 0): one untimed forward of another input of the same length first (the first input with
+    # the tokens between [CLS] and [SEP] reversed), as the Llama prefill's PF_WARMUP: masks encoded, StC caches built
+    # and pools grown -- setup that does not depend on the input. SUMMARY's wall and bts stay the timed pass's.
+    if os.environ.get("BERT_WARMUP", "0") not in ("", "0") and ins and not a.capture:
+        _, wids, wn, _ = ins[0]
+        wids = np.array(wids)
+        wids[1:wn - 1] = wids[1:wn - 1][::-1].copy()
+        t_w, bw = time.time(), int(inf.fhe.total_bootstraps)
+        model.forward(D.embed(wids, cl), wn)
+        print(f"[bert] warm-up forward (other input) {time.time() - t_w:.1f}s bts={int(inf.fhe.total_bootstraps) - bw}",
+              flush=True)
+        model.rt.ops.device_sync()   # the warm-up's tail drained before the clock (GPT-2's timed pass needs it)
+    for name, ids, n, label in ins:
         rows = D.embed(ids, cl)
         ref = D.exact_blocks(st, rows, n, model.n_layers) if (a.check or model.n_layers == 12) else None
         b0 = [int(inf.fhe.total_bootstraps)]

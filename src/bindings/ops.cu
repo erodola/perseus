@@ -2,6 +2,7 @@
 // packing-dispatched ops, GPT-2 composites, graph/plan controls.
 #include "attention.h"
 #include "CKKS/Plaintext.cuh"   // device_registry: the plaintext registry entries' limbs
+#include "CudaUtils.cuh"   // FIDESlib::pinnedHostAlloc
 #include "checks.h"
 #include "ckks_primitives.h"
 #include "npconv.h"
@@ -139,6 +140,21 @@ Ptx cached_any_at(Inference& inf, const std::string& tag, const perseus_np::AnyV
     Ptx pt = encode_any(inf, v, lv, tagged);
     inf.enc_cache.emplace(key, pt);
     return pt;
+}
+
+// cached_any_at with the slot vector read only on a miss (under the GIL): a hit, every use after the first, skips the
+// per-call numpy -> std::vector copy of the whole slot vector.
+Ptx cached_lazy(Inference& inf, const std::string& tag, const py::array& values, const PackedCtx& ct, bool tagged) {
+    static const bool eager = [] { const char* e = std::getenv("PERSEUS_MASK_EAGER"); return e && *e && *e != '0'; }();
+    if (!eager) {           // PERSEUS_MASK_EAGER=1: the old path (convert on every call), for A/B
+        const auto [lv, nsd] = inf.encode_like_params(ct.ct);
+        auto it = inf.enc_cache.find(Inference::enc_cache_key(tag, lv, nsd));
+        if (it != inf.enc_cache.end()) { ++inf.enc_cache_hit; return it->second; }
+    }
+    auto v = perseus_np::to_any(values);
+    py::gil_scoped_release nogil;
+    v.resize(static_cast<size_t>(inf.slots));
+    return cached_any_at(inf, tag, v, ct, tagged);
 }
 }  // namespace
 
@@ -1051,10 +1067,8 @@ void bind_ops(py::module_& m) {
         .def("mult_cached",
              [](Inference& inf, const PackedCtx& ct, const std::string& tag,
                 const py::array& values, bool tagged) {
-                 auto v = perseus_np::to_any(values);
+                 Ptx pt = cached_lazy(inf, tag, values, ct, tagged);
                  py::gil_scoped_release nogil;
-                 v.resize(static_cast<size_t>(inf.slots));
-                 Ptx pt = cached_any_at(inf, tag, v, ct, tagged);
                  inf.load_plaintext(pt);
                  return inf.fhe->mult(ct, pt);
              },
@@ -1066,19 +1080,17 @@ void bind_ops(py::module_& m) {
                 const std::vector<py::array>& values, bool tagged) -> py::object {
                  if (cts.empty() || tags.size() != cts.size() || values.size() != cts.size())
                      throw std::invalid_argument("mult_cached_sum: cts, tags and values must have one entry each");
-                 std::vector<perseus_np::AnyVec> vs;
-                 for (const auto& v : values) vs.push_back(perseus_np::to_any(v));
+                 {
+                     py::gil_scoped_release nogil;
+                     for (auto& c : cts) inf.fhe->realize_pending_rescale_raw(c.ct);
+                 }
+                 std::vector<Ptx> pts;
+                 for (size_t i = 0; i < cts.size(); ++i) pts.push_back(cached_lazy(inf, tags[i], values[i], cts[i], tagged));
                  PackedCtx out;
                  bool ok = false;
                  {
                      py::gil_scoped_release nogil;
-                     for (auto& c : cts) inf.fhe->realize_pending_rescale_raw(c.ct);
-                     std::vector<Ptx> pts;
-                     for (size_t i = 0; i < cts.size(); ++i) {
-                         vs[i].resize(static_cast<size_t>(inf.slots));
-                         pts.push_back(cached_any_at(inf, tags[i], vs[i], cts[i], tagged));
-                         inf.load_plaintext(pts.back());
-                     }
+                     for (auto& p : pts) inf.load_plaintext(p);
                      ok = inf.fhe->mult_slot_pt_sum_usable(cts, pts);
                      if (ok) out = inf.fhe->mult_slot_pt_sum(cts, pts);
                  }
@@ -1092,10 +1104,8 @@ void bind_ops(py::module_& m) {
         .def("add_cached",
              [](Inference& inf, const PackedCtx& ct, const std::string& tag,
                 const py::array& values, bool tagged) {
-                 auto v = perseus_np::to_any(values);
+                 Ptx pt = cached_lazy(inf, tag, values, ct, tagged);
                  py::gil_scoped_release nogil;
-                 v.resize(static_cast<size_t>(inf.slots));
-                 Ptx pt = cached_any_at(inf, tag, v, ct, tagged);
                  inf.load_plaintext(pt);
                  return inf.fhe->add(ct, pt);
              },
@@ -1106,17 +1116,11 @@ void bind_ops(py::module_& m) {
                 const std::vector<py::array>& values) {
                  if (tags.size() != values.size())
                      throw std::invalid_argument("mult_cached_many: tags and values differ in length");
-                 std::vector<perseus_np::AnyVec> vs;
-                 vs.reserve(values.size());
-                 for (const auto& a : values) vs.push_back(perseus_np::to_any(a));
-                 py::gil_scoped_release nogil;
                  std::vector<Ptx> pts;
                  pts.reserve(tags.size());
-                 for (size_t i = 0; i < tags.size(); ++i) {
-                     vs[i].resize(static_cast<size_t>(inf.slots));
-                     pts.push_back(cached_any_at(inf, tags[i], vs[i], ct, true));
-                     inf.load_plaintext(pts.back());
-                 }
+                 for (size_t i = 0; i < tags.size(); ++i) pts.push_back(cached_lazy(inf, tags[i], values[i], ct, true));
+                 py::gil_scoped_release nogil;
+                 for (auto& p : pts) inf.load_plaintext(p);
                  std::vector<PackedCtx> out;
                  out.reserve(pts.size());
                  if (!pts.empty() && inf.fhe->lane_batch_usable(ct.ct, pts)) {
@@ -1189,11 +1193,10 @@ void bind_ops(py::module_& m) {
         .def("erase_pts",
              [](Inference& inf, const std::vector<std::string>& tags) {
                  py::gil_scoped_release nogil;
-                 size_t n = 0;
-                 for (const auto& t : tags) n += inf.erase_enc_cache_all(t);
-                 return n;
+                 return inf.erase_enc_cache_tags(tags);
              },
-             py::arg("tags"), "Drop these tags from the cache at every level (device copies freed).")
+             py::arg("tags"), "Drop these tags from the cache at every level (device copies freed; under "
+             "PF_MASK_HOST_CACHE=1 the entries stay, their device encodes dumped to the host for the next use).")
         .def("recycled_polys",
              [](Inference& inf, bool release) {
                  auto& cc = inf.cc();
@@ -1236,6 +1239,18 @@ void bind_ops(py::module_& m) {
                  return d;
              },
              "Cache size and the hit / miss counters of encode_at_cached.")
+        .def("enc_cache_keys",
+             [](const Inference& inf) {
+                 std::vector<std::string> keys;
+                 keys.reserve(inf.enc_cache.size());
+                 for (const auto& kv : inf.enc_cache) keys.push_back(kv.first);
+                 return keys;
+             },
+             "The encode cache's keys (tag#L<level>:d<degree>).")
+        .def("enc_cache_loaded_keys", &Inference::enc_cache_loaded_keys, py::arg("prefix"),
+             "PF_MASK_PREFETCH: the encode-cache keys starting with `prefix` whose plaintext is on the device.")
+        .def("prefetch_enc_cache", &Inference::prefetch_enc_cache, py::arg("keys"),
+             "PF_MASK_PREFETCH: reload the dumped plaintexts of `keys` ahead of use, on a non-blocking stream.")
         .def("sum_slots",
              [](Inference& inf, const PackedCtx& ct, int width) {
                  if (width < 1 || (width & (width - 1)))
@@ -1286,13 +1301,12 @@ void bind_ops(py::module_& m) {
     }, "Free memory on the current CUDA device, in GiB (cudaMemGetInfo).");
     m.def("pinned_empty", [](size_t rows, size_t cols) {
         // page-locked, device-mapped host memory (kernels read it in place) as a float32 numpy array
-        void* p = nullptr;
+        // (FIDESlib::pinnedHostAlloc: cudaHostAlloc, or registered anonymous memory under FIDESLIB_PINNED_ANON=1)
         const size_t bytes = std::max<size_t>(rows * cols * sizeof(float), 1);
-        if (cudaHostAlloc(&p, bytes, cudaHostAllocMapped | cudaHostAllocPortable) != cudaSuccess) {
-            cudaGetLastError();
-            throw std::runtime_error("pinned_empty: cudaHostAlloc failed for " + std::to_string(bytes) + " bytes");
-        }
-        py::capsule owner(p, [](void* q) { cudaFreeHost(q); });
+        void* p = FIDESlib::pinnedHostAlloc(bytes, true);
+        if (!p)
+            throw std::runtime_error("pinned_empty: pinned allocation failed for " + std::to_string(bytes) + " bytes");
+        py::capsule owner(p, [](void* q) { FIDESlib::pinnedHostFree(q); });
         return py::array_t<float>({rows, cols}, {cols * sizeof(float), sizeof(float)}, static_cast<float*>(p), owner);
     }, py::arg("rows"), py::arg("cols"),
        "A (rows, cols) float32 array in pinned, device-mapped host memory (cudaHostAlloc): the backing store "

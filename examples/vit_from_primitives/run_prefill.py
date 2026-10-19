@@ -40,7 +40,12 @@ def main(argv=None):
         print(f"GPU {a.device} has other processes: {busy}; refusing (use --force)", file=sys.stderr)
         return 2
     from examples.gpt2_from_primitives import env
-    over = {"FIDESLIB_ENCODE_NOSYNC": "0", **env.plan_runtime(a.plan, "n32"), "GPT2_PACKING": "cachemir",
+    # the sync-free bundle + power-of-two StC-first cache keys (Llama prefill's, 2026-10-18: 129.4 vs 132.2-134.1
+    # s/image here); the shell overrides each, the plan runtime and --set win after them
+    fast = {k: os.environ.get(k, v) for k, v in (("FIDESLIB_ENCODE_NOSYNC", "1"), ("FIDESLIB_CCMM_ASYNC", "1"),
+                                                 ("FIDESLIB_PCMM_NOSYNC", "1"), ("FIDESLIB_ENCODE_PINNED_RING", "256"),
+                                                 ("FIDESLIB_STC_POW2_KEY", "1"))}
+    over = {**fast, **env.plan_runtime(a.plan, "n32"), "GPT2_PACKING": "cachemir",
             **dict(kv.split("=", 1) for kv in a.set)}
     for k, v in over.items():
         if k.startswith("PF_"):

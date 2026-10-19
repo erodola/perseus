@@ -45,10 +45,14 @@ def main(argv=None):
         print(f"GPU {a.device} has other processes: {busy}; refusing (use --force)", file=sys.stderr)
         return 2
     from . import env
-    # the prefill keeps the host wait on device-encoded plaintexts that FIDESlib f12c06e restored for this path;
-    # the decode runs without it (FIDESLIB_ENCODE_NOSYNC default 1). --set FIDESLIB_ENCODE_NOSYNC=1 overrides.
-    over = {"FIDESLIB_ENCODE_NOSYNC": "0", **env.plan_runtime(a.plan, "n32"), "GPT2_PACKING": "cachemir",
-            **dict(kv.split("=", 1) for kv in a.set)}
+    # the fastest measured config is the default: sync-free encodes / PCMM / CCMM + StC-first power-of-two cache keys
+    # (2026-10-18, prefill-128 45.9 -> 40.5 s, same top-1 / KL; it replaces the host wait on device-encoded plaintexts
+    # that FIDESlib f12c06e had restored for this path). The shell or --set overrides each (FIDESLIB_ENCODE_NOSYNC=0:
+    # the wait).
+    fast = {"FIDESLIB_ENCODE_NOSYNC": "1", "FIDESLIB_CCMM_ASYNC": "1", "FIDESLIB_PCMM_NOSYNC": "1",
+            "FIDESLIB_ENCODE_PINNED_RING": "256", "FIDESLIB_STC_POW2_KEY": "1"}
+    over = {**{k: os.environ.get(k, v) for k, v in fast.items()}, **env.plan_runtime(a.plan, "n32"),
+            "GPT2_PACKING": "cachemir", **dict(kv.split("=", 1) for kv in a.set)}
     for k, v in over.items():          # a plan's PF_* switches (the arm it was made for); the shell's win
         if k.startswith("PF_"):
             os.environ.setdefault(k, str(v))
@@ -168,11 +172,35 @@ def main(argv=None):
         from perseus.impl.pcmm import engine
         engine(model.rt).prepare(model.rt.dims.dim)
     print(f"[prefill] weights ready {time.time() - t_pre:.1f}s", flush=True)
+    # GPT2_PF_WARMUP=1 (default 0): one untimed prefill of another prompt of the same length first (the same tokens with
+    # positions 1.. reversed, the position embeddings kept in place), as the Llama prefill's PF_WARMUP: masks encoded,
+    # StC caches built and pools grown -- setup that does not depend on the prompt. SUMMARY's wall and bts stay the
+    # timed pass's.
+    bts0 = 0
+    if os.environ.get("GPT2_PF_WARMUP", "0") not in ("", "0") and not a.capture:
+        wpe = np.asarray(store.tensor(weights.WPE)[:a.tokens])
+        tok = rows - wpe
+        if os.environ["GPT2_PF_WARMUP"] != "same":     # =same (diagnostic): the timed prompt itself
+            tok[1:] = tok[1:][::-1].copy()
+        t_w = time.time()
+        Xw, chw, _ = model.prefill(tok + wpe)
+        bts0 = b0[0] = int(inf.fhe.total_bootstraps)
+        print(f"[prefill] warm-up prefill (other prompt) {time.time() - t_w:.1f}s bts={bts0}", flush=True)
+        if a.check:
+            err = np.abs(model.hidden(Xw, chw) - exact_blocks(store, tok + wpe, model.n_layers)[-1]).max(1)
+            print(f"[prefill] warm-up maxerr={err.max():.3g} (pos {int(err.argmax())})", flush=True)
+        del Xw, chw
+        # a device fence before the clock: with the warm-up's tail still in flight when the timed pass encodes its
+        # prompt, the timed pass detonates (pos 17, block 0; top1 0/128), whether or not the warm-up's outputs are kept
+        model.rt.ops.device_sync()
+        # the warm-up registered every block's plaintext names, so run_stages would now take the residency ring (the
+        # decode path, which gives wrong prefill results: top1 0/128): the timed pass keeps the cold run's plain loop
+        model.overlap = False
     t0 = time.time()
     Xs, ch, rec = model.prefill(rows, on_block=on_block)
     wall = time.time() - t0
     h = model.hidden(Xs, ch)
-    out = {"wall": wall, "bts": int(inf.fhe.total_bootstraps)}
+    out = {"wall": wall, "bts": int(inf.fhe.total_bootstraps) - bts0}
     if model.n_layers == 12:
         rows_, s = report(plain_logits(store, h), gt)
         out.update(s)

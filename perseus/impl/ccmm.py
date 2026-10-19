@@ -9,12 +9,29 @@ import time
 import numpy as np
 
 from . import sinc as sc
-from .pcmm import _N32_CAP, _TSYNC, KeyRng, _ks_key, _twiddles, find_prime
+from .pcmm import FINISH_GRAPH, MM_SYNC, _N32_CAP, KeyRng, _ks_key, _twiddles, find_prime
+
+# PF_CCMM_LANES=n: the output refreshes rotate over n key-switch workspaces (bts.ks_lane), like PF_PCMM_LANES
+_DBG = os.environ.get("PF_CCMM_DBG", "0") not in ("", "0")
+# PF_FUSE_PROBE=dir (diagnostic): the first pv0 call's merged outputs decrypted before the refresh (coefficient form)
+# and after it (SinC slots) -> dir/ccmm_pv_out.npz
+_PROBE = os.environ.get("PF_FUSE_PROBE", "")
+LANES = min(max(int(os.environ.get("PF_CCMM_LANES", "0") or 0), 2), 4) if os.environ.get("PF_CCMM_LANES", "0") not in ("", "0") else 0
 
 NB, NS, KY, SW = 1 << 16, 1 << 13, 64, 8
 # PF_CCMM_MERGE=1: operands duplicated on batch l + 16 (sinc.dup) make every output even in Y = X^1024, so output pairs
 # merge at the split as e + X^1024 o (no key switch) and share one SinCBoot; unmerge() splits them in the slot domain
 MERGE = os.environ.get("PF_CCMM_MERGE", "0") not in ("", "0")
+# PF_CCMM_RAISE="pv:3,qk:0": the output refreshes' raise drop per site prefix (an output that only feeds a few linear
+# levels before the next StC-first input lands lower, with fewer limbs through its CtS / EvalMod)
+_RAISE = [e.split(":") for e in os.environ.get("PF_CCMM_RAISE", "").split(",") if e]
+
+
+def raise_of(site: str) -> int:
+    for pre, drop in _RAISE:
+        if site.startswith(pre):
+            return int(drop)
+    return 0
 
 
 def _auto_poly(s, h):
@@ -208,7 +225,7 @@ class Ccmm:
             return prep
         fb = self._factors(amax, bmax, shift, out_scale, merge)[1]
         bts, S = self.bts, ops.inf.slots
-        if _TSYNC:
+        if MM_SYNC or not keep:         # timing fence; an exported operand reads its limbs back anyway
             bts.sync()
         t0 = time.perf_counter()
         # a dropped device ciphertext keeps its full allocation: host copies of the 4 live limbs, imported by
@@ -230,7 +247,7 @@ class Ccmm:
             if carry:
                 self._carriers[0].append(x)
                 self._carriers[1].append(d)
-        if _TSYNC:
+        if MM_SYNC or not keep:
             bts.sync()
         self.t_in += time.perf_counter() - t0
         return prep
@@ -260,7 +277,8 @@ class Ccmm:
             outs = self._fake(xa, xb if prep is None else prep.vecs, b_transposed, out_scale, merge)
         else:
             fa, fb = self._factors(amax, bmax, shift, out_scale, merge)
-            outs = self._device(xa, xb if prep is None else prep, b_transposed, fa, fb, shift, merge)
+            self._site = site
+            outs = self._device(xa, xb if prep is None else prep, b_transposed, fa, fb, shift, merge, raise_of(site))
         if want is not None:
             got = np.array([ops.decrypt_slots_complex(y) for y in outs])
             err = float(np.abs(got - want).max())
@@ -268,7 +286,7 @@ class Ccmm:
                   f"({math.log2(np.abs(want).max() / max(err, 1e-300)):.1f} bits)", flush=True)
         for y in outs:
             if self.bts is None:
-                self.fhe.record_external_bootstrap(y, names, levels, landing=(self.land, 1))
+                self.fhe.record_external_bootstrap(y, names, levels, landing=(self.land + 2 * raise_of(site), 1))
             else:
                 self.fhe.record_external_bootstrap(y, names, levels)
         self.calls += 1
@@ -287,9 +305,20 @@ class Ccmm:
             outs.append(o)
         return outs
 
-    def _device(self, xa, xb, b_transposed, fa, fb, shift, merge=False):
+    def _dbg(self, tag, x):
+        """PF_CCMM_DBG=1 (diagnostic, first call only): device sync + a fingerprint of x's decryption after a stage."""
+        self.bts.sync()
+        v = np.asarray(self.ops.decrypt_slots_complex(x))
+        print(f"[ccmm_dbg] {tag:12s} mean|v| {np.abs(v).mean():.6e} v0 {v[0]:.6e} v7 {v[7]:.6e}", flush=True)
+
+    def _device(self, xa, xb, b_transposed, fa, fb, shift, merge=False, drop=0):
         ops, bts, S = self.ops, self.bts, self.ops.inf.slots
-        if _TSYNC:
+        dbg = _DBG and self.calls == 0 and not getattr(self, "_dbg_done", False)
+        self._dbg_done = getattr(self, "_dbg_done", False) or dbg
+        if dbg:
+            self._dbg("in.a0", xa[0])
+            self._dbg("in.b0", xb[0])
+        if MM_SYNC:
             bts.sync()
         t0 = time.perf_counter()
         da, db, states = [], [], []
@@ -303,32 +332,73 @@ class Ccmm:
         for xs, f, ds in ((xa, fa, da), (xb, fb, db)):
             for x in xs:
                 d = bts.device(self.fhe, x)
-                if ds is da:
+                if ds is da:           # the finish's state under the site's raise variant
+                    old = bts.raise_scope(self.fhe, drop) if drop else None
                     states.append(bts.begin(d, S, False, True))
+                    if drop:
+                        bts.raise_scope(self.fhe, old)
                 bts.stc_high(d, S, 3, f, 1, self.nf_ref)
                 ds.append(d)
+        if dbg:
+            self._dbg("stc_in.a0", xa[0])
+            self._dbg("stc_in.b0", xb[0])
         t1 = time.perf_counter()
         self.t_in += t1 - t0
         tm = bts.ccmm_mul(da, db, da, self.keys, b_transposed)
         self.times += np.asarray(tm)
+        if dbg:
+            self._dbg("mul.a0", xa[0])
         t2 = time.perf_counter()
         self.t_mm += t2 - t1
         if merge:
             for i in range(sc.NCT // 2):
                 bts.merge_monomial(da[2 * i], da[2 * i + 1], NB // KY)
             da, states, xa = da[0::2], states[0::2], xa[0::2]
-        for d, st in zip(da, states):
+        probe = _PROBE and getattr(self, "_site", "") == "pv0" and not getattr(self, "_probed", False)
+        if probe:
+            bts.sync()
+            pre = [ops.decrypt_slots_complex(x) for x in xa]
+            nf_pre = [bts.noise_factor(d) for d in da]
+            lv_pre = [d.level for d in da]
+        old_drop = bts.raise_scope(self.fhe, drop) if drop else None
+        old_lane = bts.ks_lane(0) if LANES else None
+        for j, (d, st) in enumerate(zip(da, states)):
+            if LANES:  # PF_CCMM_LANES: consecutive refreshes on alternating key-switch workspaces
+                bts.ks_lane(j % LANES)
             bts.set_scale(d, self.nf_split, 2)
-            bts.mod_raise(d, st)
-            bts.fold(d, st)
-            for k in range(st.n_cts):
-                bts.cts_stage(d, st, k)
-            bts.eval_mod(d, st)
-            bts.stc_first_output(d, st)
+            if FINISH_GRAPH:
+                bts.finish_stc_first(d, st, 1)
+            else:
+                bts.mod_raise(d, st)
+                if dbg and j == 0:
+                    self._dbg("raise", xa[0])
+                bts.fold(d, st)
+                if dbg and j == 0:
+                    self._dbg("fold", xa[0])
+                for k in range(st.n_cts):
+                    bts.cts_stage(d, st, k)
+                    if dbg and j == 0:
+                        self._dbg(f"cts{k}", xa[0])
+                bts.eval_mod(d, st)
+                if dbg and j == 0:
+                    self._dbg("evalmod", xa[0])
+                bts.stc_first_output(d, st)
             bts.stc_high(d, S, d.level - 2 - (2 if d.noise_level == 2 else 0), 1.0, 6)
+            if dbg and j == 0:
+                self._dbg("out", xa[0])
             if shift:
                 bts.mult_int(d, 1 << shift)
-        if _TSYNC:
+        if LANES:
+            bts.ks_lane(old_lane)
+        if drop:
+            bts.raise_scope(self.fhe, old_drop)
+        if probe:
+            self._probed = True
+            bts.sync()
+            np.savez(os.path.join(_PROBE, "ccmm_pv_out.npz"), pre=np.array(pre), nf_pre=np.array(nf_pre),
+                     lv_pre=np.array(lv_pre), post=np.array([ops.decrypt_slots_complex(x) for x in xa]),
+                     shift=shift, merge=merge)
+        if MM_SYNC:
             bts.sync()
         self.t_out += time.perf_counter() - t2
         return list(xa)
