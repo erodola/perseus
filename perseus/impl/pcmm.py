@@ -348,12 +348,14 @@ _RAISE_HI = [e.split(":") for e in os.environ.get("PF_PCMM_RAISE_HI", "").split(
 # PF_PCMM_RAISE_UP=d[:lo-hi] (pr9's spelling of the same lever): PF_PCMM_RAISE_HI=gate_up:d[:lo-hi]
 if os.environ.get("PF_PCMM_RAISE_UP"):
     _RAISE_HI.append(["gate_up"] + os.environ["PF_PCMM_RAISE_UP"].split(":"))
-# PF_PCMM_BATCH=K (2..4): the output finishes in groups of K, each CtS stage batched (bts.cts_stage_batch)
-_BATCH = int(os.environ.get("PF_PCMM_BATCH", "0") or 0)
+# PF_PCMM_BATCH=K (2..4, default 4; 0 = one finish at a time): the output finishes in groups of K, each CtS stage batched
+# (bts.cts_stage_batch). It takes precedence over PF_PCMM_INTERLEAVE / PF_PCMM_LANES / PF_FINISH_GRAPH
+# (10-19 A/B with DISCARD_SCRATCH: Llama pf128 -2.3..-2.9 s, BERT -0.9, GPT-2 pf128 -0.3..-0.7, ViT -1.6..-2.5 s/image)
+_BATCH = int(os.environ.get("PF_PCMM_BATCH", "4") or 0)
 if _BATCH > 4:
     raise ValueError(f"PF_PCMM_BATCH={_BATCH}: at most 4")
-# PF_PCMM_BATCH_DROPS=1: with per-output drops (PF_PCMM_RAISE_HI), batch the outputs of each drop together
-_BATCH_DROPS = os.environ.get("PF_PCMM_BATCH_DROPS", "0") not in ("", "0")
+# PF_PCMM_BATCH_DROPS=1 (default): with per-output drops (PF_PCMM_RAISE_HI), batch the outputs of each drop together
+_BATCH_DROPS = os.environ.get("PF_PCMM_BATCH_DROPS", "1") not in ("", "0")
 # PF_PCMM_LANES=n: consecutive output finishes rotate over n key-switch workspaces (bts.ks_lane; 1 means 2, at most 4), so
 # independent refreshes do not serialize on one workspace and overlap on the GPU
 _DBG = os.environ.get("PF_PCMM_DBG", "0") not in ("", "0")   # diagnostic: first call's input / output fingerprints
