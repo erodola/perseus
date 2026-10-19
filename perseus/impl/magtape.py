@@ -330,9 +330,13 @@ def compare(ref_graph: str, filled_graph: str):
 
 
 def plan_rot_steps(plan_dir: str):
-    """Rotation steps issued by the captured graph of `plan_dir` (None: no graph found)."""
+    """Rotation steps issued by the captured graph of `plan_dir` (None: no graph found). The plan's own
+    plan_rot_steps.json (write_plan_rot_steps) stands in for the graph, so a shipped plan needs no capture."""
     import glob
     import os
+    f = os.path.join(plan_dir, "plan_rot_steps.json")
+    if os.path.exists(f):
+        return {int(s) for s in json.load(open(f))}
     try:
         line = next(l for l in open(os.path.join(plan_dir, "PLAN_CMD.txt")) if l.startswith("graph="))
         g = line[len("graph="):].split(" (md5")[0].strip()
@@ -348,6 +352,16 @@ def plan_rot_steps(plan_dir: str):
                 if x.startswith("rot("):
                     used |= {int(v) for v in x[4:-1].split(",")}
     return used
+
+
+def write_plan_rot_steps(plan_dir: str):
+    """plan_rot_steps(plan_dir) from its graph -> plan_dir/plan_rot_steps.json (None: no graph found)."""
+    import os
+    steps = plan_rot_steps(plan_dir)
+    if steps is not None:
+        with open(os.path.join(plan_dir, "plan_rot_steps.json"), "w") as f:
+            json.dump(sorted(steps), f)
+    return steps
 
 
 def save_rot_steps(graph_dir: str, steps):
