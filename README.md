@@ -1,91 +1,98 @@
 <p align="center">
   <a href="https://www.uniroma1.it/en"><img src="assets/sapienza-logo.svg" alt="Sapienza University of Rome" height="76"></a>
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://gladia.di.uniroma1.it">
+  <a href="https://www.gmu.edu"><img src="assets/GM-monogramRGB-r.png" alt="George Mason University" height="76"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/paradigma-symbol-white.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/paradigma-symbol.svg">
+    <img src="assets/paradigma-symbol.svg" alt="Paradigma" height="76">
+  </picture>
+</p>
+
+<h1 align="center">Perseus</h1>
+
+<p align="center"><b>An open Python framework for encrypted inference of large language models</b></p>
+
+<p align="center">
+  <a href="#results">Results</a> ·
+  <a href="#whats-inside">What's inside</a> ·
+  <a href="#reproduce-the-numbers">Reproduce</a> ·
+  <a href="#0-install">Install</a> ·
+  <a href="#python-api">Python API</a> ·
+  <a href="#citation">Citation</a> ·
+  <a href="https://github.com/gladia-research-group/FIDESlib32bits">FIDESlib32bits runtime</a>
+</p>
+
+Perseus runs transformers under fully homomorphic encryption (FHE) on a single GPU. The server
+computes on a prompt, an image or a sentence that it never sees in the clear, and only the key
+holder can read the result. Models, data layouts, encrypted nonlinear functions and the placement
+of bootstraps are all Python, so a new model or technique is Python code, not a new CUDA codebase:
+BERT's encrypted forward pass is about 150 lines, Llama-3's prefill about 500. The GPU work runs on
+[FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits), our 32-bit port of the
+CKKS library [FIDESlib](https://github.com/CAPS-UMU/FIDESlib).
+
+On one NVIDIA RTX PRO 6000, Perseus takes an encrypted 128-token prompt through **Llama-3-8B in
+111 s**. That is 3.1× faster than Cerium, the fastest open-source framework, on the same GPU.
+It decodes an encrypted Llama-3-8B token in **21.1 s** at a 512-token context.
+
+<p align="center">
+  <a href="assets/paper-tables-overview-light.png">
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/gladia-logo-white.svg">
-      <source media="(prefers-color-scheme: light)" srcset="assets/gladia-logo.svg">
-      <img src="assets/gladia-logo.svg" alt="GLADIA Research Group" height="84">
+      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-overview-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-overview-light.png">
+      <img src="assets/paper-tables-overview-light.png" alt="Perseus against the fastest prior result. Llama-3-8B prefill of a 128-token prompt: 111.0 s against Sylph's 116.0 s (composed timings). Llama-3-8B decode of one token: 21.1 s against Sylph's 31.0 s (composed). GPT-2 small prefill: 33.9 s against AR-HE's 18520.0 s on H100. GPT-2 small decode: 3.78 s against EncryptedLLM's 68.0 s on A100. ViT-B/16, one image: 123.2 s against ATLAS's 2259.0 s on RTX 4090. BERT-base, 128 tokens: 38.4 s against Cerium's 43.6 s on the same GPU." width="707">
     </picture>
   </a>
 </p>
 
-<h1 align="center">Perseus: Faster FHE Transformer Inference via Complex-Packing and Sparse Bootstraps</h1>
+## What's inside
 
-<p align="center">
-  <a href="https://github.com/gladia-research-group/FIDESlib32bits">FIDESlib32bits runtime</a> ·
-  <a href="#0-install">Quickstart</a> ·
-  <a href="#citation">Citation</a> ·
-  <a href="LICENSE">BUSL-1.1 license</a>
-</p>
+Perseus covers the whole encrypted inference stack, and adds one optimization at each of its three
+levels.
 
-Fully homomorphic encryption (FHE) lets a server run a model on data it cannot read. Under the
-CKKS scheme, every multiplication uses up part of an encrypted value's budget of remaining
-multiplications (its *levels*). When the budget runs out, the value has to be refreshed by a
-*bootstrap*, which costs far more than any other operation in the model. How many bootstraps
-run, where they sit and which kind is used therefore decide most of the inference time. Existing
-tools choose where to bootstrap from the multiplication count alone, without looking at the
-values being refreshed.
+- **Python, all the way down to the kernels.**
+  - Each model is a Python program on `perseus.impl`: GPT-2, Llama-3, BERT and ViT in
+    `examples/*_from_primitives`.
+  - Packings, encrypted LayerNorm, RMSNorm, softmax, GELU and SiLU, and linear layers are Python
+    you can read and change.
+  - The planner reads a record of the model's encrypted forward pass and decides where its
+    bootstraps go.
+- **In-kernel key regeneration** (cryptographic level).
+  - The uniformly random half of every key-switching key is regenerated, from a ChaCha12 seed,
+    inside the two kernels that use it. The other half is stored bit-packed.
+  - Key storage halves. On GPT-2 decoding, GPU memory drops from 41.6 to 32.6 GiB and the time
+    per token by 16%.
+- **Complex Cachemir packing** (data level).
+  - Cachemir's layout for the key/value cache, extended to the complex slots of CKKS.
+  - Each ciphertext carries two real vectors, which roughly doubles the throughput of many
+    operations and roughly halves their memory.
+- **Packing- and magnitude-aware bootstrap placement** (model level).
+  - Perseus records one encrypted forward pass, with the layout and the largest magnitude of
+    every value, and places the bootstraps with an iterated minimum cut.
+  - Each bootstrap gets the scaling its values allow. A cheaper sparse bootstrap is used wherever
+    a ciphertext holds only a few distinct values.
+  - Against DaCapo, Orion and Fhelipe on the same runtime, GPT-2 runs 416 bootstraps per token
+    instead of 584–894 ([placement study](docs/PLACEMENT_STUDY.md)).
+- **Numbers you can rerun.**
+  - Every Perseus result below, except the Llama-3 decode, has a script in
+    [`scripts/repro/`](scripts/repro).
+  - The tag [`table-2026-10-19`](https://github.com/gladia-research-group/perseus/tree/table-2026-10-19)
+    freezes the code and the plans.
+  - [`docs/RESULTS_2026-10-19.md`](docs/RESULTS_2026-10-19.md) lists every run.
 
-**Perseus** records one encrypted forward pass of the model: every encrypted value, how its data
-is laid out across the ciphertext, and how large it gets. From that record it plans where and
-how to bootstrap. A minimum-cut algorithm chooses the positions; each bootstrap gets the
-scaling setting its values allow, and a cheaper bootstrap is used wherever a ciphertext holds
-only a few distinct values. On encrypted GPT-2 generation, Perseus runs 416 bootstraps per
-token against 584–894 for the other tools, and takes 11.78 s per token against 16.09–21.40 s.
-
-This repository contains the planner; GPT-2 written in Python on the Perseus runtime
-(`perseus.impl`, `examples/gpt2_from_primitives`); the recorded forward passes and every plan
-behind the results; and the scripts that produce the comparison plans with the released DaCapo
-and Orion tools. The runtime is [FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits),
-our 32-bit port of the GPU CKKS library [FIDESlib](https://github.com/CAPS-UMU/FIDESlib),
-included as a submodule. It also shrinks the key-switching keys, the large public keys that
-rotations and multiplications need, so that they fit in GPU memory.
-
-## Beyond the paper
-
-The repository also holds work the paper does not report:
-- Llama-3.1-8B, ViT-B/16 and BERT-base running encrypted end to end (their latest numbers are
-  under [Results](#latest-numbers)).
-- The GPU test suite under `tests/dev`, the approximation configs of the other models, and the
-  notebooks.
-- An exact placement algorithm, `--placer ilp`, which solves the same placement problem as a
-  mixed-integer program (`docs/PLACER_ILP.md`).
-- The HEAT GPT-2, a GPT-2 fine-tuned for encryption, with its recorded forward pass and plans
-  (`bootstrap_placements/README.md`).
+Also in the repository:
+- an exact placement algorithm, `--placer ilp`, which solves the same problem as a mixed-integer
+  program (`docs/PLACER_ILP.md`);
+- the HEAT GPT-2, fine-tuned for encryption, with its plans (`bootstrap_placements/README.md`);
+- a client/server split that keeps the secret key on the client (`docs/SECURITY_MODEL.md`);
+- a GPU test suite (`tests/dev`) and notebooks.
 
 ## Results
 
-Encrypted GPT-2 small generating text on one NVIDIA RTX PRO 6000 Blackwell GPU, with a ring
-dimension of 2<sup>16</sup> and 128-bit security.
-
-<p align="center">
-  <a href="assets/results-table-light.png">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/results-table-dark.png">
-      <source media="(prefers-color-scheme: light)" srcset="assets/results-table-light.png">
-      <img src="assets/results-table-light.png" alt="Encrypted GPT-2. Perseus 32-bit: 393 planned and 416 executed bootstraps per token, 11.78 s/token, KL 0.026, top-1 93.8%. Perseus 64-bit: 384, 407, 16.38 s, 0.002, 100%. DaCapo: 595, 618, 16.09 s, 0.067, 68.8%. Orion: 871, 894, 21.40 s, 0.142, 68.8%. Fhelipe: 561, 584, 16.10 s, 0.034, 87.5%. No plan, 32-bit: 912 bootstraps, 23.49 s; no plan, 64-bit: 552, 20.74 s." width="707">
-    </picture>
-  </a>
-</p>
-
-The table is the paper's. Perseus runs on two CKKS parameter sets. The 32-bit one, the default,
-represents each level with a pair of 27-bit primes (27 levels); the 64-bit reference uses 28
-levels of 53-bit primes.
-
-Half of every key-switching key is pseudo-random: the runtime recomputes it on the GPU from a
-seed instead of storing it, and stores the other half bit-packed. The effect on the 32-bit row:
-
-| key storage | s / token | GPU memory used |
-|---|---|---|
-| recomputed half + bit-packed half (default) | 11.86 | 32.55 GiB |
-| recomputed half only (`FIDESLIB_KSK_PACK=0`) | 12.19 (+3%) | 34.49 GiB |
-| bit-packed half only (`FIDESLIB_KSK_REGEN=0`) | 14.18 (+20%) | 41.61 GiB |
-
-### Latest numbers
-
-The runtime and the plans have moved on since the paper. Perseus now runs four models
-encrypted end to end on one RTX PRO 6000, with the 32-bit parameters and 128-bit security.
+All Perseus numbers are measured end to end on one NVIDIA RTX PRO 6000 (96 GB). They use the
+32-bit CKKS parameters (ring dimension 2<sup>16</sup>) and 128-bit security. Prior results are
+reported on their own hardware, or replicated on ours where the code is released.
 
 <p align="center">
   <a href="assets/paper-tables-llama-prefill-light.png">
@@ -137,16 +144,36 @@ encrypted end to end on one RTX PRO 6000, with the 32-bit parameters and 128-bit
   </a>
 </p>
 
-Every Perseus wall excludes key generation, encryption and decryption. The prefill rows and
-BERT time a pass after an untimed warm-up on another input; ViT is the median over four images.
-[`scripts/repro/`](scripts/repro) has a script for each Perseus row except the Llama decode.
-[`docs/RESULTS_2026-10-19.md`](docs/RESULTS_2026-10-19.md) gives the protocol and every run
-(tag [`table-2026-10-19`](https://github.com/gladia-research-group/perseus/tree/table-2026-10-19)).
-The tables' sources are in `assets/paper-tables.tex`.
+- Every Perseus time excludes key generation, encryption and decryption.
+- The prefill rows and BERT time a pass after an untimed warm-up on another input. ViT is the
+  median over four images.
+- The GPT-2 decode includes the encrypted argmax that picks the next token on the server.
+- The tables' sources are in `assets/paper-tables.tex`.
 
-[`bootstrap_placements/README.md`](bootstrap_placements/README.md) lists every plan in the
-repository, including the variants that use only full-size bootstraps and the ablations, with
-the recipe that regenerates each one.
+## Reproduce the numbers
+
+Each script runs one Perseus row on one GPU and prints its `SUMMARY` line with the time and the
+accuracy against the float64 model. Build first ([Install](#0-install)). `NODE` and `MEMS` bind
+the host side to the GPU's NUMA node, which the published numbers used.
+
+```bash
+GPU=0 NODE=1 MEMS=1,2 bash scripts/repro/llama_prefill128.sh   # Llama-3-8B, 128-token prefill
+GPU=0 bash scripts/repro/gpt2_decode.sh                         # GPT-2, steady-token decode
+GPU=0 bash scripts/repro/gpt2_prefill128.sh                     # GPT-2, 128-token prefill
+GPU=0 bash scripts/repro/bert_base.sh                           # BERT-base, 128 tokens (SST-2)
+GPU=0 bash scripts/repro/vit_base.sh                            # ViT-B/16, four EuroSAT images
+```
+
+- `BERT_WARMUP=1` and `GPT2_PF_WARMUP=1` give the warm-up protocol of the tables. Without them,
+  BERT and GPT-2 prefill are timed cold.
+- Every switch a run needs is stored in its plan (`bootstrap_placements/*/PLAN_CMD.txt`). No
+  environment file is needed beyond `scripts/local_env.sh`.
+- Llama-3-8B needs access to `meta-llama/Llama-3.1-8B` on Hugging Face.
+- Llama-3-8B, BERT and ViT do not fit in 48 GB of GPU memory (they were measured on 96 GB). They
+  use up to about 160 GB of host memory.
+- Run one model per GPU on an otherwise quiet machine. A run that shuts down while another one is
+  running stalls it for a few seconds. [`docs/RESULTS_2026-10-19.md`](docs/RESULTS_2026-10-19.md)
+  explains the protocol.
 
 ## Layout
 
@@ -158,22 +185,24 @@ the recipe that regenerates each one.
     Orion and Fhelipe planners.
   - `nn/`, `calibrate/`, `export.py` a PyTorch-like module API, the fitting of the polynomial
     approximations used for nonlinear functions, and the export of HuggingFace weights.
-- `examples/gpt2_from_primitives/` GPT-2 decoding and generation on `perseus.impl`, with its
-  planning script `make_plan.sh`.
-- `graphs/gpt2_decode_python_{n32,n64}/` the recorded forward passes the plans are computed from.
-- `bootstrap_placements/` one directory per plan, each with the recipe that regenerates it
-  (`PLAN_CMD.txt`).
-- `configs/model/approximation/` the fitted approximations (`gpt2_base_n32` for 32-bit,
-  `gpt2_base` for 64-bit).
-- `scripts/` build, run and planning scripts; `scripts/utils/{dacapo,orion}_upstream/` run the
-  released DaCapo and Orion tools.
+- `examples/{gpt2,llama,bert,vit}_from_primitives/` the four models on `perseus.impl`, with their
+  runners; GPT-2 and Llama also with their planning scripts (`make_plan.sh`).
+- `graphs/` the recorded forward passes the plans are computed from.
+- `bootstrap_placements/` one directory per plan, each with the recipe that regenerates it and
+  the runtime switches it was made for (`PLAN_CMD.txt`).
+- `configs/model/approximation/` the fitted approximations of every model.
+- `scripts/` build, run and planning scripts:
+  - `scripts/repro/` one script per result.
+  - `scripts/utils/{dacapo,orion}_upstream/` run the released DaCapo and Orion tools.
 - `src/`, `include/` the CUDA runtime and its Python bindings: `perseus._core`, and
   `perseus._client`, the client side that runs without a GPU.
 - `third_party/` the FIDESlib32bits submodule and our OpenFHE patches.
-- `docs/` the Python API reference, the security model and the exact placement algorithm.
+- `docs/` the Python API reference, the security model, the exact placement algorithm, the
+  placement study and the results protocol.
 - `tests/dev/` the GPU test suite (one program per check; needs a built tree).
 - `notebooks/` walkthroughs for GPT-2, ViT and BERT.
-- `assets/` the logos and the results table (`results-table.tex`, rendered by `render.sh`).
+- `assets/` the logos and the result tables (`paper-tables.tex`, `results-table.tex`, rendered by
+  `render.sh`).
 
 ## Python API
 
@@ -237,15 +266,20 @@ preparing the files, generation, a custom encrypted model and the client-server 
 
 ## Pipeline
 
-The complete sequence for GPT-2 on the 32-bit parameters, with the 64-bit differences. Every
+The complete sequence for GPT-2 on the 32-bit parameters, from the weights to an encrypted run,
+with the 64-bit differences. Llama-3 follows the same steps with
+`examples/llama_from_primitives/make_plan.sh`. The BERT and ViT plans ship ready to run. Every
 file a step produces is already in the repository, so any step can be skipped.
 
 ### 0. Install
 
-You need Linux, CUDA 12.6 or newer, a GPU with 48 GB or more of memory (the 32-bit run peaks at
-about 33 GiB, the 64-bit one at about 46 GiB), Python 3.11+, CMake 3.24+, gcc 12+,
-`libarchive-dev`, and NCCL (`libnccl2` and `libnccl-dev`, or `NCCL_HOME` pointing at a prefix
-with `lib/libnccl.so` and `include/nccl.h`).
+You need:
+- Linux and CUDA 12.6 or newer.
+- A GPU with 48 GB or more of memory for GPT-2. The 32-bit run peaks at about 33 GiB, the 64-bit
+  one at about 46 GiB. Llama-3-8B, BERT and ViT need more (they were measured on 96 GB).
+- Python 3.11+, CMake 3.24+, gcc 12+ and `libarchive-dev`.
+- NCCL: `libnccl2` and `libnccl-dev`, or `NCCL_HOME` pointing at a prefix with `lib/libnccl.so`
+  and `include/nccl.h`.
 
 ```bash
 git clone --recurse-submodules https://github.com/gladia-research-group/perseus
@@ -343,8 +377,9 @@ that turn out redundant (`--prune`) and the placement algorithm
 plans estimate each bootstrap's error from measurements (`perseus/plan/data/bts_accuracy_n32.json`),
 the 64-bit plans from a formula.
 
-The comparison plans come from the released tools. DaCapo needs its compiler, `hecate-opt`,
-built once (LLVM/MLIR 18); Orion's solver is downloaded and patched on first use:
+The comparison plans of the [placement study](docs/PLACEMENT_STUDY.md) come from the released
+tools. DaCapo needs its compiler, `hecate-opt`, built once (LLVM/MLIR 18); Orion's solver is
+downloaded and patched on first use:
 
 ```bash
 bash scripts/utils/dacapo_upstream/build_hecate.sh
@@ -356,7 +391,7 @@ bash scripts/make_plans.sh python/dacapo python/orion python/fhelipe
 ```bash
 source scripts/local_env.sh
 DECODE=".venv/bin/python -m examples.gpt2_from_primitives.run_decode --tokens 16 --argmax"
-$DECODE --plan bootstrap_placements/gpt2_decode_python_n32     # the 32-bit row: 416 bootstraps per token
+$DECODE --plan bootstrap_placements/gpt2_decode_python_n32     # the shipped 32-bit plan
 $DECODE --plan bootstrap_placements/python/dacapo              # a comparison plan (also python/orion, python/fhelipe)
 $DECODE                                                        # no plan: bootstrap whenever a value runs out of levels
 $DECODE --plan bootstrap_placements/gpt2_decode_python_n32_dense --set SPARSE_AUTO=0 --set SPARSE_BTS_SLOTS=0   # full-size bootstraps only
@@ -369,16 +404,15 @@ freshly encrypted, so a plan that supports generation also holds a second plan f
 `block_0_feedback_placement.json`, used for those tokens (`bootstrap_placements/README.md`
 lists which plans have one).
 
-For the 64-bit row, export `CHAIN=n64` before `source scripts/local_env.sh`, point the import
-symlink at `_core.n64.so`, and pass `--chain n64 --plan bootstrap_placements/gpt2_decode_python_n64`.
-`FIDESLIB_KSK_REGEN=0` or `FIDESLIB_KSK_PACK=0` reproduce the key-storage rows.
+For the 64-bit row of the placement study, export `CHAIN=n64` before `source scripts/local_env.sh`,
+point the import symlink at `_core.n64.so`, and pass `--chain n64 --plan bootstrap_placements/gpt2_decode_python_n64`.
+`FIDESLIB_KSK_REGEN=0` or `FIDESLIB_KSK_PACK=0` reproduce its key-storage rows.
 
 A run passes when it prints `[decode] PASS`: at every position the reference token stays among
 the top few of the encrypted output (`GATE_REF_RANK_MAX`), and the divergence from the plaintext
 output stays small (`GATE_KL_MAX`; a broken run shows a KL above 50). Matching the plaintext top
-token is reported but not required; the 32-bit row matches 15 of 16. The times above were
-measured on an otherwise idle machine, with the process pinned to the GPU's NUMA node
-(`numactl --cpunodebind=<node> --preferred=<node>`).
+token is reported but not required. Time a run on an otherwise idle machine, with the process
+pinned to the GPU's NUMA node (`numactl --cpunodebind=<node> --preferred=<node>`).
 
 The runtime also has a native C++ driver for the same model (`scripts/run_task.sh`,
 `RUNNER=cuda`). No recording or plan ships for it; it needs its own (`STAGE=capture`, then
@@ -404,3 +438,13 @@ Perseus is released under the [Business Source License 1.1](LICENSE): free for a
 non-commercial use (research, academic, evaluation); commercial use requires prior written
 permission from the authors. On the Change Date (2030-08-18) the license converts to GPLv2.
 `third_party/FIDESlib` keeps its own license.
+
+<p align="center">
+  <a href="https://gladia.di.uniroma1.it">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/gladia-logo-white.svg">
+      <source media="(prefers-color-scheme: light)" srcset="assets/gladia-logo.svg">
+      <img src="assets/gladia-logo.svg" alt="GLADIA Research Group" height="56">
+    </picture>
+  </a>
+</p>

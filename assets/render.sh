@@ -14,6 +14,7 @@ for name in "${@:-results-table}"; do
         "$T" --chatter minimal --outdir "$tmp" "$tmp/$m.tex"
         "$PY" - "$tmp/$m.pdf" "$name" "$m" $pages <<'PY'
 import sys, pymupdf
+pymupdf.mupdf.fz_set_graphics_aa_level(0)   # fills and rules pixel-exact (no seams between table cells); text stays smooth
 pdf, name, mode, pages = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4:]
 for i, page in enumerate(pymupdf.open(pdf)):
     out = f"{name}-{pages[i]}-{mode}.png" if pages else f"{name}-{mode}.png"
