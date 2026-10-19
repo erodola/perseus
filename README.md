@@ -84,25 +84,65 @@ seed instead of storing it, and stores the other half bit-packed. The effect on 
 
 ### Latest numbers
 
-The runtime and the plans have moved on since the paper. These are the end-to-end walls at tag
-[`table-2026-10-19`](https://github.com/gladia-research-group/perseus/tree/table-2026-10-19), on
-the same GPU with the 32-bit parameters and 128-bit security. Accuracy is measured against the
-float64 models.
+The runtime and the plans have moved on since the paper. Perseus now runs four models
+encrypted end to end on one RTX PRO 6000, with the 32-bit parameters and 128-bit security.
 
-| model | task | wall | accuracy |
-|---|---|---|---|
-| Llama-3.1-8B | 128-token prefill | 111.0 s | top-1 124–127 / 128, median KL ≈ 5e-5 |
-| GPT-2 small | 128-token prefill | 37.4 s | top-1 125 / 128 |
-| GPT-2 small | generation, per token | 3.78 s | top-1 14–16 / 16 (misses are rank-1 near ties) |
-| BERT-base | 128-token sentence classification (SST-2) | 40.2 s | float64 label, KL ≤ 1e-9 |
-| ViT-B/16 (224 × 224) | one image | 123.2 s | top-1 4 / 4 |
+<p align="center">
+  <a href="assets/paper-tables-llama-prefill-light.png">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-llama-prefill-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-llama-prefill-light.png">
+      <img src="assets/paper-tables-llama-prefill-light.png" alt="Encrypted Llama-3-8B prefill of a 128-token prompt, seconds. MOAI 3592.0, NEXUS 829.0, Euston 484.0, STIP 406.6 (composed timings, amortized over a batch); Odin 366.4 on H100; Cerium 347.5 (replicated on RTX PRO 6000); Sylph 116.0 (composed); Perseus 111.0 on RTX PRO 6000, open source." width="707">
+    </picture>
+  </a>
+</p>
 
-- Each wall excludes key generation, weight encoding, encryption and decryption.
-- The GPT-2 per-token time includes the encrypted argmax that picks the next token on the server.
-- The Llama prefill times a second pass, after an untimed warm-up on another input. The other
-  rows are timed cold.
-- [`scripts/repro/`](scripts/repro) has one script per row.
-  [`docs/RESULTS_2026-10-19.md`](docs/RESULTS_2026-10-19.md) gives the protocol and every run.
+<p align="center">
+  <a href="assets/paper-tables-llama-decode-light.png">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-llama-decode-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-llama-decode-light.png">
+      <img src="assets/paper-tables-llama-decode-light.png" alt="Encrypted Llama-3-8B decode of one token, seconds per token at a context size. AR-HE 1569.0 at 32, ROSETTA 311.0 at 512, Cachemir 97.0 at 512, Sylph 31.0 at 128 (all composed timings); Perseus 21.1 at 512 on RTX PRO 6000, open source." width="707">
+    </picture>
+  </a>
+</p>
+
+<p align="center">
+  <a href="assets/paper-tables-gpt2-light.png">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-gpt2-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-gpt2-light.png">
+      <img src="assets/paper-tables-gpt2-light.png" alt="Encrypted GPT-2 small. AR-HE: 128-token prefill 18520.0 s, decode 544.0 s per token at context 33. ROSETTA: decode 78.6 s at 512 (composed). EncryptedLLM: decode 68.0 s at 128. Perseus: prefill 33.9 s, decode 3.78 s per token at context 32, on RTX PRO 6000, open source." width="707">
+    </picture>
+  </a>
+</p>
+
+<p align="center">
+  <a href="assets/paper-tables-vit-light.png">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-vit-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-vit-light.png">
+      <img src="assets/paper-tables-vit-light.png" alt="Encrypted ViT inference of one image, seconds. FIONA, ViT-S/16, 374.4 on a 48-core CPU (amortized over a batch of 32, retrained polynomial model); ATLAS, ViT-B/16, 2259.0 on RTX 4090; Perseus, ViT-B/16, 123.2 on RTX PRO 6000, open source." width="707">
+    </picture>
+  </a>
+</p>
+
+<p align="center">
+  <a href="assets/paper-tables-bert-light.png">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-bert-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-bert-light.png">
+      <img src="assets/paper-tables-bert-light.png" alt="Encrypted BERT inference of one input, seconds. THOR, BERT-base, 128 tokens, 602.0 on A100; POLARIS, BERT-Mini, 83.0 on A100; Cerium, BERT-base, 128 tokens, 43.6 (replicated on RTX PRO 6000); Perseus, BERT-base, 128 tokens, 38.4 on RTX PRO 6000, open source." width="707">
+    </picture>
+  </a>
+</p>
+
+Every Perseus wall excludes key generation, encryption and decryption. The prefill rows and
+BERT time a pass after an untimed warm-up on another input; ViT is the median over four images.
+[`scripts/repro/`](scripts/repro) has a script for each Perseus row except the Llama decode.
+[`docs/RESULTS_2026-10-19.md`](docs/RESULTS_2026-10-19.md) gives the protocol and every run
+(tag [`table-2026-10-19`](https://github.com/gladia-research-group/perseus/tree/table-2026-10-19)).
+The tables' sources are in `assets/paper-tables.tex`.
 
 [`bootstrap_placements/README.md`](bootstrap_placements/README.md) lists every plan in the
 repository, including the variants that use only full-size bootstraps and the ablations, with
