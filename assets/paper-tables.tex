@@ -1,6 +1,6 @@
 % The paper's comparison tables for README.md, one page per table. Render: bash assets/render.sh paper-tables, which writes
 % paper-tables-<page>-{light,dark}.png in the order of the pages line below. \darkmode switches the palette.
-% pages: llama-prefill llama-decode gpt2 vit bert
+% pages: overview llama-prefill llama-decode gpt2 vit bert
 \documentclass[border=14pt,varwidth=17.2cm,multi=tbl]{standalone}
 \usepackage{newtxtext,newtxmath}
 \usepackage{booktabs,xcolor,colortbl,pifont}
@@ -22,7 +22,29 @@
 \newcommand{\tcap}[1]{\vspace{10pt}\begin{minipage}{\linewidth}\fontsize{11.5}{14.5}\selectfont #1\end{minipage}}
 \newcommand{\legend}{\yes\ open source, \semi\ partially or temporarily released, \no\ closed source.}
 \newenvironment{tbl}{\centering\setlength{\tabcolsep}{7pt}\renewcommand{\arraystretch}{1.18}}{}
+\newcolumntype{P}{>{\columncolor{ours}[\dimexpr\tabcolsep+0.3pt\relax][\dimexpr\tabcolsep+0.3pt\relax]}r}
 \begin{document}
+
+\begin{tbl}
+% no padding around the rules, so the Perseus column's fill runs unbroken from rule to rule
+\renewcommand{\arraystretch}{1.3}\setlength{\aboverulesep}{0pt}\setlength{\belowrulesep}{0pt}\setlength{\extrarowheight}{2pt}
+\begin{tabular}{llPrl}
+\toprule
+\textbf{Model} & \textbf{Task} & \textbf{Perseus} & \multicolumn{2}{l}{\textbf{Fastest prior result}} \\
+\midrule
+Llama-3-8B & prefill, 128-token prompt & \textbf{111.0 s} & 116.0 s\nt{\dagger} & Sylph, RTX PRO 6000 \\
+Llama-3-8B & decode, one token & \textbf{21.1 s} & 31.0 s\nt{\dagger} & Sylph, RTX PRO 6000 \\
+GPT-2 small & prefill, 128-token prompt & \textbf{33.9 s} & 18520.0 s & AR-HE, H100 \\
+GPT-2 small & decode, one token & \textbf{3.78 s} & 68.0 s & EncryptedLLM, A100 \\
+ViT-B/16 & one $224\times224$ image & \textbf{123.2 s} & 2259.0 s & ATLAS, RTX 4090 \\
+BERT-base & 128-token input & \textbf{38.4 s} & 43.6 s\nt{\S} & Cerium, RTX PRO 6000 \\
+\bottomrule
+\end{tabular}
+\tcap{Perseus is measured end to end on one NVIDIA RTX PRO 6000 with 128-bit security, and is open source. The fastest
+prior result is the fastest entry in the tables below, on its own hardware. $^\dagger$Composed from per-block timings,
+not run end to end; $^\S$replicated from the released code on our GPU. Decode contexts: Perseus 512 and Sylph 128 tokens
+(Llama), Perseus 32 and EncryptedLLM 128 tokens (GPT-2).}
+\end{tbl}
 
 \begin{tbl}
 \begin{tabular}{lrrlc}
