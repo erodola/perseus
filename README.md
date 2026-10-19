@@ -33,7 +33,7 @@ of [FIDESlib](https://github.com/CAPS-UMU/FIDESlib).
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-overview-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-overview-light.png">
-      <img src="assets/paper-tables-overview-light.png" alt="Perseus, encrypted, end to end on one RTX PRO 6000 with 128-bit security. Llama-3-8B: prefill of a 128-token prompt 111.0 s, decode of one token at a 512-token context 21.1 s. GPT-2 small: prefill 33.9 s, decode 3.78 s per token. ViT-B/16: 123.2 s per image. BERT-base: 38.4 s for 128 tokens." width="707">
+      <img src="assets/paper-tables-overview-light.png" alt="Perseus, encrypted, end to end on one RTX PRO 6000 with 128-bit security. Llama-3-8B: prefill of a 128-token prompt 111.0 s, decode of one token at a 512-token context 21.1 s. GPT-2 small: prefill 33.1 s, decode 3.78 s per token. ViT-B/16: 123.2 s per image. BERT-base: 37.7 s for 128 tokens." width="707">
     </picture>
   </a>
 </p>
@@ -58,7 +58,7 @@ ours where the code is released.
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-llama-prefill-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-llama-prefill-light.png">
-      <img src="assets/paper-tables-llama-prefill-light.png" alt="Encrypted Llama-3-8B prefill of a 128-token prompt, seconds. MOAI 3592.0, NEXUS 829.0, Euston 484.0, STIP 406.6 (composed timings, amortized over a batch); Odin 366.4 on H100; Cerium 347.5 (replicated on RTX PRO 6000); Sylph 116.0 (composed); Perseus 111.0 on RTX PRO 6000, open source." width="707">
+      <img src="assets/paper-tables-llama-prefill-light.png" alt="Encrypted Llama-3-8B prefill of a 128-token prompt, seconds. MOAI 3592.0 on H200, NEXUS 829.0 on 4 A100, Euston 484.0, STIP 406.6 (composed timings, amortized over a batch); Odin 366.4 on H100; Cerium 347.5 (replicated on RTX PRO 6000); Sylph 116.0 (composed); Perseus 111.0 on RTX PRO 6000, open source." width="707">
     </picture>
   </a>
   <br>
@@ -74,7 +74,7 @@ ours where the code is released.
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-gpt2-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-gpt2-light.png">
-      <img src="assets/paper-tables-gpt2-light.png" alt="Encrypted GPT-2 small. AR-HE: 128-token prefill 18520.0 s, decode 544.0 s per token at context 33. ROSETTA: decode 78.6 s at 512 (composed). EncryptedLLM: decode 68.0 s at 128. Perseus: prefill 33.9 s, decode 3.78 s per token at context 32, on RTX PRO 6000, open source." width="707">
+      <img src="assets/paper-tables-gpt2-light.png" alt="Encrypted GPT-2 small. AR-HE: 128-token prefill 18520.0 s, decode 544.0 s per token at context 33. ROSETTA: decode 78.6 s at 512 (composed). EncryptedLLM: decode 68.0 s at 128. Perseus: prefill 33.1 s, decode 3.78 s per token at context 32, on RTX PRO 6000, open source." width="707">
     </picture>
   </a>
   <br>
@@ -90,7 +90,7 @@ ours where the code is released.
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-bert-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-bert-light.png">
-      <img src="assets/paper-tables-bert-light.png" alt="Encrypted BERT inference of one input, seconds. THOR, BERT-base, 128 tokens, 602.0 on A100; POLARIS, BERT-Mini, 83.0 on A100; Cerium, BERT-base, 128 tokens, 43.6 (replicated on RTX PRO 6000); Perseus, BERT-base, 128 tokens, 38.4 on RTX PRO 6000, open source." width="707">
+      <img src="assets/paper-tables-bert-light.png" alt="Encrypted BERT inference of one input, seconds. THOR, BERT-base, 128 tokens, 602.0 on A100; POLARIS, BERT-Mini, 83.0 on A100; Cerium, BERT-base, 128 tokens, 43.6 (replicated on RTX PRO 6000); Perseus, BERT-base, 128 tokens, 37.7 on RTX PRO 6000, open source." width="707">
     </picture>
   </a>
 </p>
@@ -111,8 +111,8 @@ GPU=0 bash scripts/repro/bert_base.sh                           # BERT-base, 128
 GPU=0 bash scripts/repro/vit_base.sh                            # ViT-B/16, four EuroSAT images
 ```
 
-BERT and GPT-2 prefill match the tables with `BERT_WARMUP=1` / `GPT2_PF_WARMUP=1`. Llama-3-8B
-needs access to `meta-llama/Llama-3.1-8B`; Llama, BERT and ViT were measured on a 96 GB GPU.
+Llama-3-8B needs access to `meta-llama/Llama-3.1-8B`; Llama, BERT and ViT were measured on a 96 GB
+GPU.
 
 ## Layout
 

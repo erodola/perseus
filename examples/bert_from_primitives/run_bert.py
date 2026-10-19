@@ -144,10 +144,11 @@ def main(argv=None):
     print(f"[bert] configs={a.configs} weights+keys {time.time() - t_pre:.1f}s", flush=True)
     rows_out = []
     ins = inputs(a, a.tokens)
-    # BERT_WARMUP=1 (default 0): one untimed forward of another input of the same length first (the first input with
-    # the tokens between [CLS] and [SEP] reversed), as the Llama prefill's PF_WARMUP: masks encoded, StC caches built
-    # and pools grown -- setup that does not depend on the input. SUMMARY's wall and bts stay the timed pass's.
-    if os.environ.get("BERT_WARMUP", "0") not in ("", "0") and ins and not a.capture:
+    # BERT_WARMUP=1 (the default; 0 times the cold first pass): one untimed forward of another input of the same length
+    # first (the first input with the tokens between [CLS] and [SEP] reversed), as the Llama prefill's PF_WARMUP: masks
+    # encoded, StC caches built and pools grown -- setup that does not depend on the input. SUMMARY's wall and bts stay
+    # the timed pass's.
+    if os.environ.get("BERT_WARMUP", "1") not in ("", "0") and ins and not a.capture:
         _, wids, wn, _ = ins[0]
         wids = np.array(wids)
         wids[1:wn - 1] = wids[1:wn - 1][::-1].copy()
