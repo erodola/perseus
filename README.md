@@ -61,9 +61,7 @@ ours where the code is released.
       <img src="assets/paper-tables-llama-prefill-light.png" alt="Encrypted Llama-3-8B prefill of a 128-token prompt, seconds. MOAI 3592.0, NEXUS 829.0, Euston 484.0, STIP 406.6 (composed timings, amortized over a batch); Odin 366.4 on H100; Cerium 347.5 (replicated on RTX PRO 6000); Sylph 116.0 (composed); Perseus 111.0 on RTX PRO 6000, open source." width="707">
     </picture>
   </a>
-</p>
-
-<p align="center">
+  <br>
   <a href="assets/paper-tables-llama-decode-light.png">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-llama-decode-dark.png">
@@ -71,9 +69,7 @@ ours where the code is released.
       <img src="assets/paper-tables-llama-decode-light.png" alt="Encrypted Llama-3-8B decode of one token, seconds per token at a context size. AR-HE 1569.0 at 32, ROSETTA 311.0 at 512, Cachemir 97.0 at 512, Sylph 31.0 at 128 (all composed timings); Perseus 21.1 at 512 on RTX PRO 6000, open source." width="707">
     </picture>
   </a>
-</p>
-
-<p align="center">
+  <br>
   <a href="assets/paper-tables-gpt2-light.png">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-gpt2-dark.png">
@@ -81,9 +77,7 @@ ours where the code is released.
       <img src="assets/paper-tables-gpt2-light.png" alt="Encrypted GPT-2 small. AR-HE: 128-token prefill 18520.0 s, decode 544.0 s per token at context 33. ROSETTA: decode 78.6 s at 512 (composed). EncryptedLLM: decode 68.0 s at 128. Perseus: prefill 33.9 s, decode 3.78 s per token at context 32, on RTX PRO 6000, open source." width="707">
     </picture>
   </a>
-</p>
-
-<p align="center">
+  <br>
   <a href="assets/paper-tables-vit-light.png">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-vit-dark.png">
@@ -91,9 +85,7 @@ ours where the code is released.
       <img src="assets/paper-tables-vit-light.png" alt="Encrypted ViT inference of one image, seconds. FIONA, ViT-S/16, 374.4 on a 48-core CPU (amortized over a batch of 32, retrained polynomial model); ATLAS, ViT-B/16, 2259.0 on RTX 4090; Perseus, ViT-B/16, 123.2 on RTX PRO 6000, open source." width="707">
     </picture>
   </a>
-</p>
-
-<p align="center">
+  <br>
   <a href="assets/paper-tables-bert-light.png">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-bert-dark.png">

@@ -1,7 +1,8 @@
 % The paper's comparison tables for README.md, one page per table. Render: bash assets/render.sh paper-tables, which writes
 % paper-tables-<page>-{light,dark}.png in the order of the pages line below. \darkmode switches the palette.
 % pages: overview llama-prefill llama-decode gpt2 vit bert
-\documentclass[border=14pt,varwidth=17.2cm,multi=tbl]{standalone}
+% border: 14pt left and right, 4pt top and bottom (stacked in the README, the tables sit close together)
+\documentclass[border={14pt 4pt 14pt 4pt},varwidth=17.2cm,multi=tbl]{standalone}
 \usepackage{newtxtext,newtxmath}
 \usepackage{booktabs,xcolor,colortbl,pifont}
 \ifdefined\darkmode
@@ -19,7 +20,7 @@
 \newcommand{\no}{\textcolor{nocol}{\ding{55}}}
 \newcommand{\semi}{$\sim$}
 \newcommand{\nt}[1]{\rlap{$^{#1}$}}
-\newcommand{\tcap}[1]{\vspace{10pt}\begin{minipage}{\linewidth}\fontsize{11.5}{14.5}\selectfont #1\end{minipage}}
+\newcommand{\tcap}[1]{\par\vspace{6pt}\begin{minipage}{\linewidth}\fontsize{11.5}{14.5}\selectfont #1\end{minipage}}
 \newcommand{\legend}{\yes\ open source, \semi\ partially or temporarily released, \no\ closed source.}
 \newenvironment{tbl}{\centering\setlength{\tabcolsep}{7pt}\renewcommand{\arraystretch}{1.18}}{}
 \newcolumntype{P}{>{\columncolor{ours}[\dimexpr\tabcolsep+0.3pt\relax][\dimexpr\tabcolsep+0.3pt\relax]}r}
