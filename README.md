@@ -387,3 +387,6 @@ permission from the authors. On the Change Date (2030-08-18) the license convert
     </picture>
   </a>
 </p>
+
+<p align="center"><sub><i>Perseus slew Medusa without ever looking at her, only at her reflection in a polished
+shield. Perseus runs language models the same way, looking only at the ciphertext.</i></sub></p>
