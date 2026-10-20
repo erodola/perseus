@@ -72,5 +72,3 @@ softmax:
   gs_iters: 8
   refine_drift_margin: 1.0
   denom_floor_frac: 1.0e-3
-  sm_kc_anchor: 4
-  sm_kc_tail_margin: 0.0

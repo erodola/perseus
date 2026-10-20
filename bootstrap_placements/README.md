@@ -156,6 +156,19 @@ seeds drift, at about 0.01 s per token faster and a mean KL about 2-3x the main 
 ciphertext, whole heads per block; `_gqa` keeps each Llama KV head once, `PF_GQA=1`). Their switches are in the
 `runtime=` line, so `--plan` alone runs them: GPT-2 0.46 s per token, Llama 3.8 s (blocked) and 3.5 s (GQA).
 
+## 512-context decode plan (32-bit)
+
+`gpt2_decode_python_n32_ctx512` decodes up to a 512-token context (the main plan binds up to 32 cached keys). It is
+captured at position 0 with step-scoped names and the general softmax period, so one plan binds at every cache
+length; past 32 keys the softmax refreshes on a sparse route of Gp x 512 slots that the runtime builds as the cache
+grows (1024 from 33 keys, up to 8192 from 257), multi-stage past 1024 slots, which is why its softmax refreshes are
+planned to land at 32. The magnitudes are the larger of position 0's and position 511's (`scripts/utils/merge_mags.py`):
+the softmax refresh inputs grow up to ~800x with the cache, and factors sized at position 0 wrap. The configs
+(`gpt2_base_n32_ctx512`) refit the softmax on every query position up to 520 keys, without the per-cache-length
+refine rescale. The block weights stream from the host (`IMPL_RESIDENT_BLOCKS=0`) to leave room for the routes.
+512 positions (`scripts/repro/gpt2_decode_ctx512.sh`): top-1 500/512 against the plaintext model, median KL 5e-4,
+5.2 s per token at 500-511 keys (4.6 s within 32).
+
 ## Result plans (README tables, tag `table-2026-10-19`)
 
 Each runs with `--plan` alone: every switch is in its `runtime=` line. `scripts/repro/` has one script per plan and

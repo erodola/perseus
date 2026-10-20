@@ -948,6 +948,9 @@ class CapCore(_Core):
         d = os.environ.get("FHE_GRAPH_DIR")
         if not d or os.path.exists(os.path.join(d, f"block_{b}", "graph.json")):
             return False
+        tok = os.environ.get("FHE_GRAPH_CAPTURE_TOKEN")
+        if tok and getattr(inf, "capture_t", None) is not None and inf.capture_t != int(tok):
+            return False
         fhe = inf.fhe
         fhe.gen += 1
         fhe.nodes, fhe.ct_counter, fhe.pt_counter = [], 0, 0

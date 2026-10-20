@@ -21,6 +21,19 @@
 # off the capture's own deliberate refreshes), not as the fresh encryption the capture saw. Same
 # recipe, same capture; the exit must equal block 0's, or block 1's plan would not bind.
 # Written as block_0_feedback_placement.json next to the plan.
+#
+# The 512-context plan (bootstrap_placements/gpt2_decode_python_n32_ctx512) binds at every cache length: the capture
+# runs with step-scoped names and the general softmax period (IMPL_SCOPED_NAMES=1 SM_PERIODIC=2), the softmax
+# refreshes land at 32, where the multi-stage routes past 1024 slots arrive (PLAN_STEP_LANDING; the runtime caps
+# SparseB at 1024 slots, whose diagonals grow as n^2 / N), no refresh sits in a group ladder (.gp), and the
+# magnitudes are the larger of position 0's and position 511's (scripts/utils/merge_mags.py):
+#     python -m examples.gpt2_from_primitives.run_decode --tokens 1 --argmax --capture $GR --structure-only \
+#         --configs $CFG --set IMPL_SCOPED_NAMES=1 --set SM_PERIODIC=2 (+ the shipped plan's runtime as --set)
+#     python -m examples.gpt2_from_primitives.capture_mags $GR --argmax --configs $CFG --set IMPL_SCOPED_NAMES=1 ...
+#     FHE_GRAPH_CAPTURE_TOKEN=511 python -m examples.gpt2_from_primitives.run_decode --fake --tokens 512 \
+#         --capture $GR511 --configs $CFG --set IMPL_SCOPED_NAMES=1 ...   (STEPS_T=512 reference)
+#     python scripts/utils/merge_mags.py $GR graphs/gpt2_decode_python_n32_ctx512 $GR511
+#     bash scripts/make_plans.sh gpt2_decode_python_n32_ctx512
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$REPO"
 GRAPH_DIR="${1:?graph dir (block_<b>/graph.json)}"

@@ -34,22 +34,16 @@ def _phase1_val(rows, valid, mid, scale, coeffs, n_sq):
 
 
 @torch.no_grad()
-def _refine_denominators(val, ref_iters, k_eff, row_q, C, q):
-    kc = (row_q + 1).long()
+def _refine_denominators(val, ref_iters, k_eff):
     sqrt_k = k_eff.sqrt()
-    S_steps, S_kc = [], []
+    S_steps = []
     sum_exp = val.sum(dim=-1, keepdim=True)
     for _ in range(ref_iters):
         val = (val * sum_exp.clamp(min=1e-30).reciprocal()) ** 2
         sum_exp = val.sum(dim=-1, keepdim=True)
         s = sum_exp.flatten() * sqrt_k          # [n_rows]
         S_steps.append(s[s > 0])
-        S_kc.append([
-            float(torch.quantile(s[kc == k].double(), q)) if (kc == k).any()
-            else float("nan")
-            for k in range(1, C + 1)
-        ])
-    return S_steps, S_kc
+    return S_steps
 
 
 def _next_pow2(x):
@@ -125,8 +119,7 @@ def fit_softmax(rows, row_q, T, cfg):
             )
 
     C = win if win else int(T)
-    refine_S, S_kc = _refine_denominators(
-        val1, ref_iters, k_eff, row_q, C, cfg.init_q_hi)
+    refine_S = _refine_denominators(val1, ref_iters, k_eff)
     refine_alpha, refine_beta, per_step_iters = [], [], []
     for s in refine_S:
         d_min_i = safe_quantile(s, cfg.init_q_lo) / d_safety
@@ -154,25 +147,7 @@ def fit_softmax(rows, row_q, T, cfg):
 
     denom_floor = float(cfg.denom_floor_frac) * float(init_d_min)
 
-    anchor = max(1, min(int(cfg.sm_kc_anchor), C))
-    if cfg.bidirectional:   # uniform kc: the refine bands ARE the fit — no per-kc shrink
-        sm_kc_r = [1.0] * (ref_iters * C)
-    else:
-        sm_kc_r = []
-        for i in range(ref_iters):
-            lows = [S_kc[i][k] for k in range(anchor)
-                    if S_kc[i][k] == S_kc[i][k] and S_kc[i][k] > 0]
-            s_ref = max(lows) if lows else 1.0
-            last = 1.0
-            for k in range(C):
-                kc = k + 1
-                st = S_kc[i][k]
-                if kc <= anchor:
-                    last = 1.0
-                elif st == st and st > 0.0:
-                    st_eff = st * (1.0 + cfg.sm_kc_tail_margin)
-                    last = min(1.0, (s_ref / st_eff) ** 2)
-                sm_kc_r.append(last)
+    sm_kc_r = [1.0] * (ref_iters * C)
 
     return {
         "mid_x": mid,
