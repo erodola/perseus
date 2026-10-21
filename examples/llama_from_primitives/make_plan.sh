@@ -9,7 +9,8 @@
 # make_plan.sh blocks stage (model-independent: one plan per block_<b>/graph.json).
 # The runtime= line carries the levers a capture at HEAD runs with (SM_HRS_PACK .. LADDER_RADIX_BITS; without them the
 # contract refuses the plan). No raise drops: a dense-route drop 1 on a SiLU refresh returns garbage (the ctx-512
-# recalibration's plan planted one in blocks 20-31; KL ~1e19 from the first token).
+# recalibration's plan planted one in blocks 20-31; KL ~1e19 from the first token). FIDESLIB_DISCARD_SCRATCH=0: the L2
+# discard of dead NTT scratch (FIDESlib default since 797d26f) returns garbage on decode (KL ~1e19 from position 1).
 #   ctx-512 plan (CFG=configs/model/approximation/llama31_8b_n32_ctx512/configs.json):
 #     python -m examples.llama_from_primitives.run_decode --tokens 1 --kv-offload --set KV_ARENA_GB=56 \
 #         --set FIDESLIB_BTS_RAISE_DROPS=1,3,5 --set SM_CHEB_GS=0 --capture $GR --structure-only --configs $CFG
@@ -28,7 +29,7 @@ RUNTIME="FIDESLIB_BTS_SHIFT=1 FIDESLIB_SPRU=64 FIDESLIB_BTS_RAISE_DROPS=1,3,5 SM
 GELU_FOLD=1 LN_CHEB=1 SM_GS_FIRST=1 SM_PERIODIC=2 SM_FOLD=1 FIDESLIB_BTS_SPARSE_B=1 FIDESLIB_ROT_KEY_BAND=32 \
 KV_LANES=1 CHEB_BSGS=1 QKV_LANES=1 BTS_MAX_INPUT_LEVEL=50 IMPL_SCOPED_NAMES=1 \
 SPARSE_BTS_SLOTS=256,1 FIDESLIB_BTS_SPARSE_B_MAX=1024 SPARSE_LEVEL_BUDGET=3,3 \
-SM_HRS_PACK=1 CUTMAX_PAIR=1 IMPL_DEAD_OPS=1 LADDER_RADIX_BITS=3 ${RUNTIME_EXTRA:-}"
+SM_HRS_PACK=1 CUTMAX_PAIR=1 IMPL_DEAD_OPS=1 LADDER_RADIX_BITS=3 FIDESLIB_DISCARD_SCRATCH=0 ${RUNTIME_EXTRA:-}"
 # exported values win over the recipe (PLAN_* experiments)
 for kv in $RECIPE; do k=${kv%%=*}; [ -n "${!k+x}" ] || export "$kv"; done
 # the sparse routes follow from Llama's layout (tH = 256), not from the shell: scripts/local_env.sh exports GPT-2's
