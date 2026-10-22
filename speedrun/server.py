@@ -130,6 +130,7 @@ def prefill(a):
             return _pc.Session.from_bundle(self.cfg, self.keys, self.bundle, **kw)
 
     cfg = pcfg.plan_runtime(plan, "n32", base=pcfg.preset("n32_gpt2_prefill"))
+    cfg["exec.use_graphs"] = False             # as run_prefill: a one-shot forward only pays a graph capture
     run = Served(model, plan, cfg, _pc.KeySource.generate([], conj=True, layout="packed"), pt_rows=28, stc_cache=16,
                  work_dir=os.path.join(os.environ.get("HOME", "/tmp"), "speedrun"), log=lambda m: print(m, flush=True))
     ids = np.random.default_rng(0).integers(0, store.shape(weights.WTE)[0], PROMPT)   # public placeholder prompt
