@@ -616,6 +616,7 @@ class PlannedRun:
         dynamic steps, the register map."""
         from perseus import _pc
         t0 = time.time()
+        self.argmax_stage = argmax             # the stages recorded (CutMax included): `token`'s default
         self.rec.values = self.debug           # the debug check compares the recorder's float values
         for t in range(min(self.probe, len(rows))):
             self._record(t, rows, argmax)
@@ -769,11 +770,14 @@ class PlannedRun:
         outs = [(j, r) for _i, j, r in self.reg[key]["kv"]] + list(self.reg[key]["out"])
         return p.run(ins, outs)
 
-    def token(self, t, rows, argmax=False, entry=None, variant=None):
+    def token(self, t, rows, argmax=None, entry=None, variant=None):
         """Issue token t's forward (the blocks and the tail) on the device; returns (the tail output's register,
         record of host times). Asynchronous: decrypting the register waits for it. `entry`: block 0's input (a
-        register, e.g. a fed-back token) instead of row t encrypted, run on block 0's program `variant`."""
+        register, e.g. a fed-back token) instead of row t encrypted, run on block 0's program `variant`. `argmax`
+        (default: as prepared) records CutMax too: token 0 re-records, and its record stages CutMax's plaintexts."""
         tt = time.time()
+        if argmax is None:
+            argmax = getattr(self, "argmax_stage", False)
         if self._next is not None:
             self._next.join()
             self._next = None
