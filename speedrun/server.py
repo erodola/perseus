@@ -3,13 +3,14 @@
     bash speedrun/serve.sh --track {prefill,decode} --inbox IN --outbox OUT [--device N]
 
 The wire is the speedrun's (harness/wire.py, harness/protocol.py): every file is an 8-byte little-endian length and
-the payload, written under a temporary name and renamed. The payloads are speedrun/record0.py's. Setup, untimed: wait
-for the client's key bundle (in/keys/, complete once in/keys.done exists), open the session from it (it holds no
-secret key), load the weights, the plan and the bundle's PCMM keys, and write out/ready with the level the client
-encrypts fresh inputs at. The prefill also runs one warm-up request on a public prompt (seeded token ids). Each request
-k then runs its steps in/k/j -> out/k/j: Decode-8 the 16 positions from an empty cache, each answered with its logit
-tiles and CutMax argmax; Prefill-128 the 128-token prompt through the blocks, answered with the last position's logit
-tiles and argmax. The session ends at in/quit.
+the payload, written under a temporary name and renamed. The payloads are speedrun/record0.py's. Setup, untimed: write
+the key request out/keyspec (it names the track; record0.options fixes the keys), wait for the client's key bundle
+(in/keys/, complete once in/keys.done exists), open the session from it (it holds no secret key), load the weights,
+the plan and the bundle's PCMM keys, and write out/ready with the level the client encrypts fresh inputs at. The
+prefill also runs one warm-up request on a public prompt (seeded token ids). Each request k then runs its steps
+in/k/j -> out/k/j: Decode-8 the 16 positions from an empty cache, each answered with its logit tiles and CutMax
+argmax; Prefill-128 the 128-token prompt through the blocks, answered with the last position's logit tiles and
+argmax. The session ends at in/quit.
 """
 from __future__ import annotations
 
@@ -60,6 +61,7 @@ def main():
     p.add_argument("--device", type=int, default=0)
     a = p.parse_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = str(a.device)
+    write(a.outbox, "keyspec", json.dumps({"record0": a.track}).encode())   # the key set is record0.options'
     wait(a.inbox, "keys.done")
     keys, plan = os.path.join(a.inbox, "keys"), record0.PLANS[a.track]
     opts, runtime = record0.options(a.track, a.device)
