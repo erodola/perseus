@@ -2,7 +2,7 @@
 
     source scripts/local_env.sh
     .venv/bin/python -m perseus.examples.gpt2.run_decode --tokens 16 [--argmax]
-        [--capture graphs/gpt2_decode_python_n32] [--plan bootstrap_placements/gpt2_decode_python_n32]
+        [--capture graphs/gpt2_decode] [--plan bootstrap_placements/gpt2_decode]
         [--layers 12] [--device N]
 
 The GPU must be free of other processes (the run refuses otherwise; --force)."""

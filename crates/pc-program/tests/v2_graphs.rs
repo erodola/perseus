@@ -14,7 +14,7 @@ fn v2_decode_graph_compiles() {
         eprintln!("skip: {V2} absent");
         return;
     }
-    let plan = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bootstrap_placements/gpt2_decode_python_n32");
+    let plan = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../bootstrap_placements/gpt2_decode");
     let dc = compile_dir(&plan, g, &CompileOpts { keep_going: true, ..CompileOpts::default() }).unwrap();
     let mut n = 0;
     for (label, r) in dc.programs {

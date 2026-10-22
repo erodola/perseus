@@ -4,7 +4,7 @@ the decrypted CLS row), gated against the float64 model (top-1 / top-5 agreement
     .venv/bin/python -m perseus.examples.vit.run_prefill --fake --images logs/vit/img [--layers 12]
         [--capture graphs/X --structure-only] [--plan bootstrap_placements/X] [--check]
     GPU_JOB_TIMEOUT=7200 tools/gpu.sh <log> .venv/bin/python -m perseus.examples.vit.run_prefill \
-        --images <dir of .npy / images> --n 4 [--plan bootstrap_placements/vit_b16_224_m18s3] [--check]
+        --images <dir of .npy / images> --n 4 [--plan bootstrap_placements/vit_b16_224] [--check]
 
 The device path runs planned only (examples.vit.planned.VitPlannedPrefill): the op stream recorded once on the CPU
 twin (any image: the stream depends on the token count only), every block a compiled Program run in Rust, the PCMM

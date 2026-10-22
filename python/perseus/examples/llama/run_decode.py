@@ -2,7 +2,7 @@
 prefix, logits decrypted and gated against the exact fp32 model.
 
     .venv/bin/python -m perseus.examples.llama.run_decode --tokens 8 \
-        [--capture graphs/llama31_8b_decode_python_n32] [--plan bootstrap_placements/llama31_8b_decode_python_n32]
+        [--capture graphs/llama31_8b_decode] [--plan bootstrap_placements/llama31_8b_decode]
 
 The GPU must be free of other processes (the run refuses otherwise; --force)."""
 from __future__ import annotations

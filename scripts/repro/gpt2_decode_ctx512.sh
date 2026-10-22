@@ -10,4 +10,4 @@
 source "$(dirname "$0")/common.sh"
 export STEPS_T=512
 bind $PY -m perseus.examples.gpt2.run_decode --tokens 512 --argmax --check \
-    --plan bootstrap_placements/gpt2_decode_python_n32_ctx512 --device "$GPU" "$@"
+    --plan bootstrap_placements/gpt2_decode_ctx512 --device "$GPU" "$@"

@@ -18,7 +18,7 @@ _pc = pytest.importorskip("perseus._pc")
 OLD = "/data02/users/mithrillo/projects/perseus/.cache"
 WEIGHTS = os.environ.get("WEIGHTS_PATH") or f"{OLD}/models/openai-community/gpt2/classic/weights.bin.zip"
 IO_DIR = os.environ.get("ALL_BLOCKS_IO_DIR") or f"{OLD}/oracle/gpt2/all_blocks_io"
-PLAN = "bootstrap_placements/gpt2_decode_python_n32"
+PLAN = "bootstrap_placements/gpt2_decode"
 
 
 @pytest.mark.skipif(not (os.path.exists(WEIGHTS) and os.path.isdir(IO_DIR)), reason="GPT-2 weights / oracle io missing")

@@ -1,6 +1,6 @@
 #!/bin/bash
 # plan.sh — the DaCapo arm: the released DaCapo placer's bootstrap targets on a captured graph (CPU only).
-#   bash scripts/utils/dacapo_upstream/plan.sh graphs/gpt2_decode_python_n32 python/dacapo [dense]
+#   bash scripts/utils/dacapo_upstream/plan.sh graphs/gpt2_decode_baselines python/dacapo [dense]
 # 1. sites.py translates each block to hecate's earth dialect and runs hecate-opt's DaCapo
 #    passes (HECATE_OPT, or .cache/dacapo_upstream/build/bin/hecate-opt from build_hecate.sh);
 #    2. deploy.py replays the targets through the planner (level bookkeeping, chain hand-off,

@@ -55,10 +55,14 @@ def test_config_errors_name_the_knob():
 
 def test_plan_runtime_matches_the_env_dicts():
     from perseus.examples.gpt2 import env
-    for plan in ("bootstrap_placements/gpt2_decode_python_n32", "bootstrap_placements/gpt2_prefill_python_n32_pcmmstcf",
-                 None):
+    for plan in ("bootstrap_placements/python/dacapo", None):          # runtime= line only
         assert config.to_env(config.plan_runtime(plan)) == env.plan_runtime(plan, "n32")
-    assert config.plan_configs("bootstrap_placements/gpt2_decode_python_n32") == \
+    for plan in ("bootstrap_placements/gpt2_decode", "bootstrap_placements/gpt2_prefill128"):
+        # Config-stamped plans: the stamp adds the capture's load-bearing fields, the runtime levers agree
+        got, want = config.to_env(config.plan_runtime(plan)), env.plan_runtime(plan, "n32")
+        for k, v in want.items():
+            assert got.get(k) == v or (got.get(k) is None and v == env.RUNTIME_LEGACY.get(k)), (plan, k)
+    assert config.plan_configs("bootstrap_placements/gpt2_decode") == \
         "configs/model/approximation/gpt2_base_n32/configs.json"
 
 
@@ -252,7 +256,7 @@ def _gate_capture(tmp_path, mode):
            "WEIGHTS_PATH": str(CACHE / "models/openai-community/gpt2/classic/weights.bin.zip"),
            "ALL_BLOCKS_IO_DIR": str(CACHE / "oracle/gpt2/all_blocks_io")}
     preset = "n32_gpt2_decode" if mode == "decode" else "n32_gpt2_prefill"
-    plan = "gpt2_decode_python_n32" if mode == "decode" else "gpt2_prefill_python_n32_pcmmstcf"
+    plan = "gpt2_decode" if mode == "decode" else "gpt2_prefill128"
     env["FAKECAP_LANDINGS"] = config.preset(preset)["quirks.fakecap_landings"]
     sets = [x for kv in config.runtime_env(f"bootstrap_placements/{plan}").items() for x in ("--set", "=".join(kv))]
     out = tmp_path / mode
@@ -260,7 +264,7 @@ def _gate_capture(tmp_path, mode):
         cmd = ["-m", "perseus.examples.gpt2.run_decode", "--fake", "--tokens", "1", "--argmax",
                "--structure-only", "--configs", "configs/model/approximation/gpt2_base_n32/configs.json"]
     else:
-        env["PF_PCMM_CALIB_IN"] = str(OLD / "bootstrap_placements" / plan / "pcmm_calib.json")
+        env["PF_PCMM_CALIB_IN"] = str(ROOT / "bootstrap_placements" / plan / "pcmm_calib.json")
         cmd = ["-m", "perseus.examples.gpt2.run_prefill", "--fake"]
     subprocess.run([sys.executable, *cmd, "--capture", str(out), *sets], env=env, check=True, cwd=ROOT,
                    stdout=subprocess.DEVNULL)
@@ -268,11 +272,10 @@ def _gate_capture(tmp_path, mode):
 
 
 @pytest.mark.skipif(not (GATE and CACHE.exists()), reason="PC_M4B_GATE=1 and the GPT-2 export needed")
-@pytest.mark.parametrize("mode,ref", [("decode", "gpt2_decode_python_n32_gcheb"),
-                                      ("prefill", "gpt2_prefill_python_n32_pcmmstcf")])
+@pytest.mark.parametrize("mode,ref", [("decode", "gpt2_decode"), ("prefill", "gpt2_prefill128")])
 def test_gate_fake_capture_equals_shipped(tmp_path, mode, ref):
     out = _gate_capture(tmp_path, mode)
-    diffs = fakecap.compare_graphs(OLD / "graphs" / ref, out)
+    diffs = fakecap.compare_graphs(ROOT / "graphs" / ref, out)
     print(f"[gate] {mode} vs {ref}: {diffs}")
     assert diffs and set(diffs.values()) == {0}
     if mode == "prefill":      # every PCMM finish names its linear and output (args.external)

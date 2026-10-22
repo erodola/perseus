@@ -1,8 +1,8 @@
 """GPT-2 prefill from primitives: T prompt positions through the blocks, logits gated against the oracle.
 
     .venv/bin/python -m perseus.examples.gpt2.run_prefill --fake --tokens 64 --capture graphs/<name>
-    tools/gpu.sh <log> .venv/bin/python -m perseus.examples.gpt2.run_prefill --tokens 64 \
-        --plan bootstrap_placements/gpt2_prefill_python_n32_pcmmstcf_m8 --check
+    tools/gpu.sh <log> .venv/bin/python -m perseus.examples.gpt2.run_prefill --tokens 128 \
+        --plan bootstrap_placements/gpt2_prefill128 --check
 
 The device path runs planned only (impl.prefill.PlannedPrefill): the forward's op stream recorded once on the CPU
 twin, every block a compiled Program run in Rust, the PCMM linears served by the session's PCMM engine.

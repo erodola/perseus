@@ -1051,7 +1051,7 @@ section! {
         #[doc = "Shipped plans: none."]
         site_bts_out_file: Str = "PLAN_SITE_BTS_OUT_FILE", "(unset)";
         #[doc = "`PLAN_SITE_CF`. Default None. Read at plan/placer/emit.py::assemble -> `refresh.shadow.plan`."]
-        #[doc = "Shipped plans: recipe= llama31_8b_decode_python_n32_dsw48_ho38_m18e."]
+        #[doc = "Shipped plans: recipe= llama31_8b_handoff_decode."]
         site_cf: Str = "PLAN_SITE_CF", "None";
         #[doc = "`PLAN_SLIM_CUBIC`. Default (unset). Read at plan/run_bootstrap_all_blocks.sh::(shell)."]
         #[doc = "Shipped plans: recipe= 5."]
@@ -1081,7 +1081,7 @@ section! {
         #[doc = "Shipped plans: recipe= 1."]
         stc_first_mag_max: Str = "PLAN_STC_FIRST_MAG_MAX", "None";
         #[doc = "`PLAN_STC_FIRST_REROUTE`. Default None. Read at plan/placer/planner.py::recipe_plan_config -> `sim.PlannerShadow.plan`."]
-        #[doc = "Shipped plans: recipe= vit_b16_224_m18s3."]
+        #[doc = "Shipped plans: recipe= vit_b16_224."]
         stc_first_reroute: Flag = "PLAN_STC_FIRST_REROUTE", "None";
         #[doc = "`PLAN_STC_FIRST_STEPS`. Default None. Read at plan/placer/planner.py::recipe_plan_config -> `sim.PlannerShadow.plan`."]
         #[doc = "Shipped plans: none."]

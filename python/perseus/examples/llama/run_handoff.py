@@ -1,9 +1,9 @@
 """Encrypted prefill of T prompt tokens, its K / V handed to the decode's caches (perseus.impl.handoff), then N
 decoded positions, logits gated against the fp32 model.
 
-    .venv/bin/python -m perseus.examples.llama.run_handoff --tokens 120 --decode 8 \
-        --prefill-plan bootstrap_placements/llama31_8b_prefill_python_n32_blocked_gqa \
-        --decode-plan bootstrap_placements/llama31_8b_decode_python_n32
+    .venv/bin/python -m perseus.examples.llama.run_handoff --tokens 127 --decode 8 \
+        --prefill-plan bootstrap_placements/llama31_8b_prefill128 \
+        --decode-plan bootstrap_placements/llama31_8b_handoff_decode
 """
 from __future__ import annotations
 
@@ -189,7 +189,7 @@ def _planned(a, toks, gt, store, dims, over, cfgs_path, dcfgs_path, log=print):
     run.routes_for = routes_for
     run.dense_fallback = False
     # the handed K / V states sit deeper than the decode's own cache writes (34): the decode plan must be cut for the
-    # hand-off's level (make_plan.sh KV_ENTRY_LEVEL + PLAN_KEEP_PLACEMENTS: dsw48_ho36 for pr9, _ho38 for
+    # hand-off's level (make_plan.sh KV_ENTRY_LEVEL + PLAN_KEEP_PLACEMENTS: llama31_8b_handoff_decode for
     # llama31_8b_prefill128); the class compile checks every pin strictly
     run.extra_pt_slots = 1024
     run.pool = 256                      # the hand-off's eager ciphertexts (one layer's at a time)

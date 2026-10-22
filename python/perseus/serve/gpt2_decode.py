@@ -2,7 +2,7 @@
 
     # server (GPU, under tools/gpu.sh): the plan's programs compiled from a CPU twin fed with zero rows (the
     # per-position op stream does not depend on the token's values), the session on the client's key bundle
-    python -m perseus.serve.gpt2_decode server --addr /tmp/x.sock [--plan bootstrap_placements/gpt2_decode_python_n32_m16i]
+    python -m perseus.serve.gpt2_decode server --addr /tmp/x.sock [--plan bootstrap_placements/gpt2_decode]
     # client (no device): keygen of the server's request, per token encrypt -> run -> decrypt, gate vs the oracle
     python -m perseus.serve.gpt2_decode client --addr /tmp/x.sock --plan ... --tokens 16 --argmax --out res.json
 

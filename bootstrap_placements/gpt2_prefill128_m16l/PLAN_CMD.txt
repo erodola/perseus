@@ -1,6 +1,0 @@
-graph=graphs/gpt2_prefill_python_n32_blocked_m8 (fake v2 capture, M8: T=128 under gpt2_prefill_python_n32_blocked's runtime + its pcmm_calib.json)
-tool=python/perseus/examples/gpt2/make_plan.sh (blocks)
-recipe=PLAN_PRUNE=1
-runtime=FIDESLIB_BTS_SHIFT=1 FIDESLIB_SPRU=64 FIDESLIB_BTS_RAISE_DROPS=1,3,5 SM_DEN_RECIP=1 FIDESLIB_BTS_REAL=1 GELU_FOLD=1 LN_CHEB=1 SM_GS_FIRST=1 SM_PERIODIC=1 SM_FOLD=1 FIDESLIB_BTS_SPARSE_B=1 FIDESLIB_ROT_KEY_BAND=32 KV_LANES=1 CHEB_BSGS=1 QKV_LANES=1 BTS_MAX_INPUT_LEVEL=50 SM_HRS_PACK=1 CUTMAX_PAIR=1 IMPL_DEAD_OPS=1 LADDER_RADIX_BITS=3 PF_LINEAR=pcmm PF_ACT_FOLD=1 PF_GELU_JOINT=1 PF_JOINT_FORCE=1 PF_LAYOUT=blocked
-replanned=M8 on the new Shadow
-m16=replanned from gpt2_prefill128's recipe + PLAN_ACC_TABLE=/data02/users/mithrillo/projects/perseus-core-wt/m16/python/perseus_core/plan/data/route_table_n32.json BTS_LEVEL=34 PLAN_SPARSE_BTS_OUT=1:16,512:24 (exp1 route table + measured landings)

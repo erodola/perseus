@@ -4,7 +4,7 @@ attention, blocked layout, PCMM linears) -> client pooler + classifier, gated ag
     .venv/bin/python -m perseus.examples.bert.run_bert --fake [--text 128 | --sst2 0,1,2] [--layers 12]
         [--capture graphs/X --structure-only] [--plan bootstrap_placements/X] [--check]
     tools/gpu.sh <log> .venv/bin/python -m perseus.examples.bert.run_bert --text 128 \
-        [--plan bootstrap_placements/bert_base_sst2_128_m16s0] [--check]   # default plan: examples.defaults
+        [--plan bootstrap_placements/bert_sst2_128] [--check]   # default plan: examples.defaults
 
 The device path runs planned only (examples.bert.planned.BertPlannedPrefill): the forward's op stream recorded once
 on the CPU twin, every block a compiled Program run in Rust, the PCMM linears and the CCMM attention `Finish` ops

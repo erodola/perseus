@@ -1,8 +1,8 @@
 #!/bin/bash
 # make_plan.sh — plan the bootstraps of a Llama capture (CPU only), with the recipe and runtime levers of the shipped
-# GPT-2 arm (bootstrap_placements/gpt2_decode_python_n32: SparseB on the sparse route (256 slots: Llama's tH), SPRU on the 1-slot route,
+# GPT-2 arm (bootstrap_placements/gpt2_decode: SparseB on the sparse route (256 slots: Llama's tH), SPRU on the 1-slot route,
 # the exact post-raise scaling, the real dense route, raise drops 1,3,5):
-#   bash python/perseus/examples/llama/make_plan.sh graphs/llama31_8b_decode_python_n32 llama31_8b_decode_python_n32
+#   bash python/perseus/examples/llama/make_plan.sh graphs/llama31_8b_decode llama31_8b_decode
 # RUNTIME_EXTRA="KEY=VALUE ..." appends switches the capture ran with to the plan's runtime= line (the run
 # applies them), e.g. LLAMA_LINEAR_BOTTOM=1.
 # The blocks are 0..n_layers-1 plus the tail (final RMSNorm + LM head); the planner's driver is the GPT-2 port's
@@ -15,7 +15,7 @@
 #     python -m perseus.examples.llama.run_decode --tokens 1 --kv-offload --set KV_ARENA_GB=56 \
 #         --set FIDESLIB_BTS_RAISE_DROPS=1,3,5 --set SM_CHEB_GS=0 --capture $GR --structure-only --configs $CFG
 #     python -m perseus.examples.llama.capture_mags $GR --configs $CFG
-#     bash python/perseus/examples/llama/make_plan.sh $GR llama31_8b_decode_python_n32_ctx512
+#     bash python/perseus/examples/llama/make_plan.sh $GR llama31_8b_decode_ctx512
 set -euo pipefail
 PKG="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; REPO="$(dirname "$(dirname "$PKG")")"
 GRAPH_DIR="${1:?graph dir (block_<b>/graph.json)}"

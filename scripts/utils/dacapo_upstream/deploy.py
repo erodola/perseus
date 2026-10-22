@@ -29,7 +29,7 @@ import perseus.plan.placer.baselines.dacapo as db                       # noqa: 
 
 ML = int(os.environ.get("ML", "48"))
 DENSE = os.environ.get("PLAN_DENSE", "0") == "1"
-GRAPHS = Path(os.environ.get("GRAPH_DIR", "graphs/gpt2_decode_python_n32"))
+GRAPHS = Path(os.environ.get("GRAPH_DIR", "graphs/gpt2_decode_baselines"))
 OUT = Path("bootstrap_placements") / os.environ["OUT"]
 SITES = json.load(open(os.environ["SITES"]))
 OUT.mkdir(parents=True, exist_ok=True)

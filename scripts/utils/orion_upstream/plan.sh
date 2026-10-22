@@ -1,6 +1,6 @@
 #!/bin/bash
 # plan.sh — the Orion arm: the released Orion bootstrap solver's sites on a captured graph (CPU only).
-#   bash scripts/utils/orion_upstream/plan.sh graphs/gpt2_decode_python_n32 python/orion [dense]
+#   bash scripts/utils/orion_upstream/plan.sh graphs/gpt2_decode_baselines python/orion [dense]
 # 1. marks.py runs baahl-nyu/orion's BootstrapSolver (commit be8a827 + orion_be8a827.patch,
 #    cloned into .cache/orion_upstream unless ORION_SRC points at such a clone) on each block's
 #    step graph; 2. deploy.py replays the marked steps through the planner (level bookkeeping,

@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 
 const GRAPH_ROOT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../graphs");
 const GRAPHS: [&str; 3] =
-    ["gpt2_decode_python_n32_gcheb", "gpt2_prefill_python_n32_pcmmstcf", "llama31_8b_prefill_python_n32_pcmmstcf"];
+    ["gpt2_decode", "gpt2_prefill128", "llama31_8b_prefill128"];
 
 fn s(v: &Value) -> String {
     v.as_str().map(str::to_string).unwrap_or_default()

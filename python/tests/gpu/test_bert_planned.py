@@ -2,7 +2,7 @@
 (`examples.bert.planned.BertPlannedPrefill`), the PCMM linears and the CCMM attention `Finish` ops served by the
 session's matmul services; the 128-token text vs the float64 model.
 
-Gates (the full gate is the paired `run_bert --text 128 --plan bootstrap_placements/bert_base_sst2_128`):
+Gates (the full gate is the paired `run_bert --text 128 --plan bootstrap_placements/bert_sst2_128`):
 label agrees with float64, KL <= 1.2e-9 (2-class softmax), device free memory flat.
 """
 from __future__ import annotations
@@ -15,7 +15,7 @@ pytestmark = pytest.mark.gpu
 
 _pc = pytest.importorskip("perseus._pc")
 
-PLAN = "bootstrap_placements/bert_base_sst2_128"
+PLAN = "bootstrap_placements/bert_sst2_128"
 
 
 @pytest.mark.skipif(not os.environ.get("HF_HOME"), reason="HF_HOME with the BERT export / tokenizer needed")

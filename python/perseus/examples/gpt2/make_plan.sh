@@ -1,8 +1,8 @@
 #!/bin/bash
 # make_plan.sh — plan the bootstraps of a graph captured by the primitives port (CPU only).
-#   bash python/perseus/examples/gpt2/make_plan.sh graphs/gpt2_decode_python_n32 gpt2_decode_python_n32
-#   bash python/perseus/examples/gpt2/make_plan.sh graphs/gpt2_decode_python_n32 gpt2_decode_python_n32 argmax
-#   bash python/perseus/examples/gpt2/make_plan.sh graphs/gpt2_decode_python_n32 gpt2_decode_python_n32 feedback
+#   bash python/perseus/examples/gpt2/make_plan.sh graphs/gpt2_decode gpt2_decode
+#   bash python/perseus/examples/gpt2/make_plan.sh graphs/gpt2_decode gpt2_decode argmax
+#   bash python/perseus/examples/gpt2/make_plan.sh graphs/gpt2_decode gpt2_decode feedback
 # Recipe: the n32 recipe of scripts/make_plans.sh (a planted refresh lands at 36 on the
 # composite chain, the block input / a KV-cache read arrive at 34 + a pending rescale = 36,
 # MAX_LEVEL=50, kappa=2, CF window up to 20, the measured n32 accuracy table, sparse routes
@@ -22,7 +22,7 @@
 # recipe, same capture; the exit must equal block 0's, or block 1's plan would not bind.
 # Written as block_0_feedback_placement.json next to the plan.
 #
-# The 512-context plan (bootstrap_placements/gpt2_decode_python_n32_ctx512) binds at every cache length: the capture
+# The 512-context plan (bootstrap_placements/gpt2_decode_ctx512) binds at every cache length: the capture
 # runs with step-scoped names and the general softmax period (IMPL_SCOPED_NAMES=1 SM_PERIODIC=2), the softmax
 # refreshes land at 32, where the multi-stage routes past 1024 slots arrive (PLAN_STEP_LANDING; the runtime caps
 # SparseB at 1024 slots, whose diagonals grow as n^2 / N), no refresh sits in a group ladder (.gp), and the
@@ -32,8 +32,8 @@
 #     python -m perseus.examples.gpt2.capture_mags $GR --argmax --configs $CFG --set IMPL_SCOPED_NAMES=1 ...
 #     FHE_GRAPH_CAPTURE_TOKEN=511 python -m perseus.examples.gpt2.run_decode --fake --tokens 512 \
 #         --capture $GR511 --configs $CFG --set IMPL_SCOPED_NAMES=1 ...   (STEPS_T=512 reference)
-#     python scripts/utils/merge_mags.py $GR graphs/gpt2_decode_python_n32_ctx512 $GR511
-#     bash scripts/make_plans.sh gpt2_decode_python_n32_ctx512
+#     python scripts/utils/merge_mags.py $GR graphs/gpt2_decode_ctx512 $GR511
+#     bash scripts/make_plans.sh gpt2_decode_ctx512
 set -euo pipefail
 # Runs from the repository root (graphs/, bootstrap_placements/); a GRAPH_DIR that exists from the caller's
 # directory is taken as given.
