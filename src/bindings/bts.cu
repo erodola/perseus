@@ -148,6 +148,9 @@ void bind_bts(py::module_& root) {
         for (int i = 0; i < n; ++i) mod[i] = ps.at(i)->GetModulus().ConvertToInt<uint64_t>();
         return mod;
     };
+    m.def("chain_moduli", moduli_of, py::arg("fhe"), py::arg("n"),
+          "The chain's n lowest moduli q_0..q_{n-1}, from the parameters (no GPU): what export_limbs reports for an "
+          "n-limb ciphertext, for client-side PCMM keygen.");
     m.def("export_limbs", [moduli_of](CKKSContext& fhe, DeviceCt& d) {
         auto& x = d.get();
         cudaDeviceSynchronize();

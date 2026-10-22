@@ -161,15 +161,16 @@ def export_env(device=3, chain=None, **overrides):
 
 
 def open_session(device=3, complex_payload=True, chain=None, extra_rot_steps=(), base=True, bundle=None,
-                 **overrides):
+                 options=None, **overrides):
     """perseus.session on the gpt2_decode_n32 preset with the overrides above.
     `complex_payload`: CKKS_COMPLEX=1, the C++ decode configuration (K/V pair bootstrap, packed
     CutMax, complex feedback tile; weights and linears stay real); False: real slots only.
     `bundle`: load every key from that directory (EncClient.save_bundle) instead of generating them;
-    the session then holds no secret key and cannot decrypt."""
+    the session then holds no secret key and cannot decrypt. `options`: session_options' result to
+    open the bundle with, instead of building it from the arguments."""
     from perseus import session
     if bundle is not None:
-        opts = session_options(device, complex_payload, chain, extra_rot_steps, base, **overrides)
+        opts = options or session_options(device, complex_payload, chain, extra_rot_steps, base, **overrides)
         ck = opts.ckks
         ck.keys_dir = str(bundle)
         opts.ckks = ck

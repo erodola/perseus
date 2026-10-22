@@ -20,6 +20,7 @@ from perseus.impl import blocked as BL
 from perseus.impl.prefill import evict_block_masks
 from perseus.impl.pcmm import PcmmLinear, band_shift, run as pcmm_run
 
+from .head import final_ln, lm_head
 from .model import Gpt2Model, dist_report
 from . import weights as W
 
@@ -313,22 +314,42 @@ class Gpt2Prefill(Gpt2Model):
         for b in range(self.n_layers):
             self.diag_weights(b) if diag else self.prefill_weights(b)
 
+    def chunks(self, T):
+        return Chunks(T, self.blocks.t if _layout_blocked() else self.rt.dims.t)
+
+    def encode(self, rows):
+        """The prompt's input ciphertexts and chunks, made here for a local run (the client's work: no clock)."""
+        ch = self.chunks(len(rows))
+        if _layout_blocked():
+            return [x for row in BL.encode_blocked(self.rt, rows, ch, self.blocks) for x in row], ch
+        return encode_prompt(self.rt, rows, ch), ch
+
     def prefill(self, rows, on_block=None):
         """Embedding rows (T, 768) -> the dense residual stream after the last block."""
-        blk = _layout_blocked()
-        ch = Chunks(len(rows), self.blocks.t if blk else self.rt.dims.t)
+        return self.prefill_cts(*self.encode(rows), on_block=on_block)
+
+    def prefill_cts(self, Xs, ch, on_block=None):
+        """The prompt's input ciphertexts (encode's, or a client's) -> the dense residual stream after the last block."""
         self.start()
         self.token_begin(0)
-        if blk:
-            Xs = [x for row in BL.encode_blocked(self.rt, rows, ch, self.blocks) for x in row]
-        else:
-            Xs = encode_prompt(self.rt, rows, ch)
         stages = self.prefill_stages(ch)
         if on_block is not None:
             stages = [(lab, pre, _tapped(fn, b, on_block)) for b, (lab, pre, fn) in enumerate(stages)]
         Xs = self.run_stages(Xs, 0, stages)
         rec = self.token_end(0)
         return Xs, ch, rec
+
+    def tail(self, Xs, ch, p=None):
+        """The logit tiles of prompt position p (default: the last): its row moved into the decode layout, then ln_f
+        and the LM head as the decode's tail runs them."""
+        if not _layout_blocked():
+            raise NotImplementedError("tail: the blocked layout only (PF_LAYOUT=blocked)")
+        p = ch.T - 1 if p is None else p
+        B = self.blocks
+        x = BL.token_of(self.rt, [Xs[g * B.K:(g + 1) * B.K] for g in range(len(Xs) // B.K)], ch, B, p)
+        with self.rt.step("tail"):
+            h = final_ln(self.rt, x, self.cfgs.ln_f, self.lnf_params(), p, self.lmhead_cap)
+            return lm_head(self.rt, h, self.lm_tiles())
 
     @property
     def blocks(self):

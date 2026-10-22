@@ -8,7 +8,10 @@
 #include "weight_loader.h"
 
 #include "ciphertext-ser.h"
+#include "packing/pack_tag.h"
+#include "slot_layout.h"
 
+#include <pybind11/complex.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
@@ -53,6 +56,28 @@ PackedCtx deserialize_ct(Inference& inf, const py::bytes& data) {
     nc->loaded = false;
     nc->gpu = 0;
     return inf.pack(nc);
+}
+
+// A client's ciphertext as a fresh input of this session, with the tags this session's own encoder stamps: a token
+// row is real and in the token feature order (encode_token_input); a prefill block is a general complex payload.
+PackedCtx adopt_input(Inference& inf, const py::bytes& data, bool token) {
+    PackedCtx pc = deserialize_ct(inf, data);
+    pc.tag = packtag::PackTag::real();
+    if (!token) pc.tag.field = packtag::Field::Complex;
+    inf.fhe->tag_ct(pc.ct, pc.tag);
+    if (token) slotlayout::set(pc.ct, slotlayout::Kind::Token);
+    return pc;
+}
+
+// Client: a vector of complex slot values as one serialized ciphertext at `level` (MakeCKKSPackedPlaintext's level,
+// as pack_tokens takes it).
+py::bytes encrypt_slots(Inference& inf, const std::vector<std::complex<double>>& v, int level) {
+    Ctx ct;
+    {
+        py::gil_scoped_release nogil;
+        ct = encrypt(inf.cc(), inf.cc()->MakeCKKSPackedPlaintext(v, 1, static_cast<uint32_t>(level)), inf.fhe->pk());
+    }
+    return serialize_ct(inf, inf.pack(ct));
 }
 
 void save_keys(Inference& inf, const std::string& dir) {
@@ -141,6 +166,11 @@ void bind_serial(py::module_& m) {
           "host first. The packing rides out-of-band: deserialize_ct stamps the session's.");
     m.def("deserialize_ct", &deserialize_ct, py::arg("inf"), py::arg("data"),
           "bytes -> PackedCtx in this session's context; host-resident until first use.");
+    m.def("adopt_input", &adopt_input, py::arg("inf"), py::arg("data"), py::arg("token"),
+          "Server: a client's ciphertext as a fresh input (deserialize_ct plus the tags of this session's encoder: "
+          "token=True a real token row, False a complex prefill block).");
+    m.def("encrypt_slots", &encrypt_slots, py::arg("inf"), py::arg("values"), py::arg("level"),
+          "Client: complex slot values -> one serialized ciphertext at `level` (pack_tokens' level).");
     m.def("save_keys", &save_keys, py::arg("inf"), py::arg("dir"), kRelease,
           "Write the SERVER bundle (context/public/eval keys — no secret material).");
     m.def("save_secret_key", &save_secret_key, py::arg("inf"), py::arg("path"), kRelease,

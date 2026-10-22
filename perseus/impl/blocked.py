@@ -117,9 +117,10 @@ def sub_rt(rt, B: Blocks, k: int):
 
 # ── prompt in / out ─────────────────────────────────────────────────────────────────────────────────────────────────
 
-def encode_blocked(rt, rows, ch: Chunks, B: Blocks):
-    """Xs[g][k]: chunk pair g (2g real, 2g + 1 imaginary), channel block k (feature k nch + r at slot r t + lane)."""
-    ops, N, t = rt.ops, B.d.N, B.t
+def blocked_slots(rows, ch: Chunks, B: Blocks):
+    """The slot values of Xs[g][k]: chunk pair g (2g real, 2g + 1 imaginary), channel block k (feature k nch + r at
+    slot r t + lane). What a client encrypts."""
+    N, t = B.d.N, B.t
     rows = np.asarray(rows, dtype=np.float64)
     full = np.zeros((rows.shape[0], B.d.hid))
     full[:, :rows.shape[1]] = rows
@@ -133,10 +134,16 @@ def encode_blocked(rt, rows, ch: Chunks, B: Blocks):
                 if ch.has(2 * g + half):
                     for lane, p in enumerate(ch.idx(2 * g + half)):
                         v[idx + lane] += (1j if half else 1.0) * full[p, k * B.nch:(k + 1) * B.nch]
-            zero = ops.core.encode_token_input(ops.inf, np.zeros(B.d.dim))
-            blk.append(ops.add_pt(zero, v))
+            blk.append(v)
         out.append(blk)
     return out
+
+
+def encode_blocked(rt, rows, ch: Chunks, B: Blocks):
+    """Xs[g][k] holding blocked_slots: an encrypted zero plus the values (a local run's stand-in for the client)."""
+    ops = rt.ops
+    return [[ops.add_pt(ops.core.encode_token_input(ops.inf, np.zeros(B.d.dim)), v) for v in blk]
+            for blk in blocked_slots(rows, ch, B)]
 
 
 def decrypt_blocked(rt, Xs, ch: Chunks, B: Blocks, d_real: int):
@@ -150,6 +157,50 @@ def decrypt_blocked(rt, Xs, ch: Chunks, B: Blocks, d_real: int):
                 for lane, p in enumerate(ch.idx(2 * g + half)):
                     rows[p, k * B.nch:(k + 1) * B.nch] = part[idx + lane]
     return rows[:, :d_real]
+
+
+def token_of(rt, Xs, ch: Chunks, B: Blocks, p: int):
+    """Position p of Xs[g][k] as one decode-layout token row (feature i at slot i d.t, real): its lane and axis are
+    masked out and aligned, then each block's stride shrinks from B.t to d.t by one masked rotation per bit of the
+    feature index (bit j moves its features (B.t - d.t) 2^j slots down), and block k is moved to feature k nch."""
+    ops, d = rt.ops, B.d
+    c = p // ch.t
+    g, half, lane = c // 2, c % 2, p - c * ch.t
+    out = None
+    for k in range(B.K):
+        n = B.real(k)
+        if n == 0:
+            continue
+        r = np.arange(n)
+        pos = r * B.t
+
+        def at(slots):
+            v = np.zeros(d.N)
+            v[slots] = 1.0
+            return v
+        # w + conj(w) is the axis of chunk c: Re(x) for w = x/2, Im(x) for w = -i x/2
+        w = rt.mult_mask(Xs[g][k], ("tok_of", B.nch, k, "sel", lane, half),
+                         lambda: (-0.5 if half else 0.5) * at(pos + lane))
+        w = ops.rotate(ops.mult_i(w) if half else w, lane)
+        for j in range(max(1, int(n - 1).bit_length())):
+            moved = (r >> j) & 1 == 1
+            step = (B.t - d.t) << j
+            keep = rt.mult_mask(w, ("tok_of", B.nch, k, "bit", j, 0), lambda: at(pos[~moved]))
+            move = rt.mult_mask(w, ("tok_of", B.nch, k, "bit", j, 1), lambda: at(pos[moved]))
+            w = ops.add(keep, ops.rotate(move, step))
+            pos = np.where(moved, pos - step, pos)
+        if k:
+            w = ops.rotate(w, (-k * B.nch * d.t) % d.N)
+        out = w if out is None else ops.add(out, w)
+    return ops.add(out, ops.conjugate(out))
+
+
+def token_of_rot_steps(B: Blocks, lane: int) -> set[int]:
+    """The rotation steps token_of takes for a position on `lane`."""
+    d = B.d
+    steps = {lane} | {-k * B.nch * d.t for k in range(1, B.K)}
+    steps |= {(B.t - d.t) << j for j in range(max(1, int(B.nch - 1).bit_length()))}
+    return {s % d.N for s in steps if s % d.N}
 
 
 def name_blocked(inf, Xs):

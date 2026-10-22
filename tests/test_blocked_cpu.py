@@ -131,3 +131,18 @@ def test_attention_blocked_gqa_matches_expanded(T):
     enc = lambda M: prefill.encode_prompt(rt, 0.5 * M, ch)
     ref = prefill.decrypt_prompt(rt, prefill.prefill_attention(rt, enc(q), enc(k), enc(v), sm, ch), ch, d.hid)
     np.testing.assert_allclose(got, ref, atol=1e-10)
+
+
+@pytest.mark.parametrize("p", [0, 63, 64, 127, 190])
+def test_token_of_is_the_decode_row(p):
+    rt, _, _ = _rt(**DIMS)
+    d = rt.dims
+    B = blocked.Blocks(d, nch=64)
+    ch = prefill.Chunks(200, B.t)
+    rows = np.random.default_rng(p).standard_normal((200, d.dim))
+    y = rt.ops.decrypt_slots_complex(blocked.token_of(rt, blocked.encode_blocked(rt, rows, ch, B), ch, B, p))
+    want = np.zeros(d.N)
+    want[np.arange(d.dim) * d.t] = rows[p]
+    np.testing.assert_allclose(y.real, want, atol=1e-9)
+    np.testing.assert_allclose(y.imag, 0, atol=1e-9)
+    assert blocked.token_of_rot_steps(B, p % B.t) <= set(range(1, d.N))

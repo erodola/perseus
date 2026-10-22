@@ -197,8 +197,9 @@ def main(argv=None):
         # the warm-up registered every block's plaintext names, so run_stages would now take the residency ring (the
         # decode path, which gives wrong prefill results: top1 0/128): the timed pass keeps the cold run's plain loop
         model.overlap = False
+    Xin, ch = model.encode(rows)             # the client's encryption: outside the clock
     t0 = time.time()
-    Xs, ch, rec = model.prefill(rows, on_block=on_block)
+    Xs, ch, rec = model.prefill_cts(Xin, ch, on_block=on_block)
     wall = time.time() - t0
     h = model.hidden(Xs, ch)
     out = {"wall": wall, "bts": int(inf.fhe.total_bootstraps) - bts0}
