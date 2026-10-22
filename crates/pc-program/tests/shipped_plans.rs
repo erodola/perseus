@@ -4,8 +4,7 @@
 //!     consumed placements, - realize rescales);
 //!   * batch_report of GPT-2 decode block 0; serde round-trip of every program.
 //! Graph dirs: the plan's PLAN_CMD.txt `graph=`, under the repository root. A plan or graph that is not on disk
-//! (the Llama captures ship as release artifacts) is skipped with a SKIP line. `llama31_8b_prefill128` is not here:
-//! the lever patches of its `lineage=` line bind at run time, not against the pr2 recording.
+//! (the Llama captures ship as release artifacts) is skipped with a SKIP line.
 use pc_program::compile::{compile_dir, CompileOpts};
 use pc_program::Program;
 use std::path::{Path, PathBuf};
@@ -152,6 +151,11 @@ fn vit() {
 #[test]
 fn llama_decode() {
     gate("llama31_8b_decode", "llama31_8b_decode");
+}
+
+#[test]
+fn llama_prefill() {
+    gate("llama31_8b_prefill128", "llama31_8b_prefill128");
 }
 
 #[test]

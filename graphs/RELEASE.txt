@@ -2,5 +2,5 @@
 # repository: unpack it at the repository root (tar --zstd -xf perseus-graphs.tar.zst). Only replanning reads them;
 # the plans they made are in bootstrap_placements/ (same names).
 llama31_8b_decode          154 MB  the Llama decode plan's recording
-llama31_8b_prefill128      142 MB  the 128-token Llama prefill plan's recording
+llama31_8b_prefill128      187 MB  the 128-token Llama prefill plan's recording (fake capture under its runtime= line)
 llama31_8b_handoff_decode  174 MB  the hand-off decode plan's recording (decode cut for the prefill's K / V)

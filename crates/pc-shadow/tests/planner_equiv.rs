@@ -213,7 +213,7 @@ fn run_dump_with(file: &str, quirks: &Quirks, verbose: bool) -> Option<(usize, u
 /// Plan-free runs of the dumped sim.py land a fired hint without a landing spec at (bootstrap level, deg 2); the
 /// rules realize it (deg 1, one level deeper). Nodes downstream of such a hint differ, per dump (planned runs pin
 /// every hint's landing: 0 there).
-const BARE_HINT_LANDINGS: (usize, usize, usize) = (480, 12, 4);
+const BARE_HINT_LANDINGS: (usize, usize, usize, usize) = (480, 12, 4, 4);
 
 #[test]
 fn gpt2_decode() {
@@ -239,12 +239,20 @@ fn llama_decode() {
     }
 }
 
+#[test]
+fn llama_prefill() {
+    if let Some((n, d1, d2, _, _)) = run_dump("sim_llama_prefill.json") {
+        assert!(n > 0);
+        assert_eq!((d1, d2), (0, BARE_HINT_LANDINGS.3));
+    }
+}
+
 /// Which planner quirks the shipped plans depend on: drop one at a time and count the node differences (planned
 /// run / plan-free run). Informational (the table goes to docs/QUIRKS.md); it asserts only that the
 /// full planner set is what reproduces sim.py.
 #[test]
 fn quirk_dependence() {
-    let files = ["sim_gpt2_decode.json", "sim_gpt2_prefill.json", "sim_llama_decode.json"];
+    let files = ["sim_gpt2_decode.json", "sim_gpt2_prefill.json", "sim_llama_decode.json", "sim_llama_prefill.json"];
     for q in Quirks::planner().0.iter() {
         let mut qs = Quirks::planner();
         qs.0.remove(q);

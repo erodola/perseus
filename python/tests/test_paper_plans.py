@@ -65,9 +65,8 @@ GATE: dict[str, tuple | None] = {
     "vit_b16_224": ("graphs/vit_b16_224", "PLAN_DELIB_DEG=captured " + _STCF_REROUTE, GPT2_TOOL, ("blocks",)),
     # shipped before make_plan.sh defaulted shared realize anchors
     "llama31_8b_decode": (None, "PLAN_SHARED_REALIZE=", None, None),
-    # the paged prefill pipe exported these on top of the recipe= line it recorded; the shipped files also carry the
-    # lever patches of its lineage= line, so this replan differs from them
-    "llama31_8b_prefill128": (None, "PLAN_DELIB_DEG=captured PLAN_DRIFT_RECUT=1", None, None),
+    # one planner run on the fake recording: the llama make_plan.sh prefill stage (its recipe= line)
+    "llama31_8b_prefill128": (None, "", None, ("prefill",)),
     # the decode cut for the prefill's K / V (KV_ENTRY_LEVEL, PLAN_KEEP_PLACEMENTS, PLAN_SITE_CF in its recipe= line)
     "llama31_8b_handoff_decode": None,
 }

@@ -24,7 +24,7 @@ Each runs with `--plan` alone, and each is its model's default plan
 | `bert_sst2_128` | BERT-base, SST-2 classification of a 128-token input |
 | `vit_b16_224` | ViT-B/16, one 224 x 224 image |
 | `llama31_8b_decode` | Llama-3.1-8B, decode |
-| `llama31_8b_prefill128` | Llama-3.1-8B, 128-token prefill (the recording plus the lever patches listed in its `lineage=` line) |
+| `llama31_8b_prefill128` | Llama-3.1-8B, 128-token prefill: one planner run (python/perseus/examples/llama/make_plan.sh, `prefill` stage) on the fake recording made under its runtime= line |
 | `llama31_8b_handoff_decode` | Llama-3.1-8B, decode on the K / V handed over by `llama31_8b_prefill128` (`run_handoff`): cut for the hand-off's cache level (`KV_ENTRY_LEVEL=38`), on the refresh sites of the same recipe's plain decode plan (`PLAN_KEEP_PLACEMENTS`, see its `sites=` line), every softmax refresh one scaling step lower (`PLAN_SITE_CF=softmax:-1`) |
 
 ## Placement study (`python/`)
