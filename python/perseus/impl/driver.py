@@ -777,6 +777,11 @@ class PlannedRun:
         if self._next is not None:
             self._next.join()
             self._next = None
+        if t == 0:
+            # a new sequence: the twin replays it from its start, the reference token included (a stream cached from
+            # an earlier sequence would skip that position's K/V push, and every later position would be recorded
+            # against a cache one entry short); `self.ref` keeps the compiled reference
+            self.records.clear()
         recs = self._record(t, rows, argmax)
         t_rec = time.time() - tt
         # the next token's stream is recorded on the CPU while this one is patched, issued and run (started before

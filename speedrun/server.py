@@ -60,6 +60,7 @@ def main():
     p.add_argument("--inbox", required=True)
     p.add_argument("--outbox", required=True)
     p.add_argument("--device", type=int, default=0)
+    p.add_argument("--plan", help="Decode-8's plan (default: perseus.examples.defaults')")
     a = p.parse_args()
     return decode(a) if a.track == "decode" else prefill(a)
 
@@ -68,7 +69,7 @@ def decode(a):
     from perseus.examples.defaults import default_plan
     from perseus.client import contract_hash
     from perseus.serve import gpt2_decode as served
-    args = types.SimpleNamespace(plan=default_plan("gpt2_decode"), chain="n32", layers=None, packing="cachemir_complex",
+    args = types.SimpleNamespace(plan=a.plan or default_plan("gpt2_decode"), chain="n32", layers=None, packing="cachemir_complex",
                                  weights=os.environ["WEIGHTS_PATH"], key_layout="packed", pt_rows=28, stc_cache=8,
                                  work_dir=os.path.join(os.environ.get("HOME", "/tmp"), "speedrun"))
     h = served.Gpt2Handler(args)
