@@ -35,6 +35,15 @@ from perseus.plan import contract
 contract.stamp_file(sys.argv[2], json.load(open(os.path.join(sys.argv[1], "capture_env.json"))))
 PY
 bash python/perseus/examples/gpt2/make_plan.sh "$GR" "$OUT" argmax
+"$PYTHON" - "$GR" "bootstrap_placements/$OUT/plan_rot_steps.json" <<'PY'
+import json, sys
+g, f = sys.argv[1:]          # the session loads the plan's rotation keys: add the tail stages' to the blocks'
+steps = set(json.load(open(f)))
+for b in (12, 13):
+    for n in json.load(open(f"{g}/block_{b}/graph.json"))["nodes"]:
+        steps |= {int(v) for x in n["inputs"] if x.startswith("rot(") for v in x[4:-1].split(",")}
+json.dump(sorted(steps), open(f, "w"))
+PY
 printf 'tail=stages 12 (token_of + ln_f + LM head) and 13 (CutMax) from %s, planned by speedrun/make_tail_plan.sh\n' \
     "$GR" >> "bootstrap_placements/$OUT/PLAN_CMD.txt"
 ls "bootstrap_placements/$OUT"
