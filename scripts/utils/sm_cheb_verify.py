@@ -30,7 +30,7 @@ print(f"[packed] max |1 - D R| / theory (theory > 1e-9) over 12 layers x 6 kc x 
 # (2) end to end
 os.environ["SM_CHEB_GS"] = "0"
 sys.path.insert(0, W)
-from examples.gpt2_from_primitives import ref
+from perseus.examples.gpt2 import ref
 q = np.load(f"{D}/meta.npz")["q"]
 tot = {"0": dict(le=0, gt=0, err=0, kl=[]), "1": dict(le=0, gt=0, err=0, kl=[])}
 for l in range(12):

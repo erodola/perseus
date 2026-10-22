@@ -1,0 +1,12 @@
+[package]
+name = "pc-shadow"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "perseus: the single level/degree/scale/pack-tag engine (CUDA-free) shared by the planner, the fake and the runtime"
+
+[dependencies]
+pc-core = { path = "../pc-core" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

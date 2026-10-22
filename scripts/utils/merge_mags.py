@@ -9,7 +9,7 @@ later twins by name and take the largest output_max_* over the captures given. N
 whose scope carries the cache shape) keep their own statistics.
 
     # the later position on the numpy fake (FHE_GRAPH_CAPTURE_TOKEN selects it), with the capture's own --set switches
-    FHE_GRAPH_CAPTURE_TOKEN=511 .venv/bin/python -m examples.gpt2_from_primitives.run_decode --fake --tokens 512 \
+    FHE_GRAPH_CAPTURE_TOKEN=511 .venv/bin/python -m perseus.examples.gpt2.run_decode --fake --tokens 512 \
         --capture /tmp/pos511 --configs <configs> --set IMPL_SCOPED_NAMES=1 ...
     .venv/bin/python scripts/utils/merge_mags.py graphs/<pos0> graphs/<merged> /tmp/pos511
 """

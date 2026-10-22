@@ -1,0 +1,28 @@
+[package]
+name = "pc-kernels"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "perseus: CUDA kernels generic over (Word, ModMul), one KernelTable per instantiation"
+autobins = false
+
+[features]
+# w32: u32 x Barrett64 (default) and u32 x Barrett32; the others are opt-in to bound nvcc time
+default = ["w32"]
+w32 = []
+w64 = []
+w16 = []
+mont = []
+# ring-size tables (log n 10..17; u64 too with w64): ntt_ring.cuh
+ring = []
+
+[dependencies]
+# DevPrimeConst (the args.cuh PrimeConst mirror) is defined in pc-core
+pc-core = { path = "../pc-core" }
+# device, streams and arena of the selftest
+pc-cuda = { path = "../pc-cuda" }
+thiserror = { workspace = true }
+
+[[bin]]
+name = "pc-kernels-selftest"
+path = "src/bin/selftest.rs"

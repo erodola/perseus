@@ -1,0 +1,22 @@
+[package]
+name = "pc-py"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "perseus: PyO3 bindings (perseus._pc): Config, Shadow, Tag, CtMeta, Route, Recipe, EmProgram, Session, Fhe, Ct"
+
+[lib]
+name = "_pc"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true }
+pc-core = { path = "../pc-core" }
+pc-shadow = { path = "../pc-shadow" }
+pc-config = { path = "../pc-config" }
+pc-cuda = { path = "../pc-cuda" }
+pc-gpu = { path = "../pc-gpu" }
+pc-program = { path = "../pc-program", features = ["gpu"] }
+pc-kernels = { path = "../pc-kernels" }
+pc-client = { path = "../pc-client" }
+serde_json = { workspace = true }

@@ -1,0 +1,19 @@
+[package]
+name = "pc-tools"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "perseus command-line tools: pc-params (chain presets and checks), pc-check (cross-checks against oracle dumps), pc-bench"
+
+[dependencies]
+pc-core = { path = "../pc-core" }
+serde_json = { workspace = true }
+# the device runtime (pc-check, pc-bench)
+pc-cuda = { path = "../pc-cuda" }
+pc-gpu = { path = "../pc-gpu" }
+pc-kernels = { path = "../pc-kernels" }
+pc-shadow = { path = "../pc-shadow" }
+rayon = { workspace = true }
+# pc-bench replay
+pc-program = { path = "../pc-program", features = ["gpu"] }
+pc-config = { path = "../pc-config" }

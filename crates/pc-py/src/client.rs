@@ -1,0 +1,317 @@
+//! The client side for Python (`_pc.ClientSecret`, `_pc.Client`: pc-client, no device) and the session's ends of
+//! the ciphertext wire format (`_pc.export_ct`, `_pc.import_ct`; docs/WIRE.md).
+//!
+//! A client process only ever builds `ClientSecret` / `Client`: no `Session`, no device. A server session built
+//! with `Session.from_bundle` holds no secret; ciphertexts cross between the two as wire frames (bytes).
+use crate::config::PyConfig;
+use crate::fhe::PyCt;
+use crate::session::{cerr, gerr, nogil, PySession, State};
+use pc_client::{Client, ClientSecret, CtHeader, CtWire, WireMeta};
+use pc_core::encode::{Complex, Payload};
+use pc_core::keys::Prng;
+use pc_shadow::CtMeta;
+use pyo3::buffer::PyBuffer;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::prelude::*;
+use pyo3::types::{PyBytes, PyDict, PyList};
+
+fn prng_of(seed: Option<u64>) -> PyResult<Prng> {
+    match seed {
+        Some(s) => Ok(Prng::from_seed([0xc11e_0001, s as u32, (s >> 32) as u32, 4, 5, 6, 7, 8], 0)),
+        None => Prng::from_os().map_err(|e| PyRuntimeError::new_err(e.to_string())),
+    }
+}
+
+/// The client's secret (dense ternary + sparse encapsulation key). `to_bytes` is the client's own storage format;
+/// it never goes to a server.
+#[pyclass(name = "ClientSecret", module = "perseus._pc", frozen)]
+pub struct PyClientSecret(pub Vec<u8>);
+
+#[pymethods]
+impl PyClientSecret {
+    /// A fresh secret for chain `chain` (OS entropy, or `seed` for reproducible tests).
+    #[staticmethod]
+    #[pyo3(signature = (chain="n32", seed=None))]
+    fn generate(chain: &str, seed: Option<u64>) -> PyResult<Self> {
+        let c = pc_client::spec::chain_of(chain).map_err(cerr)?;
+        let mut g = prng_of(seed)?;
+        Ok(PyClientSecret(ClientSecret::generate(&mut g, c.n).map_err(cerr)?.to_bytes()))
+    }
+    #[staticmethod]
+    fn from_bytes(b: Vec<u8>) -> PyResult<Self> {
+        ClientSecret::from_bytes(&b).map_err(cerr)?;
+        Ok(PyClientSecret(b))
+    }
+    fn to_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, &self.0)
+    }
+}
+
+/// The client: keygen from a server's key request into a bundle file, encryption of slot vectors, decryption.
+/// `complex`: the payload (complex slots, or real: imaginary parts dropped).
+#[pyclass(name = "Client", module = "perseus._pc", unsendable)]
+pub struct PyClient {
+    c: Client,
+    prng: Prng,
+    payload: Payload,
+}
+
+fn values_of(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Vec<Complex>> {
+    let np = py.import("numpy")?;
+    let arr = np.call_method1("ascontiguousarray", (obj, "complex128"))?.call_method0("ravel")?;
+    let flat = arr.call_method1("view", ("float64",))?;
+    let v = PyBuffer::<f64>::get(&flat)?.to_vec(py)?;
+    Ok(v.chunks_exact(2).map(|p| Complex::new(p[0], p[1])).collect())
+}
+
+fn np_c128<'py>(py: Python<'py>, v: &[Complex]) -> PyResult<Bound<'py, PyAny>> {
+    let np = py.import("numpy")?;
+    let a = np.call_method1("empty", (v.len(), "complex128"))?;
+    let flat: Vec<f64> = v.iter().flat_map(|c| [c.re, c.im]).collect();
+    PyBuffer::<f64>::get(&a.call_method1("view", ("float64",))?)?.copy_from_slice(py, &flat)?;
+    Ok(a)
+}
+
+fn meta_dict<'py>(py: Python<'py>, m: &WireMeta) -> PyResult<Bound<'py, PyDict>> {
+    let d = PyDict::new(py);
+    d.set_item("level", m.level)?;
+    d.set_item("deg", m.deg)?;
+    d.set_item("nf", m.nf)?;
+    d.set_item("slots", m.slots)?;
+    Ok(d)
+}
+
+#[pymethods]
+impl PyClient {
+    #[new]
+    #[pyo3(signature = (secret, chain="n32", complex=true, seed=None))]
+    fn new(secret: &PyClientSecret, chain: &str, complex: bool, seed: Option<u64>) -> PyResult<Self> {
+        let s = ClientSecret::from_bytes(&secret.0).map_err(cerr)?;
+        Ok(PyClient { c: Client::new(chain, s).map_err(cerr)?, prng: prng_of(seed)?, payload: if complex { Payload::Complex } else { Payload::Real } })
+    }
+
+    #[getter]
+    fn params_hash(&self) -> String {
+        self.c.params_hash.clone()
+    }
+    #[getter]
+    fn slots(&self) -> usize {
+        self.c.chain.n / 2
+    }
+
+    /// Generate every key of `spec` (a server's `Session.key_manifest` JSON) into the bundle file `path`, on a
+    /// rayon pool of `threads`. Returns the timings and sizes.
+    #[pyo3(signature = (spec, path, threads=8))]
+    fn keygen<'py>(&mut self, py: Python<'py>, spec: &str, path: std::path::PathBuf, threads: usize) -> PyResult<Bound<'py, PyDict>> {
+        let spec = pc_client::KeySpec::from_json(spec).map_err(cerr)?;
+        let (c, g) = (&mut self.c, &mut self.prng);
+        let st = nogil(py, || -> pc_client::Result<pc_client::KeyGenStats> {
+            let f = std::io::BufWriter::with_capacity(1 << 24, std::fs::File::create(&path)?);
+            c.keygen(&spec, f, g, threads)
+        })
+        .map_err(cerr)?;
+        let d = PyDict::new(py);
+        let j = serde_json::to_value(&st).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        if let serde_json::Value::Object(m) = j {
+            for (k, v) in m {
+                if let Some(x) = v.as_f64() {
+                    d.set_item(k, x)?;
+                }
+            }
+        }
+        Ok(d)
+    }
+
+    /// Metadata of a fresh encryption at `level` (the level's scaling factor^deg, every slot): a dict.
+    #[pyo3(signature = (level, deg=1))]
+    fn fresh_meta<'py>(&self, py: Python<'py>, level: u32, deg: u8) -> PyResult<Bound<'py, PyDict>> {
+        meta_dict(py, &self.c.fresh_meta(level, deg).map_err(cerr)?)
+    }
+
+    /// Wire frame (bytes) of a fresh encryption of `values` (a slot vector, zero-padded) at `level` (scale: the
+    /// level's sf^deg unless `nf`; `slots`: live slots, default every slot).
+    #[pyo3(signature = (values, level, deg=1, nf=None, slots=None))]
+    fn encrypt<'py>(&mut self, py: Python<'py>, values: &Bound<'_, PyAny>, level: u32, deg: u8, nf: Option<f64>, slots: Option<u32>) -> PyResult<Bound<'py, PyBytes>> {
+        let v = values_of(py, values)?;
+        let mut meta = self.c.fresh_meta(level, deg).map_err(cerr)?;
+        if let Some(x) = nf {
+            meta.nf = x;
+        }
+        if let Some(x) = slots {
+            meta.slots = x;
+        }
+        if v.len() > meta.slots as usize {
+            return Err(PyValueError::new_err(format!("{} values exceed {} slots", v.len(), meta.slots)));
+        }
+        let (c, g, p) = (&self.c, &mut self.prng, self.payload);
+        let w = nogil(py, || c.encrypt(&[v], &meta, p, g).and_then(|w| w.to_bytes())).map_err(cerr)?;
+        Ok(PyBytes::new(py, &w))
+    }
+
+    /// Decoded slots (complex128 arrays, one per ciphertext of the frame) of a wire frame.
+    fn decrypt<'py>(&self, py: Python<'py>, frame: &[u8]) -> PyResult<Bound<'py, PyList>> {
+        let w = CtWire::from_bytes(frame).map_err(cerr)?;
+        let (c, p) = (&self.c, self.payload);
+        let vals = nogil(py, || c.decrypt(&w, p)).map_err(cerr)?;
+        let out = PyList::empty(py);
+        for v in &vals {
+            out.append(np_c128(py, v)?)?;
+        }
+        Ok(out)
+    }
+
+    /// Header of a wire frame: {level, deg, nf, slots, k, rows}.
+    #[staticmethod]
+    fn frame_meta<'py>(py: Python<'py>, frame: &[u8]) -> PyResult<Bound<'py, PyDict>> {
+        let w = CtWire::from_bytes(frame).map_err(cerr)?;
+        let d = meta_dict(py, &w.header.meta)?;
+        d.set_item("k", w.header.k)?;
+        d.set_item("rows", w.header.rows)?;
+        Ok(d)
+    }
+
+    /// The switch relation of every switching key in the bundle at `path` (max |e| of `b + a s_new - [digit]
+    /// (P mod q) s_old`): {keys, max_err, worst}. `limit`: check the first `limit` keys only.
+    #[pyo3(signature = (path, limit=None))]
+    fn check_bundle<'py>(&self, py: Python<'py>, path: std::path::PathBuf, limit: Option<usize>) -> PyResult<Bound<'py, PyDict>> {
+        let c = &self.c;
+        let (n, mx, worst) = nogil(py, || -> pc_client::Result<(usize, i64, String)> {
+            let mut r = pc_client::BundleReader::open(&path)?;
+            let (bits, rw) = (r.header.bits, r.header.row_words);
+            let (mut n, mut mx, mut worst) = (0usize, 0i64, String::new());
+            for i in 0..r.header.entries.len() {
+                if let pc_client::Entry::Ksk { key, seed, .. } = r.header.entries[i].clone() {
+                    if matches!(key.role, pc_client::Role::SpruAtob) || limit.is_some_and(|l| n >= l) {
+                        continue;
+                    }
+                    let v = r.read(i)?;
+                    let e = c.ksk_relation_max_err(&key, &pc_core::keys::KskSeed(seed), &v, bits, rw)?;
+                    if e > mx {
+                        mx = e;
+                        worst = format!("{:?}", key.role);
+                    }
+                    n += 1;
+                }
+            }
+            Ok((n, mx, worst))
+        })
+        .map_err(cerr)?;
+        let d = PyDict::new(py);
+        d.set_item("keys", n)?;
+        d.set_item("max_err", mx)?;
+        d.set_item("worst", worst)?;
+        Ok(d)
+    }
+}
+
+/// Bundle file summary: {bytes, entries: {kind: count}, bytes_by_kind: {kind: bytes}, contract, params_hash}.
+#[pyfunction]
+fn bundle_info<'py>(py: Python<'py>, path: std::path::PathBuf) -> PyResult<Bound<'py, PyDict>> {
+    let r = pc_client::BundleReader::open(&path).map_err(cerr)?;
+    let d = PyDict::new(py);
+    let (cnt, by) = (PyDict::new(py), PyDict::new(py));
+    for e in &r.header.entries {
+        let k = match e {
+            pc_client::Entry::Ksk { .. } => "ksk",
+            pc_client::Entry::SpruCs { .. } => "spru_cs",
+            pc_client::Entry::Pcmm { .. } => "pcmm",
+            pc_client::Entry::Ccmm { .. } => "ccmm",
+            pc_client::Entry::PublicKey { .. } => "public_key",
+        };
+        let c: usize = cnt.get_item(k)?.map_or(Ok(0), |x| x.extract())?;
+        cnt.set_item(k, c + 1)?;
+        let b: u64 = by.get_item(k)?.map_or(Ok(0), |x| x.extract())?;
+        by.set_item(k, b + 4 * e.words() as u64)?;
+    }
+    d.set_item("bytes", r.bytes())?;
+    d.set_item("entries", cnt)?;
+    d.set_item("bytes_by_kind", by)?;
+    d.set_item("contract", r.header.contract.clone())?;
+    d.set_item("params_hash", r.header.params_hash.clone())?;
+    Ok(d)
+}
+
+/// The plan contract of `config` (what `Session.key_manifest` puts in the request and the bundle must carry).
+#[pyfunction]
+fn contract_hash(config: &PyConfig) -> PyResult<String> {
+    crate::session::contract_hash(&config.0)
+}
+
+/// Wire frame of a session ciphertext (a pending rescale is realized on a copy first: the client decodes degree 1).
+#[pyfunction]
+fn export_ct<'py>(py: Python<'py>, session: &PySession, ct: PyRef<'_, PyCt>) -> PyResult<Bound<'py, PyBytes>> {
+    let dev = session.dev.clone();
+    let meta = ct.ct_ref().meta;
+    let tmp = if meta.deg == 2 {
+        let mut t = PyCt::acquire(&dev, meta)?;
+        let mut st = dev.st.borrow_mut();
+        let State { ops, ex, .. } = &mut *st;
+        ops.realize_to(&dev.ctx, ex, &dev.sh, t.ct_mut_ref()?, ct.ct_ref()).map_err(gerr)?;
+        Some(t)
+    } else {
+        None
+    };
+    let c = tmp.as_ref().map_or(ct.ct_ref(), |t| t.ct_ref());
+    let st = dev.st.borrow();
+    let top = dev.ctx.top_of(c.meta.level).map_err(gerr)?;
+    let rows: Vec<usize> = (0..=top).collect();
+    let n = dev.ctx.lay.n;
+    let data = nogil(py, || -> pc_gpu::Result<Vec<u32>> {
+        let mut v = Vec::with_capacity(2 * rows.len() * n);
+        for part in 0..2 {
+            v.extend(c.buf.download_rows(&st.ex.compute, 0, part, &rows)?);
+        }
+        Ok(v)
+    })
+    .map_err(gerr)?;
+    let m = c.meta;
+    let tag = serde_json::to_value(m.tag).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    let w = CtWire {
+        header: CtHeader { params_hash: pc_client::spec::params_hash(&dev.ctx.chain), n, k: 1, rows: rows.len(), meta: WireMeta { level: m.level, deg: m.deg, nf: m.nf, slots: m.slots, tag } },
+        data,
+    };
+    Ok(PyBytes::new(py, &w.to_bytes().map_err(cerr)?))
+}
+
+/// A session ciphertext from a wire frame (one ciphertext, this session's chain).
+#[pyfunction]
+fn import_ct(py: Python<'_>, session: &PySession, frame: &[u8]) -> PyResult<PyCt> {
+    let dev = session.dev.clone();
+    let w = CtWire::from_bytes(frame).map_err(cerr)?;
+    let h = &w.header;
+    let ph = pc_client::spec::params_hash(&dev.ctx.chain);
+    if h.params_hash != ph || h.n != dev.ctx.lay.n || h.k != 1 {
+        return Err(PyValueError::new_err(format!("import_ct: frame for params {} n {} k {}; this session runs {ph} n {} (k = 1)", h.params_hash, h.n, h.k, dev.ctx.lay.n)));
+    }
+    let top = dev.ctx.top_of(h.meta.level).map_err(gerr)?;
+    if h.rows != top + 1 {
+        return Err(PyValueError::new_err(format!("import_ct: {} rows at level {} (top {top})", h.rows, h.meta.level)));
+    }
+    let tag = if h.meta.tag.is_null() { Default::default() } else { serde_json::from_value(h.meta.tag.clone()).map_err(|e| PyValueError::new_err(format!("import_ct: tag {e}")))? };
+    let meta = CtMeta { level: h.meta.level, deg: h.meta.deg, nf: h.meta.nf, slots: h.meta.slots, tag };
+    let mut out = PyCt::acquire(&dev, meta)?;
+    let rows: Vec<usize> = (0..h.rows).collect();
+    let n = h.n;
+    {
+        let st = dev.st.borrow();
+        let c = out.ct_mut_ref()?;
+        nogil(py, || -> pc_gpu::Result<()> {
+            for part in 0..2 {
+                c.buf.upload_rows(&st.ex.compute, 0, part, &rows, &w.data[part * h.rows * n..(part + 1) * h.rows * n])?;
+            }
+            Ok(())
+        })
+        .map_err(gerr)?;
+    }
+    Ok(out)
+}
+
+pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyClientSecret>()?;
+    m.add_class::<PyClient>()?;
+    m.add_function(wrap_pyfunction!(bundle_info, m)?)?;
+    m.add_function(wrap_pyfunction!(contract_hash, m)?)?;
+    m.add_function(wrap_pyfunction!(export_ct, m)?)?;
+    m.add_function(wrap_pyfunction!(import_ct, m)?)?;
+    Ok(())
+}

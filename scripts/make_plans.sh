@@ -4,7 +4,7 @@
 #   bash scripts/make_plans.sh gpt2_decode_python_n32 python/dacapo   # just these
 # Each bootstrap_placements/<dir>/PLAN_CMD.txt names the graph, the tool (make_plan.sh, or the
 # released DaCapo / Orion tools under scripts/utils/*_upstream/), the recipe and, for an
-# upstream tool's dense plan, the route; tests/test_paper_plans.py checks the committed plans
+# upstream tool's dense plan, the route; python/tests/test_paper_plans.py checks the committed plans
 # against this regeneration. The DaCapo and Orion plans need hecate-opt
 # (scripts/utils/dacapo_upstream/build_hecate.sh) and an Orion clone (fetched on first use).
 set -e -o pipefail
@@ -28,7 +28,7 @@ for d in "${dirs[@]}"; do
     route=$(sed -n 's/^route=//p' "$cmd")
     log="logs/plans/${d//\//_}.log"
     keep="$(mktemp)"; cp "$cmd" "$keep"
-    if [ "$tool" = examples/gpt2_from_primitives/make_plan.sh ]; then
+    if [ "$tool" = python/perseus/examples/gpt2/make_plan.sh ]; then
         # shellcheck disable=SC2086
         env $recipe bash "$tool" "$graph" "$d" > "$log" 2>&1
         # shellcheck disable=SC2086
