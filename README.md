@@ -28,6 +28,16 @@ placement are plain Python; each block is compiled into a program that a Rust + 
 replays (its kernels descend from [FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits),
 our 32-bit GPU port of [FIDESlib](https://github.com/CAPS-UMU/FIDESlib)).
 
+<p align="center">
+  <a href="assets/paper-tables-overview-light.png">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-overview-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-overview-light.png">
+      <img src="assets/paper-tables-overview-light.png" alt="Perseus, encrypted, end to end on one RTX PRO 6000 with 128-bit security. Llama-3-8B: prefill of a 128-token prompt 83.2 s, decode of one token at a 17-token context 13.8 s. GPT-2 small: prefill 21.6 s, decode 3.36 s per token. ViT-B/16: 59.0 s per image. BERT-base: 23.9 s for 128 tokens." width="707">
+    </picture>
+  </a>
+</p>
+
 ## What's inside
 
 - **Python models, compiled.** GPT-2, Llama-3, BERT and ViT are Python programs on `perseus.impl`
@@ -42,34 +52,53 @@ our 32-bit GPU port of [FIDESlib](https://github.com/CAPS-UMU/FIDESlib)).
 
 ## Results
 
-One NVIDIA RTX PRO 6000 Blackwell (96 GB), 128-bit security, each model on its default plan
-(`python/perseus/examples/defaults.py`). Times exclude key generation, encryption and decryption;
-accuracy is against the float64 model.
+One NVIDIA RTX PRO 6000, 128-bit security. Prior results on their own hardware, or replicated on
+ours where the code is released.
 
-| model | run | time | accuracy | peak GPU memory |
-|---|---|---|---|---|
-| Llama-3.1-8B | 128-token prefill | 83.2 s | top-1 127/128, KL ~5e-5 | 76.6 GiB |
-| Llama-3.1-8B | decode, 16 tokens | 13.8 s/token | top-1 16/16, KL ~4.4e-8 | 45.9 GiB |
-| Llama-3.1-8B | 127-token prefill handed to decode, time to first token | 114.3 s | 9/9, max KL 7.0e-5 | 77.0 GiB |
-| GPT-2 small | 128-token prefill | 21.6 s | top-1 125/128, KL 9.9e-5 | 53.0 GiB |
-| GPT-2 small | decode, 16 tokens + encrypted argmax | 3.36 s/token | top-1 15/16 and 16/16 (two runs), KL ~4e-4 | 47.9 GiB |
-| GPT-2 small | decode up to a 512-token context | 4.10 s/token at 500-511 keys | top-1 506/512, encrypted argmax 512/512 | 64.6 GiB |
-| GPT-2 small | decode served (the client holds the keys, never the GPU) | 3.34 s/token | top-1 16/16 | 47.9 GiB |
-| HEAT GPT-2 | decode, 16 tokens | 4.54 s/token | top-1 14/16, KL .0154 | 47.5 GiB |
-| BERT-base | SST-2, 128 tokens | 23.9 s | label agrees, KL 1.3e-10 | 53.4 GiB |
-| ViT-B/16 | one 224x224 image (12 EuroSAT images) | 59.0 s/image | top-1 and top-5 12/12 | 57.5 GiB |
+<p align="center">
+  <a href="assets/paper-tables-llama-prefill-light.png">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-llama-prefill-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-llama-prefill-light.png">
+      <img src="assets/paper-tables-llama-prefill-light.png" alt="Encrypted Llama-3-8B prefill of a 128-token prompt, seconds. MOAI 3592.0 on H200, NEXUS 829.0 on 4 A100, Euston 484.0, STIP 406.6 (composed timings, amortized over a batch); Odin 366.4 on H100; Cerium 347.5 (replicated on RTX PRO 6000); Sylph 116.0 (composed); Perseus 83.2 on RTX PRO 6000, open source." width="707">
+    </picture>
+  </a>
+  <br>
+  <a href="assets/paper-tables-llama-decode-light.png">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-llama-decode-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-llama-decode-light.png">
+      <img src="assets/paper-tables-llama-decode-light.png" alt="Encrypted Llama-3-8B decode of one token, seconds per token at a context size. AR-HE 1569.0 at 32, ROSETTA 311.0 at 512, Cachemir 97.0 at 512, Sylph 31.0 at 128 (all composed timings); Perseus 13.8 at 17 on RTX PRO 6000, open source." width="707">
+    </picture>
+  </a>
+  <br>
+  <a href="assets/paper-tables-gpt2-light.png">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-gpt2-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-gpt2-light.png">
+      <img src="assets/paper-tables-gpt2-light.png" alt="Encrypted GPT-2 small. AR-HE: 128-token prefill 18520.0 s, decode 544.0 s per token at context 33. ROSETTA: decode 78.6 s at 512 (composed). EncryptedLLM: decode 68.0 s at 128. Perseus: prefill 21.6 s, decode 3.36 s per token at context 32, on RTX PRO 6000, open source." width="707">
+    </picture>
+  </a>
+  <br>
+  <a href="assets/paper-tables-vit-light.png">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-vit-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-vit-light.png">
+      <img src="assets/paper-tables-vit-light.png" alt="Encrypted ViT inference of one image, seconds. FIONA, ViT-S/16, 374.4 on a 48-core CPU (amortized over a batch of 32, retrained polynomial model); ATLAS, ViT-B/16, 2259.0 on RTX 4090; Perseus, ViT-B/16, 59.0 on RTX PRO 6000, open source." width="707">
+    </picture>
+  </a>
+  <br>
+  <a href="assets/paper-tables-bert-light.png">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-bert-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-bert-light.png">
+      <img src="assets/paper-tables-bert-light.png" alt="Encrypted BERT inference of one input, seconds. THOR, BERT-base, 128 tokens, 602.0 on A100; POLARIS, BERT-Mini, 83.0 on A100; Cerium, BERT-base, 128 tokens, 43.6 (replicated on RTX PRO 6000); Perseus, BERT-base, 128 tokens, 23.9 on RTX PRO 6000, open source." width="707">
+    </picture>
+  </a>
+</p>
 
-Prior results, on their own hardware or replicated on ours where the code is released (seconds; per
-token for decode, with the context size):
-
-| task | prior work | Perseus |
-|---|---|---|
-| Llama-3-8B, 128-token prefill | MOAI 3592.0 (H200), NEXUS 829.0 (4 A100), Euston 484.0 and STIP 406.6 (composed, amortized over a batch), Odin 366.4 (H100), Cerium 347.5 (replicated), Sylph 116.0 (composed) | 83.2 |
-| Llama-3-8B, decode | AR-HE 1569.0 at 32, ROSETTA 311.0 at 512, Cachemir 97.0 at 512, Sylph 31.0 at 128 (all composed) | 13.8 at up to 17 |
-| GPT-2 small, 128-token prefill | AR-HE 18520.0 | 21.6 |
-| GPT-2 small, decode | AR-HE 544.0 at 33, EncryptedLLM 68.0 at 128, ROSETTA 78.6 at 512 (composed) | 3.36 at up to 16, 4.10 at 512 |
-| ViT, one image | FIONA (ViT-S/16) 374.4 on a 48-core CPU (amortized over 32, retrained polynomial model), ATLAS (ViT-B/16) 2259.0 (RTX 4090) | 59.0 (ViT-B/16) |
-| BERT-base, 128 tokens | THOR 602.0 (A100), Cerium 43.6 (replicated); POLARIS (BERT-Mini) 83.0 (A100) | 23.9 |
+Times exclude key generation, encryption and decryption; each model runs its default plan
+(`python/perseus/examples/defaults.py`).
 
 ## Reproduce
 

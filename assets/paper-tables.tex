@@ -16,9 +16,9 @@
 \pagecolor{bg}\color{fg}
 \arrayrulecolor{fg}
 \setlength{\dashlinedash}{3pt}\setlength{\dashlinegap}{3pt}
-% Perseus' numbers (docs/RESULTS_2026-10-19.md: medians; BERT and GPT-2 prefill after a warm-up pass)
-\newcommand{\llamapf}{111.0}\newcommand{\llamadec}{21.1}\newcommand{\gptpf}{33.1}\newcommand{\gptdec}{3.78}
-\newcommand{\vitimg}{123.2}\newcommand{\bertin}{37.7}
+% Perseus' numbers on the Rust + CUDA runtime (docs/REPORT.md, 2026-10-22: medians; default plan per model)
+\newcommand{\llamapf}{83.2}\newcommand{\llamadec}{13.8}\newcommand{\gptpf}{21.6}\newcommand{\gptdec}{3.36}
+\newcommand{\vitimg}{59.0}\newcommand{\bertin}{23.9}
 \newcommand{\oursrow}{\rowcolor{ours}}
 \newcommand{\oc}{\cellcolor{ours}}
 \newcommand{\yes}{\textcolor{yescol}{\ding{51}}}
@@ -40,7 +40,7 @@
 \textbf{Model} & \textbf{Task} & \textbf{Encrypted} \\
 \midrule
 Llama-3-8B & prefill, 128-token prompt & \textbf{\llamapf\ s} \\
-Llama-3-8B & decode, one token (512-token context) & \textbf{\llamadec\ s} \\
+Llama-3-8B & decode, one token (17-token context) & \textbf{\llamadec\ s} \\
 GPT-2 small & prefill, 128-token prompt & \textbf{\gptpf\ s} \\
 GPT-2 small & decode, one token & \textbf{\gptdec\ s} \\
 ViT-B/16 & one $224\times224$ image & \textbf{\vitimg\ s} \\
@@ -80,7 +80,7 @@ AR-HE (Kanpak and Unat, 2026) & 32 & 1569.0\nt{\dagger} & H100 & \no \\
 ROSETTA (Yu et al., 2026) & 512 & 311.0\nt{\dagger} & A100 & \no \\
 Cachemir (Yu et al., 2026) & 512 & 97.0\nt{\dagger} & A100 & \semi \\
 Sylph (Park et al., 2026) & 128 & 31.0\nt{\dagger} & RTX PRO 6000 & \no \\
-\oursrow\textbf{Perseus (ours)} & 512 & \textbf{\llamadec} & RTX PRO 6000 & \yes \\
+\oursrow\textbf{Perseus (ours)} & 17 & \textbf{\llamadec} & RTX PRO 6000 & \yes \\
 \bottomrule
 \end{tabularx}
 \tcap{Encrypted Llama-3-8B decode of one token at the given context size. $^\dagger$Composed from per-block or per-operator
