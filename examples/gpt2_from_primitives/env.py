@@ -130,9 +130,10 @@ def plan_configs(plan=None, chain="n32", default=None):
     return CONFIGS_N32_LEGACY
 
 
-def bootstrap_setup(fhe, runtime, cpp_bootstrap=False):
+def bootstrap_setup(fhe, runtime, cpp_bootstrap=False, bundle=None):
     """Install the Python-orchestrated bootstrap (the default) with SPRU on the 1-slot route when the runtime asks
-    for it. A SPRU plan cannot run on the C++ bootstrap (its 1-slot refreshes land 16 primes lower there)."""
+    for it. A SPRU plan cannot run on the C++ bootstrap (its 1-slot refreshes land 16 primes lower there).
+    `bundle`: the key bundle the session was opened from, which holds the SPRU material."""
     spru = int(runtime.get("FIDESLIB_SPRU", "0") or 0)
     if cpp_bootstrap:
         if spru:
@@ -140,7 +141,7 @@ def bootstrap_setup(fhe, runtime, cpp_bootstrap=False):
                              "drop --cpp-bootstrap or pass --set FIDESLIB_SPRU=0 with a non-SPRU plan")
         return
     from perseus.impl import bootstrap as _pyb
-    _pyb.install(fhe=fhe, spru_h=spru)
+    _pyb.install(fhe=fhe, spru_h=spru, spru_dir=bundle)
 
 
 def export_env(device=3, chain=None, **overrides):
@@ -159,10 +160,23 @@ def export_env(device=3, chain=None, **overrides):
         os.environ["OMP_NUM_THREADS"] = "36"
 
 
-def open_session(device=3, complex_payload=True, chain=None, extra_rot_steps=(), base=True, **overrides):
+def open_session(device=3, complex_payload=True, chain=None, extra_rot_steps=(), base=True, bundle=None,
+                 **overrides):
     """perseus.session on the gpt2_decode_n32 preset with the overrides above.
     `complex_payload`: CKKS_COMPLEX=1, the C++ decode configuration (K/V pair bootstrap, packed
-    CutMax, complex feedback tile; weights and linears stay real); False: real slots only."""
+    CutMax, complex feedback tile; weights and linears stay real); False: real slots only.
+    `bundle`: load every key from that directory (EncClient.save_bundle) instead of generating them;
+    the session then holds no secret key and cannot decrypt."""
+    from perseus import session
+    if bundle is not None:
+        opts = session_options(device, complex_payload, chain, extra_rot_steps, base, **overrides)
+        ck = opts.ckks
+        ck.keys_dir = str(bundle)
+        opts.ckks = ck
+        s = session(options=opts, mode="sync")
+        if s.inf.fhe.has_secret_key:
+            raise RuntimeError(f"the session opened from {bundle} holds a secret key")
+        return s
     chain = chain or os.environ.get("CHAIN") or "n32"
     overrides = {"CKKS_COMPLEX": "1" if complex_payload else "0", **overrides}
     export_env(device, chain=chain, **overrides)
@@ -187,6 +201,32 @@ def open_session(device=3, complex_payload=True, chain=None, extra_rot_steps=(),
     ck.extra_rot_steps = sorted(set(ck.extra_rot_steps) | steps)
     opts.ckks = ck
     return session(options=opts, mode="sync")
+
+
+def session_options(device=3, complex_payload=True, chain=None, extra_rot_steps=(), base=True, **overrides):
+    """The InferenceOptions open_session builds its session from (exports the env as it does): what a key owner
+    generates the bundle under, and what the server opens it with."""
+    chain = chain or os.environ.get("CHAIN") or "n32"
+    overrides = {"CKKS_COMPLEX": "1" if complex_payload else "0", **overrides}
+    export_env(device, chain=chain, **overrides)
+    from perseus.profile import SessionProfile
+    prof = (SessionProfile.gpt2_decode_n64() if chain == "n64"
+            else SessionProfile.gpt2_decode_n32())
+    prof.ckks_complex = bool(complex_payload)
+    prof.mode = "sync"
+    prof.extra = dict(prof.extra)
+    prof.extra.update({k: v for k, v in ENV.items()})
+    prof.extra.update({k: str(v) for k, v in overrides.items()})
+    from perseus.impl.layout import Dims, ladder_radix_bits, ladder_radix_steps
+    steps = {int(s) for s in extra_rot_steps}
+    if base and ladder_radix_bits() >= 2:
+        steps |= ladder_radix_steps(Dims.gpt2(), ladder_radix_bits())
+    prof.apply()
+    opts = prof.options()
+    ck = opts.ckks
+    ck.extra_rot_steps = sorted(set(ck.extra_rot_steps) | steps)
+    opts.ckks = ck
+    return opts
 
 
 def rotation_audit(fhe, dims):

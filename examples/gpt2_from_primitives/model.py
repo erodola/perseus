@@ -187,6 +187,14 @@ class Gpt2Model(ImplModel):
             self.ones = make_ones(self.rt.ops, x)       # ensure_const_one: from the freshest ct
         return self.run_stages(x, pos, self.token_stages(x, pos, head))
 
+    def decode_step(self, x, pos, head=True):
+        """One position on its input ciphertext: the counters, the forward, the next step's masks. Returns the logit
+        tiles and the token's record (decode_s = the forward, the C++ [tokstat] cut)."""
+        self.token_begin(pos)
+        tiles = self.decode_token(x, pos, head)
+        self.token_tail(pos)                 # next step's masks: staged under what follows
+        return tiles, self.token_end(pos)
+
     def logits(self, tiles):
         return decode_logits(self.rt, tiles, self.vocab, self.W_tile)
 
@@ -234,7 +242,8 @@ class Gpt2Model(ImplModel):
     def run_decode(self, inputs, gt_logits=None, on_token=None, argmax=False, first=0):
         """Teacher-forced decode (src/app/pipeline.cu): one forward per oracle row,
         logits decrypted per token, optional CutMax on the tiles. Returns per-token dicts.
-        `first` > 0: positions before it are already in the caches (replay_kv_pushes)."""
+        `first` > 0: positions before it are already in the caches (replay_kv_pushes).
+        Encrypting the input and decrypting the outputs are the client's work: no timer covers them."""
         if first == 0:
             self.start()
         else:
@@ -243,11 +252,8 @@ class Gpt2Model(ImplModel):
         for t, row in enumerate(inputs):
             if t < first:
                 continue
-            self.token_begin(t)
             x = self.encode_input(row)
-            tiles = self.decode_token(x, t)
-            self.token_tail(t)                 # next step's masks: staged under what follows
-            rec = self.token_end(t)            # decode_s = the forward (the C++ [tokstat] cut)
+            tiles, rec = self.decode_step(x, t)
             lg = self.logits(tiles)
             rec.update(logits=lg, top1=int(np.argmax(lg)))
             if gt_logits is not None and t < len(gt_logits) and len(gt_logits[t]):
@@ -256,10 +262,11 @@ class Gpt2Model(ImplModel):
                 t1 = time.time()
                 b0 = int(getattr(self.inf.fhe, "total_bootstraps", 0))
                 z = self.argmax_encrypted(tiles, t)
-                zdec = self.decode_z(z)
-                rec.update(cutmax=int(np.argmax(zdec)), z_mass=float(zdec.max()),
-                           argmax_s=time.time() - t1,
+                self.rt.ops.device_sync()
+                rec.update(argmax_s=time.time() - t1,
                            argmax_bts=int(getattr(self.inf.fhe, "total_bootstraps", 0)) - b0)
+                zdec = self.decode_z(z)
+                rec.update(cutmax=int(np.argmax(zdec)), z_mass=float(zdec.max()))
             results.append(rec)
             if on_token:
                 on_token(rec)

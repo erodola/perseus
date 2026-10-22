@@ -220,11 +220,14 @@ class EncClient:
         return m
 
     def save_bundle(self, path: str) -> str:
-        """Write the server's bundle: context + public + eval keys + bundle.json.
-        No secret key."""
+        """Write the server's bundle: context + public + eval keys + bundle.json, plus the
+        SPRU material when the session runs SPRU (FIDESLIB_SPRU=h). No secret key."""
         os.makedirs(path, exist_ok=True)   # save_keys writes INTO the dir
         with _translate(self.backend):
             self.backend.save_keys(self.inf, path)
+            spru_h = int(os.environ.get("FIDESLIB_SPRU", "0") or 0)
+            if spru_h > 0:
+                self.backend.bts.spru_save(self.inf.fhe, spru_h, path)
         with open(os.path.join(path, MANIFEST_NAME), "w", encoding="utf-8") as f:
             json.dump(self.manifest(), f, indent=1)
         return path

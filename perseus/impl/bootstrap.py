@@ -99,16 +99,20 @@ def bootstrap(ct, slots: int, prescaled: bool = False, *, trace: list | None = N
 _installed = {"n": 0}
 
 
-def install(enable: bool = True, *, fhe=None, spru_h: int = 0):
+def install(enable: bool = True, *, fhe=None, spru_h: int = 0, spru_dir: str | None = None):
     """Route every FIDESlib Bootstrap() of the runtime (planned refreshes, auto bootstraps, folds) through
     ``bootstrap``. ``enable=False`` restores FIDESlib's own. ``spru_h > 0`` (with ``fhe``) bootstraps the s = 1 route
-    with SPRU (h blocks; the session must have been built with FIDESLIB_SPRU=h for its rotation keys)."""
+    with SPRU (h blocks; the session must have been built with FIDESLIB_SPRU=h for its rotation keys). ``spru_dir``:
+    load the SPRU material from that bundle (a session with no secret key) instead of making it."""
     if not enable:
         bts.set_override(None)
         _spru["fhe"] = None
         return
     if spru_h > 0:
-        bts.spru_setup(fhe, int(spru_h))
+        if spru_dir:
+            bts.spru_load(fhe, int(spru_h), spru_dir)
+        else:
+            bts.spru_setup(fhe, int(spru_h))
         _spru["fhe"] = fhe
 
     prof = os.environ.get("PERSEUS_BTS_PROFILE", "0") not in ("", "0")

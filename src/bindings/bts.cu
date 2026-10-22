@@ -13,12 +13,19 @@
 #include <CKKS/Pcmm.cuh>
 #include <CKKS/ApproxModEval.cuh>
 
+#include "ciphertext-ser.h"
+#include "key/key-ser.h"
+
 #include <pybind11/functional.h>
 #include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <filesystem>
+#include <fstream>
 #include <memory>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 namespace py = pybind11;
@@ -465,6 +472,50 @@ void bind_bts(py::module_& root) {
           },
           py::arg("fhe"), py::arg("h") = 64, kRelease,
           "Build the SPRU key material for the s = 1 route (block key, switching key, 4 key ciphertexts).");
+    // The bundle's SPRU section: spru.txt (h), spru_atob.bin (the switching key) and spru_cs<u>.bin (the key
+    // ciphertexts). The block positions of s' never reach a file.
+    m.def("spru_save",
+          [](CKKSContext& fhe, int h, const std::string& dir) {
+              auto& lcc = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(fhe.cc->cpu);
+              if (!fhe.keys.secretKey) throw std::runtime_error("spru_save: this session holds no secret key");
+              auto lsk = std::any_cast<const lbcrypto::PrivateKey<lbcrypto::DCRTPoly>&>(fhe.keys.secretKey->pimpl);
+              auto lpk = std::any_cast<const lbcrypto::PublicKey<lbcrypto::DCRTPoly>&>(fhe.keys.publicKey->pimpl);
+              const FC::SpruMaterial mat = FC::spruKeyGen(lcc, lbcrypto::KeyPair<lbcrypto::DCRTPoly>(lpk, lsk), h);
+              auto put = [&](const std::string& name, const auto& obj) {
+                  const std::string tmp = dir + "/.partial-" + name;
+                  if (!lbcrypto::Serial::SerializeToFile(tmp, obj, lbcrypto::SerType::BINARY))
+                      throw std::runtime_error("spru_save: cannot write " + tmp);
+                  std::filesystem::rename(tmp, dir + "/" + name);
+              };
+              put("spru_atob.bin", mat.atob);
+              for (size_t u = 0; u < mat.cs.size(); ++u) put("spru_cs" + std::to_string(u) + ".bin", mat.cs[u]);
+              std::ofstream(dir + "/spru.txt") << "h=" << h << "\n";
+          },
+          py::arg("fhe"), py::arg("h"), py::arg("dir"), kRelease,
+          "Key owner, no GPU needed: write the SPRU material (no secret) into the bundle directory `dir`.");
+    m.def("spru_load",
+          [](CKKSContext& fhe, int h, const std::string& dir) {
+              auto& lcc = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(fhe.cc->cpu);
+              int saved = 0;
+              std::ifstream(dir + "/spru.txt").ignore(2) >> saved;
+              if (saved != h)
+                  throw std::runtime_error("spru_load: " + dir + " holds SPRU material for h=" + std::to_string(saved) +
+                                           ", the session needs h=" + std::to_string(h));
+              FC::SpruMaterial mat;
+              mat.h = h;
+              if (!lbcrypto::Serial::DeserializeFromFile(dir + "/spru_atob.bin", mat.atob, lbcrypto::SerType::BINARY))
+                  throw std::runtime_error("spru_load: cannot read " + dir + "/spru_atob.bin");
+              for (int u = 0; u < 4; ++u) {
+                  lbcrypto::Ciphertext<lbcrypto::DCRTPoly> ct;
+                  const std::string p = dir + "/spru_cs" + std::to_string(u) + ".bin";
+                  if (!lbcrypto::Serial::DeserializeFromFile(p, ct, lbcrypto::SerType::BINARY))
+                      throw std::runtime_error("spru_load: cannot read " + p);
+                  mat.cs.push_back(ct);
+              }
+              g_spru = FC::spruLoad(lcc, std::any_cast<FC::Context&>(fhe.cc->gpu), mat);
+          },
+          py::arg("fhe"), py::arg("h"), py::arg("dir"), kRelease,
+          "Server: load the bundle's SPRU material (spru_save) onto the GPU; needs no secret key.");
     m.def("spru",
           [](CKKSContext& fhe, DeviceCt& d, uint32_t correction) {
               if (!g_spru) throw std::runtime_error("[bts] spru_setup first");
