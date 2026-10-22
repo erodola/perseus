@@ -29,9 +29,10 @@ weights.bin.zip
 notebooks/*_executed.ipynb
 notebooks/*.error.txt
 
-# generated assets under docs/ are local; the documentation itself is tracked
-docs/*
-!docs/*.md
+# local, not in the repository: the docs and the paper repositories
+docs/
+paper-org/
+paper-workshop/
 
 # JSON is a run product by default; the tracked exceptions are the artifacts the paper needs
 *.csv
@@ -54,7 +55,6 @@ bootstrap_placements/_*/
 !Cargo.lock
 !python/**/*.json
 !crates/**/*.json
-!docs/*.json
 
 # Llama captures ship as a release artifact (graphs/RELEASE.txt), not in the repository
 graphs/llama31_8b_*

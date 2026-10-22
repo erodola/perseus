@@ -174,8 +174,7 @@ model (the six others at rank 1), the encrypted argmax 512/512, median KL 4.0e-4
 
 ## Result plans (README tables, tag `table-2026-10-19`)
 
-Each runs with `--plan` alone: every switch is in its `runtime=` line. `scripts/repro/` has one script per plan and
-`docs/RESULTS_2026-10-19.md` every run.
+Each runs with `--plan` alone: every switch is in its `runtime=` line. `scripts/repro/` has one script per plan.
 
 | directory | model and task | result |
 |---|---|---|

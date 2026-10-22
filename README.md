@@ -38,14 +38,13 @@ our 32-bit GPU port of [FIDESlib](https://github.com/CAPS-UMU/FIDESlib)).
   ChaCha12 seed instead of being stored.
 - **Complex Cachemir packing.** Two real vectors per ciphertext, in the complex slots of CKKS.
 - **Packing- and magnitude-aware bootstrap placement.** GPT-2 runs 416 bootstraps per token,
-  against 584–894 for DaCapo, Orion and Fhelipe ([study](docs/PLACEMENT_STUDY.md)).
+  against 584–894 for DaCapo, Orion and Fhelipe.
 
 ## Results
 
 One NVIDIA RTX PRO 6000 Blackwell (96 GB), 128-bit security, each model on its default plan
 (`python/perseus/examples/defaults.py`). Times exclude key generation, encryption and decryption;
-accuracy is against the float64 model. [`docs/REPORT.md`](docs/REPORT.md) has the protocol and the
-comparison with the C++/FIDESlib runtime the paper's tables were measured on.
+accuracy is against the float64 model.
 
 | model | run | time | accuracy | peak GPU memory |
 |---|---|---|---|---|
@@ -93,7 +92,7 @@ GPU.
 
 ## Layout
 
-- `crates/` the Rust + CUDA runtime (`docs/ARCHITECTURE.md`):
+- `crates/` the Rust + CUDA runtime:
   - `pc-core` the CUDA-free CKKS mathematics (parameters, encoding, keys, bootstrap constants);
     `pc-shadow` the level/degree/scale engine the planner, the recorder and the runtime share;
     `pc-config` the typed run configuration.
@@ -101,7 +100,7 @@ GPU.
     bootstrap routes, PCMM/CCMM, the plaintext store, one frozen device arena.
   - `pc-program` a recorded block + its plan -> a compiled program, and its replay.
   - `pc-py` the Python extension `perseus._pc`; `pc-client` the CUDA-free client (keys, encryption,
-    the wire format, `docs/WIRE.md`); `pc-tools` benchmarks and cross-checks.
+    the wire format); `pc-tools` benchmarks and cross-checks.
 - `python/perseus/`
   - `impl/` the Python implementation: encrypted linear layers, attention, normalization and
     activations, the recorder and the planned drivers.
@@ -120,8 +119,6 @@ GPU.
   the runtime switches it was made for (`PLAN_CMD.txt`).
 - `scripts/repro/` one script per result; `scripts/make_plans.sh` replays every plan's recipe;
   `scripts/utils/{dacapo,orion}_upstream/` run the released DaCapo and Orion tools.
-- `docs/` the architecture, the wire format, the security model, the placement study and the
-  results protocol.
 - `notebooks/` a custom model on the runtime's operations and the client-server split.
 - `tools/` the repo gate (`ci.sh`) and the route-table tool.
 - `assets/` the logos and the paper's result tables (`paper-tables.tex`, `results-table.tex`, rendered by
@@ -161,7 +158,7 @@ sess.close()
 A new model subclasses `perseus.impl.driver.ImplModel` and lists its stages, the masks each
 step needs and its weights; `python/perseus/impl/__init__.py` describes the modules. The client
 (`perseus.client`) and the server (`perseus.serve`) split the key holder from the GPU
-(`docs/SECURITY_MODEL.md`, `notebooks/client_server.ipynb`).
+(`notebooks/client_server.ipynb`).
 
 ## Pipeline
 
@@ -196,7 +193,7 @@ The planner, the weight export and the approximation fitting run without the ext
 | `ALL_BLOCKS_IO_DIR` | the reference outputs that encrypted runs are checked against | under `PERSEUS_DATA` |
 
 The CKKS parameters and the runtime switches come from the plan (its `PLAN_CMD.txt`) and the
-typed configuration (`perseus._pc.Config`, its fields in `docs/ENV_INVENTORY.md`).
+typed configuration (`perseus._pc.Config`).
 
 ### 1. Export the weights, fit the approximations, compute the reference outputs
 
@@ -261,7 +258,7 @@ that turn out redundant (`--prune`) and the placement algorithm
 plans estimate each bootstrap's error from measurements (`python/perseus/plan/data/bts_accuracy_n32.json`),
 the 64-bit plans from a formula.
 
-The comparison plans of the [placement study](docs/PLACEMENT_STUDY.md) come from the released
+The comparison plans of the placement study come from the released
 tools. DaCapo needs its compiler, `hecate-opt`, built once (LLVM/MLIR 18); Orion's solver is
 downloaded and patched on first use:
 
