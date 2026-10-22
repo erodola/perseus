@@ -1,6 +1,6 @@
 """Record 0's server for the Encrypted GPT-2 Speedrun: the harness protocol, from the client's key bundle alone.
 
-    bash speedrun/serve.sh --track {prefill,decode} --inbox IN --outbox OUT [--device N]
+    bash speedrun/serve.sh --track {prefill,decode} --inbox IN --outbox OUT [--device N] [--profile]
 
 The wire is the speedrun's (harness/wire.py, harness/protocol.py): every file is an 8-byte little-endian length and
 the payload, written under a temporary name and renamed. The payloads are speedrun/record0.py's. Setup, untimed: write
@@ -59,6 +59,7 @@ def main():
     p.add_argument("--inbox", required=True)
     p.add_argument("--outbox", required=True)
     p.add_argument("--device", type=int, default=0)
+    p.add_argument("--profile", action="store_true", help="per-step times on stderr (device syncs added)")
     a = p.parse_args()
     os.environ["CUDA_VISIBLE_DEVICES"] = str(a.device)
     write(a.outbox, "keyspec", json.dumps({"record0": a.track}).encode())   # the key set is record0.options'
@@ -92,7 +93,14 @@ def main():
 
     def answer(tiles, pos):
         z = model.argmax_encrypted(tiles, pos)
-        return record0.pack([serialize_tiles(inf, tiles, _core), serialize_tiles(inf, z, _core)])
+        if a.profile:
+            model.rt.ops.device_sync()
+            t = time.time()
+        out = record0.pack([serialize_tiles(inf, tiles, _core), serialize_tiles(inf, z, _core)])
+        if a.profile:
+            print(f"[speedrun] pos{pos} serialize={time.time() - t:.3f}s ({len(out) / 2**20:.1f} MiB)",
+                  file=sys.stderr, flush=True)
+        return out
 
     def prefill(Xs, ch):
         Xs, ch, _ = model.prefill_cts(Xs, ch)
@@ -110,9 +118,17 @@ def main():
             model.start()
             for j in range(record0.STEPS["decode"]):
                 wait(a.inbox, f"{k}/{j}")
+                t0 = time.time()
                 x = _core.adopt_input(inf, read(a.inbox, f"{k}/{j}"), True)
+                t1 = time.time()
                 tiles, _ = model.decode_step(x, j)
+                if a.profile:
+                    model.rt.ops.device_sync()
+                t2 = time.time()
                 write(a.outbox, f"{k}/{j}", answer(tiles, j))
+                if a.profile:
+                    print(f"[speedrun] pos{j} in={t1 - t0:.3f}s forward={t2 - t1:.3f}s "
+                          f"argmax+out={time.time() - t2:.3f}s", file=sys.stderr, flush=True)
         else:
             Xs = [_core.adopt_input(inf, b, False) for b in record0.unpack(read(a.inbox, f"{k}/0"))]
             write(a.outbox, f"{k}/0", prefill(Xs, model.chunks(record0.PROMPT)))
