@@ -1,0 +1,37 @@
+[package]
+name = "pc-gpu"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "perseus device runtime: Context, Executor (lanes + workspaces), MemPlan/CtPool, ciphertext buffers, ops"
+autobins = false
+
+[features]
+# extra kernel instantiations (pc-kernels builds u32 x {Barrett64, Barrett32} by default); dependents enable them as
+# `pc-gpu/w64` etc. (pc-py: `maturin develop --release -F pc-gpu/w64` for the `_pc.w64` session)
+w64 = ["pc-kernels/w64"]
+w16 = ["pc-kernels/w16"]
+mont = ["pc-kernels/mont"]
+
+[dependencies]
+pc-core = { path = "../pc-core" }
+pc-cuda = { path = "../pc-cuda", features = ["cublas"] }
+pc-kernels = { path = "../pc-kernels" }
+pc-shadow = { path = "../pc-shadow" }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+
+[[bin]]
+name = "pc-gpu-smoke"
+path = "src/bin/smoke.rs"
+
+[[bench]]
+name = "ks"
+harness = false
+
+
+# card M5b: host overhead of the leaf ops (GPU: run the built binary under tools/gpu.sh)
+[[bench]]
+name = "ops"
+harness = false
+

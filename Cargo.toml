@@ -1,0 +1,26 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "MIT"
+
+[workspace.dependencies]
+# Pinned on purpose: serde_json's default float parser is not correctly rounded (1 ulp on an EvalMod
+# constant changed a ciphertext); `float_roundtrip` fixes it. Keep the pin unless re-verified.
+serde_json = { version = "=1.0.128", features = ["float_roundtrip"] }
+serde = { version = "1", features = ["derive"] }
+rayon = "1"
+thiserror = "2"
+getrandom = "0.3"
+pyo3 = { version = "0.27", features = ["extension-module", "abi3-py312"] }
+
+[profile.release]
+debug = 1
+opt-level = 3
+
+[profile.dev]
+opt-level = 1

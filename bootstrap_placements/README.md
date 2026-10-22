@@ -165,9 +165,12 @@ grows (1024 from 33 keys, up to 8192 from 257), multi-stage past 1024 slots, whi
 planned to land at 32. The magnitudes are the larger of position 0's and position 511's (`scripts/utils/merge_mags.py`):
 the softmax refresh inputs grow up to ~800x with the cache, and factors sized at position 0 wrap. The configs
 (`gpt2_base_n32_ctx512`) refit the softmax on every query position up to 520 keys, without the per-cache-length
-refine rescale. The block weights stream from the host (`IMPL_RESIDENT_BLOCKS=0`) to leave room for the routes.
-512 positions (`scripts/repro/gpt2_decode_ctx512.sh`): top-1 500/512 against the plaintext model, median KL 5e-4,
-5.2 s per token at 500-511 keys (4.6 s within 32).
+refine rescale. The runtime records every position on the CPU twin at setup and compiles one program per structure
+class (56 for 512 positions: the score period, the K bucket and the routes change with the cache), with the K/V
+states in pinned host memory and every route resident; `IMPL_RESIDENT_BLOCKS` is a switch of the C++ runtime and is
+not read. 512 positions (`scripts/repro/gpt2_decode_ctx512.sh`, RTX PRO 6000): top-1 506/512 against the plaintext
+model (the six others at rank 1), the encrypted argmax 512/512, median KL 4.0e-4, 4.10 s per token at 500-511 keys
+(3.83 s within 32), peak 66 GB on the GPU; setup 17 min (recording 512 positions).
 
 ## Result plans (README tables, tag `table-2026-10-19`)
 

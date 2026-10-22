@@ -1,0 +1,9 @@
+[package]
+name = "pc-cublas"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Hand-written cuBLASLt FFI (int8 -> int32 GEMM) with safe wrappers"
+
+[dependencies]
+thiserror = { workspace = true }

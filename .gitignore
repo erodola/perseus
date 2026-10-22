@@ -42,3 +42,19 @@ docs/*
 !graphs/**/*.json
 # scratch plan directories from an A/B are named with a leading underscore
 bootstrap_placements/_*/
+
+# Rust / CUDA build trees and profiler output
+/target
+/target-*
+**/target/
+/out
+*.nsys-rep
+*.sqlite
+*.ncu-rep
+!Cargo.lock
+!python/**/*.json
+!crates/**/*.json
+!docs/*.json
+
+# Llama captures ship as a release artifact (graphs/RELEASE.txt), not in the repository
+graphs/llama31_8b_*

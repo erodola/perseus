@@ -3,44 +3,42 @@
 ## Setup
 
 ```bash
-git clone --recurse-submodules https://github.com/gladia-research-group/perseus
+git clone https://github.com/gladia-research-group/perseus
 cd perseus
-uv sync                     # the pure-Python package + the dev group (torch, pytest, ruff, ...)
+uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e ".[hf,examples,dev]"
+.venv/bin/maturin develop --release        # the Rust + CUDA extension perseus._pc (README: Install)
 ```
 
-The CUDA extension `perseus._core` is built separately (README → Install). Everything under
-`perseus.nn` needs it at run time; `perseus.plan`, `perseus.calibrate`, `perseus.hub` and
-`perseus.export` do not, and `python -c "import perseus.nn"` says what to run when it is missing.
+`perseus.plan`, `perseus.calibrate`, `perseus.hub` and `perseus.export` run without the extension; the models, the
+recorder and the runtime need it.
 
 ## Tests
 
 ```bash
-pytest                                  # the CPU tier: seconds, no GPU, no network
-PERSEUS_ALL_PLANS=1 pytest tests/test_paper_plans.py   # every shipped plan regenerates (minutes)
-pytest -m gpu tests/gpu                 # the GPU tier: a real session on the visible GPU
-ruff check perseus tests scripts        # the lint gate
-bash scripts/utils/lint_no_narrative.sh # no development-log residue in the tree
+tools/ci.sh                                # the repo gate: comment gate, Rust build + tests, CPU tier, GPU smoke
+.venv/bin/python -m pytest                 # the Python CPU tier only (seconds to minutes, no GPU, no network)
+PERSEUS_ALL_PLANS=1 .venv/bin/python -m pytest python/tests/test_paper_plans.py   # every shipped plan regenerates
+.venv/bin/python -m pytest -m gpu python/tests/gpu -q -s                         # the GPU tier
 ```
 
-The CPU tier is what CI runs: the planner and its accuracy model, the ported baseline placers
-against the vendored upstream outputs, the plan/env contracts, the module surface, the
-client/server manifest, the generation loop over a fake session, and the no-extension import
-path. Tests that need `perseus._core` skip themselves when it is not built. Every test gets a
-private copy of `os.environ` (`tests/conftest.py`).
+`CI_GPU=0 tools/ci.sh` skips the GPU smoke. GPU jobs go through `tools/gpu.sh <log> <cmd>` (timeout, log, exit code);
+by default the runtime takes the first device in `CUDA_VISIBLE_DEVICES`.
 
-The runtime gate is `TASK=decode bash scripts/run_task.sh` (README → Reproduce a row): a run
-passes on its own `PASS` marker with `unplanned_bts=0`; the exit code alone is not evidence.
+Shared machines can opt into a guard: with `PERSEUS_GPU_GUARD=<gpu>` set, `tools/gpu.sh` pins the job to that GPU,
+waits for it to be idle under a machine-wide `flock` (`PERSEUS_GPU_LOCK`, default `/tmp/perseus-gpu<gpu>.lock`),
+kills the job if it touches another GPU, and exports `PERSEUS_CORE_LOCKED=1`; the runtime (`pc-cuda` `Device::open`)
+then refuses to select a device unless exactly that GPU is visible and the lock variable is set, so a GPU call from a
+plain shell fails instead of landing on someone else's GPU. On the lab box, `source tools/agent.sh` sets the guard
+(GPU 3) together with the thread budgets. The Rust oracle gates (`pc-check`, the `oracle_*` tests of `pc-core`)
+compare against dumps of the C++ runtime that are not in the repository; they skip or fail without them.
 
 ## Conventions
 
-- Library code never prints and never assigns into `os.environ`; log through
-  `logging.getLogger(__name__)`. Console scripts configure logging themselves.
-- Validate at the Python boundary: a wrong shape is a `ValueError` naming the expected one.
-- `perseus/_core.pyi` and `perseus/_client.pyi` are generated: run
-  `.venv/bin/python scripts/utils/gen_core_stub.py [perseus._client]` after a binding change.
-- Plans are bound to the runtime and the calibration: a change to an op's math, a config
-  value, or a default that alters the executed graph needs a recapture (`STAGE=capture`) and
-  a replan (`scripts/make_plans.sh`), and the decode gate must still read 552 bootstraps per
-  token with `unplanned_bts=0`.
-- The two option structs in `include/client_context.h` mirror `include/fideslib_wrapper.h` /
-  `include/inference.h` field for field (`tests/test_client_layout.py`).
+- Rust 2021, the toolchain pinned by `rust-toolchain.toml`; CUDA kernels are C++ templates in
+  `crates/pc-kernels/kernels/*.cuh` behind `extern "C"` launchers. No process-global state; device memory comes from
+  one arena (`pc-gpu/src/mem.rs`), frozen after setup.
+- Comments say why, describe the code as it is, and keep module headers short (`tools/comment_gate.py`).
+- Plans are bound to the runtime and the calibration: a change to an op's math, a config value, or a default that
+  alters the recorded graph needs a new recording and a replan (`scripts/make_plans.sh`); `test_paper_plans.py`
+  checks that the shipped plans still regenerate.
+- Library code logs through `logging.getLogger(__name__)`; console scripts configure logging themselves.
