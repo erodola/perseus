@@ -1422,7 +1422,8 @@ class PlannedPrefill:
             if missing:
                 raise RuntimeError(f"block {b}: inputs {missing} are not the stage's input ciphertexts {names}")
             self.in_pos[b] = [names.index(n) for n in ins]          # program input i = stage input in_pos[i]
-            metas[lab] = {n: self.in_metas[b][names.index(n)] for n in ins}
+            if b < self.n_layers:      # an extra stage (the tail) enters at the previous stage's compiled exit
+                metas[lab] = {n: self.in_metas[b][names.index(n)] for n in ins}
             live[lab] = list(r.out_names)
         self.progs = _pc.Program.compile(self.work_dir, self.plan_dir, config=self.cfg, blocks=self.labels,
                                          live_out=live, input_metas=metas)
