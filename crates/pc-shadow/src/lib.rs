@@ -18,5 +18,5 @@ pub mod tag;
 pub use error::{Error, Result};
 pub use meta::{ChainShape, CtMeta};
 pub use quirks::{Quirk, Quirks};
-pub use route::{BtsConfig, Landing, Route};
+pub use route::{BtsConfig, Finish, Landing, Route};
 pub use rules::{Consts, Operand, Prelude, PtMeta, Recipe, Shadow, ShadowConfig};

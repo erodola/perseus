@@ -75,7 +75,6 @@ def _planned(a, toks, gt, store, dims, over, cfgs_path, dcfgs_path, log=print):
     cfgs, dcfgs = load_configs(cfgs_path), load_configs(dcfgs_path)
     keys_h = set(handoff_keys(dims))
     # the twin: one fake session for the prefill and the decode models (the plans' merged runtime)
-    os.environ.setdefault("PF_CCMM_FAKE_LAND", "30")
     cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     env.export_env(a.device, chain="n32", **{"CKKS_COMPLEX": "1", **over})
     os.environ["CUDA_VISIBLE_DEVICES"] = cvd

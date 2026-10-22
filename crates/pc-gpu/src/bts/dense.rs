@@ -101,17 +101,20 @@ impl DensePlan {
         let lay = f.fides_layout();
         let real0 = if setup.real { Some(super::stc::real_stage0(&f)?) } else { None };
         // FIDESLIB_CTS_ALT_BUDGET: the alternative CtS (budget + 1 stages) for the variants of drop >= 1
+        // (pc_shadow::route::cts_alt_variant: same landing, one level higher raise)
         let alt = match setup.cts_alt_budget {
             0 => None,
-            b if b == setup.level_budget[0] + 1 => Some(cts_stc_factors(n, (n / 2) as u32, [b, setup.level_budget[1]], setup.dim1, 1.0, super::stc::scale_dec(&st))?.fides_layout()),
-            b => return Err(shape("dense plan", format!("cts_alt_budget {b}: must be the CtS level budget + 1 ({})", setup.level_budget[0] + 1))),
+            b => {
+                let (ab, _) = pc_shadow::route::cts_alt_variant(setup.level_budget, b, 1).map_err(|e| shape("dense plan", e.to_string()))?;
+                Some(cts_stc_factors(n, (n / 2) as u32, ab, setup.dim1, 1.0, super::stc::scale_dec(&st))?.fides_layout())
+            }
         };
         let mut variants = Vec::new();
         for &drop in &setup.raise_drops {
-            // an alternative-CtS variant raises one level higher and spends it on the extra CtS stage
-            let (cts_lay, rdrop) = match &alt {
-                Some(a) if drop >= 1 => (&a.cts, drop - 1),
-                _ => (&lay.cts, drop),
+            let (vb, rdrop) = pc_shadow::route::cts_alt_variant(setup.level_budget, setup.cts_alt_budget, drop).map_err(|e| shape("dense plan", e.to_string()))?;
+            let cts_lay = match &alt {
+                Some(a) if vb[0] != setup.level_budget[0] => &a.cts,
+                _ => &lay.cts,
             };
             let raise_top = chain.q.len() - 1 - d * rdrop as usize;
             // the shipped StC's decoding constant compensates q0 / sf(chain top); a raise to a lower top carries

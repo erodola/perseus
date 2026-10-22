@@ -370,9 +370,9 @@ section! {
         #[doc = "`PF_CCMM_CAP`. Default '0'. Read at impl/ccmm.py::Ccmm.__init__."]
         #[doc = "Shipped plans: none."]
         ccmm_cap: Int = "PF_CCMM_CAP", "'0'";
-        #[doc = "`PF_CCMM_FAKE_LAND`. Default '28'. Read at impl/ccmm.py::Ccmm.__init__."]
+        #[doc = "`PF_CCMM_FAKE_LAND`. Default (unset): the Shadow's `finish_landing(\"ccmm\")` (30). Read at impl/ccmm.py::fake_landing."]
         #[doc = "Shipped plans: none."]
-        ccmm_fake_land: Int = "PF_CCMM_FAKE_LAND", "'28'";
+        ccmm_fake_land: Int = "PF_CCMM_FAKE_LAND", "(unset)";
         #[doc = "`PF_CCMM_KMAX`. Default '24'. Read at impl/ccmm_attn.py::<module>."]
         #[doc = "Shipped plans: none."]
         ccmm_kmax: Float = "PF_CCMM_KMAX", "'24'";

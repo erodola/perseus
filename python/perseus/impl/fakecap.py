@@ -144,7 +144,7 @@ class CapFhe(FakeFhe):
         self.landing = parse_landings(cfg["quirks.fakecap_landings"] or "0:32,1:14,256:22,512:22")
         self.sparse_mode = cfg["bts.sparse_auto"] or 0
         self.sparse_precomp_slots = sorted({int(x) for x in (cfg["bts.sparse_bts_slots"] or []) if x})
-        self.pcmm_landing = None           # (level, deg) of a PCMM output, set by the session
+        self.pcmm_landing = None           # (level, deg) override of a finish's drop-0 landing (None: the Shadow's)
         self.stc_drop = 6 if cfg["quirks.fakecap_stc_drop"] is None else cfg["quirks.fakecap_stc_drop"]
         self.stc_entry = 46 if cfg["quirks.fakecap_stc_entry"] is None else cfg["quirks.fakecap_stc_entry"]
         self._stc_first_cfg = ((cfg["bts.stc_first"] or 0) > 0 and not cfg["bts.stc_first_staged_only"]
@@ -356,13 +356,19 @@ class CapFhe(FakeFhe):
         self.record("level_reduce", [nin], out, [lin], a, args={"target": int(level)})
 
     def record_external_bootstrap(self, a, inputs, input_levels, landing=None, desc=None):
-        """A refresh computed outside the recorded primitives (the PCMM / CCMM finishes): `desc` names it."""
+        """A refresh computed outside the recorded primitives (the PCMM / CCMM finishes): `desc` names it. It lands
+        where the Shadow says (`finish_landing`: the StC-first route under desc's raise drop, + the CCMM's StC
+        stage), what the runtime pins and its device run lands at; `landing` / the session's `pcmm_landing` override
+        the drop-0 landing (the drop still applies)."""
         self.n_bootstraps += 1
         self.total_bootstraps += 1
-        land = landing if landing is not None else self.pcmm_landing
-        drop = desc.get("raise_drop", 0) if isinstance(desc, dict) else 0
-        if land is not None and drop:      # the route's raise variant lands `drop` composite levels deeper
-            land = (int(land[0]) + self.unit * int(drop), land[1])
+        drop = int(desc.get("raise_drop", 0) or 0) if isinstance(desc, dict) else 0
+        op = desc.get("op") if isinstance(desc, dict) else None
+        base = landing if landing is not None else self.pcmm_landing
+        if base is not None:
+            land = (int(base[0]) + self.unit * drop, int(base[1]))
+        else:
+            land = self.shadow.finish_landing(op if op in ("pcmm", "ccmm") else "pcmm", drop)
         if land is not None:
             a.meta = a.meta.replace(level=int(land[0]), deg=int(land[1]))
         out = self.new_var(a)
@@ -838,10 +844,11 @@ def session_env(env_defaults, overrides, chain="n32", complex_payload=True):
     prof.apply()
 
 
-def make_session(dims, rot_steps, limit=None, bts_out=32, unit=2, complex_payload=True, pcmm_landing=(26, 2),
+def make_session(dims, rot_steps, limit=None, bts_out=32, unit=2, complex_payload=True, pcmm_landing=None,
                  config=None):
     """(fhe, inf) recording fakes at `dims` with the session's rotation keys. `config` (default: the legacy env
-    through Config.from_legacy_env) sets the reactive ceiling (bts.auto_bts_level), the routes and the landings."""
+    through Config.from_legacy_env) sets the reactive ceiling (bts.auto_bts_level), the routes and the landings
+    (`pcmm_landing`: override of the finishes' drop-0 landing; None = the Shadow's `finish_landing`)."""
     N = dims.N
     cfg = config if config is not None else session_config()
     limit = int(limit or cfg["bts.auto_bts_level"] or 46)

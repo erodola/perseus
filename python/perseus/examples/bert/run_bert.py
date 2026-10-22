@@ -187,8 +187,6 @@ def main(argv=None, results=None):
     for k, v in over.items():
         if k.startswith("PF_"):
             os.environ.setdefault(k, str(v))
-    # the CCMM's landing on the device (the calibration checks it against the twin's)
-    os.environ.setdefault("PF_CCMM_FAKE_LAND", "30")
     if a.plan and not os.environ.get("PF_PCMM_CALIB_IN"):
         cal = os.path.join(a.plan, "pcmm_calib.json")
         if os.path.exists(cal):

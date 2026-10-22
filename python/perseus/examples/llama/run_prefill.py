@@ -254,9 +254,8 @@ def main(argv=None, results=None):
     t0 = time.time()
     pruned = None
     if planned:
-        # the CPU twin: the fake session under the plan's runtime; the CCMM lands where the device's lands (the
-        # calibration probe checks it)
-        os.environ.setdefault("PF_CCMM_FAKE_LAND", "30")
+        # the CPU twin: the fake session under the plan's runtime; its PCMM / CCMM finishes land where the Shadow
+        # says the device's do (`finish_landing`; the CCMM calibration probe checks it)
         from perseus.impl import fakecap
         cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         env.export_env(a.device, chain="n32", **{"CKKS_COMPLEX": "1", **over})

@@ -47,6 +47,8 @@ pub(crate) fn shadow_config_n64(c: &Config) -> PyResult<ShadowConfig> {
         cf_window: (7, 20),
         raise_drops: vec![1, 2, 3],
         k_max: 8,
+        // the n64 StC-first landing (landings[0])
+        staged: l(14),
     };
     Ok(ShadowConfig { chain: ChainShape { n_q: 28, unit: 1 }, bts, quirks: Quirks::none() })
 }

@@ -34,6 +34,19 @@ def raise_of(site: str) -> int:
     return 0
 
 
+def fake_landing(fhe=None) -> int:
+    """The level a fake records a CCMM output at (raise drop 0): PF_CCMM_FAKE_LAND when set, else the Shadow's
+    (`Shadow.finish_landing("ccmm")`: SinCBoot's StC stage past the StC-first landing, where the device lands)."""
+    env = os.environ.get("PF_CCMM_FAKE_LAND", "")
+    if env:
+        return int(env)
+    sh = getattr(fhe, "shadow", None)
+    if sh is None:
+        from perseus import _pc
+        sh = _pc.Shadow(_pc.Config(), "runtime")
+    return int(sh.finish_landing("ccmm", 0)[0])
+
+
 def _auto_poly(s, h):
     n = len(s)
     t = np.arange(n) * h % (2 * n)
@@ -127,7 +140,10 @@ class Ccmm:
         self.land = int(os.environ.get("PF_CCMM_LAND", "0")) or None
         if self.bts is None:
             self.cap = self.cap or _N32_CAP
-            self.land = self.land or int(os.environ.get("PF_CCMM_FAKE_LAND", "28"))
+            # an explicit landing (PF_CCMM_LAND / PF_CCMM_FAKE_LAND) overrides the Shadow's in the capture too
+            fake_env = os.environ.get("PF_CCMM_FAKE_LAND", "")
+            self.land_override = self.land or (int(fake_env) if fake_env else None)
+            self.land = self.land or fake_landing(self.fhe)
         self.c_unit = None
         self._carriers = None
         self.w = w_theory()
@@ -290,8 +306,9 @@ class Ccmm:
                     "merge": bool(merge), "prepared_b": prep is not None, "shift": int(shift), "amax": float(amax),
                     "bmax": float(bmax), "out_scale": float(out_scale), "raise_drop": raise_of(site)}
             if self.bts is None:
-                # a raised site's drop rides in desc: fakecap lands it `raise_drop` composite levels deeper
-                self.fhe.record_external_bootstrap(y, names, levels, landing=(self.land, 1), desc=desc)
+                # the landing (and the raise drop desc carries) is the Shadow's `finish_landing`, unless overridden
+                lo = getattr(self, "land_override", None)
+                self.fhe.record_external_bootstrap(y, names, levels, landing=None if lo is None else (lo, 1), desc=desc)
             else:
                 self.fhe.record_external_bootstrap(y, names, levels, desc=desc)
         self.calls += 1
