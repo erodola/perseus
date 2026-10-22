@@ -1,0 +1,66 @@
+From 33c4ac894344de21eda37d57b1776f0bd3a53a2a Mon Sep 17 00:00:00 2001
+From: perseus build <build@perseus>
+Date: Thu, 22 Oct 2026 13:04:45 +0200
+Subject: [PATCH] Serialize the KSK a seed (EvalKeyRelin version 2)
+
+---
+ src/pke/include/key/evalkeyrelin.h | 8 ++++++--
+ src/pke/include/key/key-ser.h      | 2 ++
+ 2 files changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/src/pke/include/key/evalkeyrelin.h b/src/pke/include/key/evalkeyrelin.h
+index f2db600a..a540f44e 100644
+--- a/src/pke/include/key/evalkeyrelin.h
++++ b/src/pke/include/key/evalkeyrelin.h
+@@ -60,7 +60,8 @@ private:
+     std::vector<Element> m_BKey;
+     // KSKA seed expansion (FIDESlib Lever 1b-ii): the 256-bit ChaCha12 seed the `a` vector
+     // was expanded from (utils/kskseedexpand.h). Empty = `a` was drawn conventionally.
+-    // In-process transport to the GPU import only; not serialized.
++    // Serialized since version 2, so a server that loads a key bundle regenerates `a` on the GPU as the key
++    // owner's process does (FIDESLIB_KSK_REGEN), instead of storing it.
+     std::vector<uint32_t> m_ASeed;
+ 
+ public:
+@@ -205,6 +206,7 @@ public:
+         ar(::cereal::base_class<EvalKeyImpl<Element>>(this));
+         ar(::cereal::make_nvp("ak", m_AKey));
+         ar(::cereal::make_nvp("bk", m_BKey));
++        ar(::cereal::make_nvp("as", m_ASeed));
+     }
+ 
+     template <class Archive>
+@@ -216,6 +218,8 @@ public:
+         ar(::cereal::base_class<EvalKeyImpl<Element>>(this));
+         ar(::cereal::make_nvp("ak", m_AKey));
+         ar(::cereal::make_nvp("bk", m_BKey));
++        if (version >= 2)
++            ar(::cereal::make_nvp("as", m_ASeed));
+     }
+ 
+     std::string SerializedObjectName() const override {
+@@ -223,7 +227,7 @@ public:
+     }
+ 
+     static uint32_t SerializedVersion() {
+-        return 1;
++        return 2;
+     }
+ };
+ 
+diff --git a/src/pke/include/key/key-ser.h b/src/pke/include/key/key-ser.h
+index d02cd3e9..a843068d 100644
+--- a/src/pke/include/key/key-ser.h
++++ b/src/pke/include/key/key-ser.h
+@@ -41,6 +41,8 @@
+ 
+ CEREAL_REGISTER_TYPE(lbcrypto::EvalKeyImpl<lbcrypto::DCRTPoly>);
+ CEREAL_REGISTER_TYPE(lbcrypto::EvalKeyRelinImpl<lbcrypto::DCRTPoly>);
++CEREAL_CLASS_VERSION(lbcrypto::EvalKeyRelinImpl<lbcrypto::DCRTPoly>,
++                     lbcrypto::EvalKeyRelinImpl<lbcrypto::DCRTPoly>::SerializedVersion());
+ 
+ CEREAL_REGISTER_POLYMORPHIC_RELATION(lbcrypto::EvalKeyImpl<lbcrypto::DCRTPoly>,
+                                      lbcrypto::EvalKeyRelinImpl<lbcrypto::DCRTPoly>);
+-- 
+2.43.0
+
