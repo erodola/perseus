@@ -938,6 +938,9 @@ class StreamedPlannedRun:
             extra = tuple(sorted(self.routes_for(pos))) if self.routes_for else ()
             key = (tuple((_sig(rec[b]), tuple(rec[b].metas.get(x) for x in rec[b].inputs())) for b in sorted(rec)), extra)
             if key not in keyidx:
+                if self.slim:          # a new structure: the classes before it take no more members (else reloaded)
+                    for k0, c0 in enumerate(self.classes):
+                        self._close_class(k0, c0)
                 keyidx[key] = len(self.classes)
                 self.classes.append({"ref": t, "members": [], "routes": sorted(set(self.base_routes) | set(extra)),
                                      "diffs": {}})
@@ -945,6 +948,8 @@ class StreamedPlannedRun:
             c["members"].append(t)
             self.class_of[t] = keyidx[key]
             ref = self.records[c["ref"]]
+            if c.get("closed"):
+                self._reload_ref(keyidx[key], c)
             c["diffs"][t] = {}
             for b in ref:
                 sc, kk, z = diff_block(ref[b], rec[b])
@@ -952,6 +957,9 @@ class StreamedPlannedRun:
                     raise RuntimeError(f"token {t} block {b}: an empty-cache push in a streamed run (the caches start "
                                        f"from the prefix)")
                 c["diffs"][t][b] = (sc, kk)
+            if c.get("closed"):
+                for r in ref.values():
+                    r.nodes = None
             if self.slim and t != c["ref"] and t != 0:
                 for r in rec.values():
                     r.nodes, r.objs, r.metas, r.final, r._ins = None, None, None, None, None
@@ -1038,6 +1046,32 @@ class StreamedPlannedRun:
             out.append((nm, float(np.abs(got - want).max()) / den, den))
         return out
 
+    def _close_class(self, k, c):
+        """`slim`: class k's reference stream to disk (its graph dir, which the compile reads anyway) and out of memory,
+        keeping what the compile takes from it: inputs, K/V entries, their metadata, the scalar / rotation steps. A
+        512-position run opens a class every few positions, and each reference stream holds GBs (token 0 stays whole:
+        setup reads its K/V entry states)."""
+        if c.get("closed") or c["ref"] == 0:
+            return
+        c["graphs"] = self._write_graphs(k, c)
+        c["ref_info"] = {}
+        for b, r in self.records[c["ref"]].items():
+            ins = r.inputs()
+            kv_in = [(i, self._ukey(b, r.kv_pre[id(r.objs[x])])) for i, x in enumerate(ins)
+                     if x in r.objs and id(r.objs[x]) in r.kv_pre]
+            steps = {nd["output"]: (("r", int(nd["inputs"][1][4:-1])) if nd["op_type"] == "rotate"
+                                    else ("s", nd["args"]["scalar"]))
+                     for nd in r.nodes if nd["op_type"] == "rotate" or nd.get("args", {}).get("scalar") is not None}
+            c["ref_info"][b] = (kv_in, {ins[i]: r.metas[ins[i]] for i, _ in kv_in}, steps)
+            r.nodes, r.objs, r.metas = None, None, None
+        c["closed"] = True
+
+    def _reload_ref(self, k, c):
+        """A closed class's reference stream back from its graph dir (a later token of the same structure)."""
+        for b, r in self.records[c["ref"]].items():
+            with open(os.path.join(c["graphs"], f"block_{self.labels[b].split('_')[1]}", "graph.json")) as f:
+                r.nodes = json.load(f)["nodes"]
+
     def _write_graphs(self, k, c):
         """Class k's reference token as a graph dir (block_<label>/graph.json); returns the dir."""
         wd = os.path.join(self.work_dir, f"c{k}")
@@ -1051,17 +1085,21 @@ class StreamedPlannedRun:
     def _compile_class(self, k, c):
         from perseus import _pc
         ref = self.records[c["ref"]]
-        wd = self._write_graphs(k, c)
+        closed = c.get("closed", False)
+        wd = c["graphs"] if closed else self._write_graphs(k, c)
         live, metas, io = {}, {}, {}
         for b, r in ref.items():
             lab = self.labels[b]
             ins = r.inputs()
-            kv_in = [(i, self._ukey(b, r.kv_pre[id(r.objs[x])])) for i, x in enumerate(ins) if x in r.objs and id(r.objs[x]) in r.kv_pre]
+            if closed:
+                kv_in = c["ref_info"][b][0]
+            else:
+                kv_in = [(i, self._ukey(b, r.kv_pre[id(r.objs[x])])) for i, x in enumerate(ins) if x in r.objs and id(r.objs[x]) in r.kv_pre]
             live[lab] = list(r.out_names) + list(r.kv_post.values())
             if self.tap and c["ref"] == self.tap[0] and b == self.tap[1]:
                 self.taps = self._pick_taps(r.nodes, set(live[lab]))
                 live[lab] += self.taps
-            metas[lab] = {ins[i]: r.metas[ins[i]] for i, _ in kv_in}
+            metas[lab] = c["ref_info"][b][1] if closed else {ins[i]: r.metas[ins[i]] for i, _ in kv_in}
             io[b] = kv_in
         progs = _pc.Program.compile(wd, str(self.plan_dir), config=self.cfg, blocks=[self.labels[b] for b in ref],
                                     live_out=live, input_metas=metas, routes_built=list(c["routes"]),
@@ -1085,9 +1123,14 @@ class StreamedPlannedRun:
         c["dyn"] = dyn
         c["ref_dyn"] = {}
         for b, r in ref.items():
-            byname = {nd["output"]: nd for nd in r.nodes}
-            c["ref_dyn"][b] = {nm: (("r", int(byname[nm]["inputs"][1][4:-1])) if byname[nm]["op_type"] == "rotate"
-                                    else ("s", float(byname[nm]["args"]["scalar"]))) for nm in dyn[b]}
+            if closed:
+                steps = c["ref_info"][b][2]
+                c["ref_dyn"][b] = {nm: (steps[nm][0], float(steps[nm][1]) if steps[nm][0] == "s" else steps[nm][1])
+                                   for nm in dyn[b]}
+            else:
+                byname = {nd["output"]: nd for nd in r.nodes}
+                c["ref_dyn"][b] = {nm: (("r", int(byname[nm]["inputs"][1][4:-1])) if byname[nm]["op_type"] == "rotate"
+                                        else ("s", float(byname[nm]["args"]["scalar"]))) for nm in dyn[b]}
             self.dyn_rot = sorted(set(self.dyn_rot) | {v for kind, v in c["ref_dyn"][b].values() if kind == "r"})
         ops = sum(p.n_ops for p in c["progs"].values())
         sums = sum(len(p.coeff_sums) for p in c["progs"].values())

@@ -79,7 +79,7 @@ def streamed_run(a, twin, lw, plan, *, log=print):
             "expanded": d.E_real, "seqLen": 1024}
     run = StreamedPlannedRun(rec, plan, cfg, labels, keys, work_dir=work, streams=streams, stream_rows=lw.coeff_rows,
                              prefix=prefix, input_vec=lw.embedding, routes_for=routes_for, stc_cache=a.stc_cache,
-                             size=size, log=log)
+                             size=size, slim=not (a.debug_blocks or a.tap_block is not None), log=log)
     run.debug = a.debug_blocks or a.tap_block is not None
     run.tail = n == n_total
     if a.tap_block is not None:
