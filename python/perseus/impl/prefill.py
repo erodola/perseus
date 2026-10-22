@@ -1422,7 +1422,9 @@ class PlannedPrefill:
             if missing:
                 raise RuntimeError(f"block {b}: inputs {missing} are not the stage's input ciphertexts {names}")
             self.in_pos[b] = [names.index(n) for n in ins]          # program input i = stage input in_pos[i]
-            if b < self.n_layers:      # an extra stage (the tail) enters at the previous stage's compiled exit
+            # the twin knows the entries up to the first extra stage; past it (GPT-2's CutMax after the tail, which the
+            # twin ran unplanned) a stage enters at the previous stage's compiled exit
+            if b <= self.n_layers:
                 metas[lab] = {n: self.in_metas[b][names.index(n)] for n in ins}
             live[lab] = list(r.out_names)
         self.progs = _pc.Program.compile(self.work_dir, self.plan_dir, config=self.cfg, blocks=self.labels,
