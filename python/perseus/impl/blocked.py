@@ -164,6 +164,50 @@ def decrypt_blocked(rt, Xs, ch: Chunks, B: Blocks, d_real: int):
     return rows[:, :d_real]
 
 
+def token_of(rt, Xs, ch: Chunks, B: Blocks, p: int):
+    """Position p of Xs[g][k] as one decode-layout token row (feature i at slot i d.t, real): its lane and axis are
+    masked out and aligned, then each block's stride shrinks from B.t to d.t by one masked rotation per bit of the
+    feature index (bit j moves its features (B.t - d.t) 2^j slots down), and block k is moved to feature k nch."""
+    ops, d = rt.ops, B.d
+    c = p // ch.t
+    g, half, lane = c // 2, c % 2, p - c * ch.t
+    out = None
+    for k in range(B.K):
+        n = B.real(k)
+        if n == 0:
+            continue
+        r = np.arange(n)
+        pos = r * B.t
+
+        def at(slots):
+            v = np.zeros(d.N)
+            v[slots] = 1.0
+            return v
+        # w + conj(w) is the axis of chunk c: Re(x) for w = x/2, Im(x) for w = -i x/2
+        w = rt.mult_mask(Xs[g][k], ("tok_of", B.nch, k, "sel", lane, half),
+                         lambda: (-0.5 if half else 0.5) * at(pos + lane))
+        w = ops.rotate(ops.mult_i(w) if half else w, lane)
+        for j in range(max(1, int(n - 1).bit_length())):
+            moved = (r >> j) & 1 == 1
+            step = (B.t - d.t) << j
+            keep = rt.mult_mask(w, ("tok_of", B.nch, k, "bit", j, 0), lambda: at(pos[~moved]))
+            move = rt.mult_mask(w, ("tok_of", B.nch, k, "bit", j, 1), lambda: at(pos[moved]))
+            w = ops.add(keep, ops.rotate(move, step))
+            pos = np.where(moved, pos - step, pos)
+        if k:
+            w = ops.rotate(w, (-k * B.nch * d.t) % d.N)
+        out = w if out is None else ops.add(out, w)
+    return ops.add(out, ops.conjugate(out))
+
+
+def token_of_rot_steps(B: Blocks, lane: int) -> set[int]:
+    """The rotation steps token_of takes for a position on `lane`."""
+    d = B.d
+    steps = {lane} | {-k * B.nch * d.t for k in range(1, B.K)}
+    steps |= {(B.t - d.t) << j for j in range(max(1, int(B.nch - 1).bit_length()))}
+    return {s % d.N for s in steps if s % d.N}
+
+
 def name_blocked(inf, Xs):
     """Name every input after the first (anon numbering differs between a capture and its planned run)."""
     if hasattr(inf, "name_ct"):

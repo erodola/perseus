@@ -20,6 +20,7 @@ from perseus.impl import blocked as BL
 from perseus.impl.prefill import evict_block_masks
 from perseus.impl.pcmm import PcmmLinear, band_shift, run as pcmm_run
 
+from .head import final_ln, lm_head
 from .model import Gpt2Model, dist_report
 from . import weights as W
 
@@ -305,7 +306,35 @@ class Gpt2Prefill(Gpt2Model):
                 evict_block_masks(self.rt)
                 return Xs
             return compute
-        return [(f"blk{b}", f"b{b}.", block_fn(b)) for b in range(self.n_layers)]
+        stages = [(f"blk{b}", f"b{b}.", block_fn(b)) for b in range(self.n_layers)]
+        return stages + self.tail_stages(ch) if getattr(self, "with_tail", False) else stages
+
+    def tail_stages(self, ch: Chunks, p=None):
+        """Prefill-128's encrypted tail as two more stages (with_tail): stage n_layers moves prompt position p (default
+        the last) out of the blocked layout into the decode's (blocked.token_of), then ln_f and the LM head as the
+        decode's tail runs them; stage n_layers + 1 is the decode's CutMax on those tiles."""
+        p = ch.T - 1 if p is None else p
+        B, n = self.blocks, self.n_layers
+
+        def tail(Xs):
+            cap = self.enter_stage(n, p)
+            with self.rt.step("tail"):
+                x = BL.token_of(self.rt, [Xs[g * B.K:(g + 1) * B.K] for g in range(len(Xs) // B.K)], ch, B, p)
+                h = final_ln(self.rt, x, self.cfgs.ln_f, self.lnf_params(), p, self.lmhead_cap)
+                tiles = lm_head(self.rt, h, self.lm_tiles_paired())
+            self.exit_stage(n, cap)
+            self.tail_tiles = tiles               # the logits, read before CutMax (the quality check)
+            return tiles
+
+        return [("tail", None, tail), ("cutmax", None, lambda tiles: self.argmax_encrypted(tiles, p))]
+
+    def lm_tiles_paired(self):
+        """The decode's paired complex LM-head tile (cachemir_complex) whatever this model's packing: the tail's
+        CutMax then runs on one tile, as the decode's does."""
+        if getattr(self, "_lm_paired", None) is None:
+            Wlm = W.lm_head_matrix(self.store, self.cfgs.ln_f, self.rt.dims, self.vocab, self.fold[2])
+            self._lm_paired = W.lm_head_tiles(Wlm, self.rt.dims, self.vocab, self.W_tile, paired=True)
+        return self._lm_paired
 
     def preload_prefill(self):
         """Build every block's prefill weights before the clock."""

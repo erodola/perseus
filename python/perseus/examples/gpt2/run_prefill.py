@@ -99,7 +99,7 @@ def _planned(a, model, store, rows, gt, ref, results=None):
           f"maxKL={out.get('maxKL', float('nan')):.4g} free={frees}GB (setup {free0:.2f}) walls={[round(w, 2) for w in walls]} "
           f"warmup={warm}",
           flush=True)
-    ok = model.n_layers != 12 or (out["top1"] >= 0.9 * a.tokens and out["medianKL"] < 0.1)
+    ok = model.n_layers != 12 or (out["top1"] >= 0.9 * (1 if a.tail else a.tokens) and out["medianKL"] < 0.1)
     print("[prefill] PASS" if ok else "[prefill] FAIL")
     if results is not None:
         results({**out, "walls": walls, "free_gb": frees, "bts": n_bts + n_fin[1], "pcmm_calls": st.get("calls")})
@@ -135,6 +135,8 @@ def main(argv=None, results=None):
     ap.add_argument("--graphs", action="store_true", help="planned: capture each block as CUDA graphs (exec.use_graphs; "
                                                           "a one-shot forward only pays the capture)")
     ap.add_argument("--check-meta", action="store_true", help="planned: compare every step's metadata with the compile")
+    ap.add_argument("--tail", action="store_true", help="the last position's encrypted tail as two more stages (ln_f + "
+                                                        "LM head, then CutMax), gated on its decrypted logits")
     ap.add_argument("--repeat", type=int, default=1, help="planned: run the forward this many times (wall = median)")
     ap.add_argument("--work-dir", default=None, help="planned: where the recorded stream is written")
     ap.add_argument("--compile-only", action="store_true", help="planned: record + compile on the CPU, then stop")
@@ -209,6 +211,7 @@ def main(argv=None, results=None):
     store = weights.RawStore(a.weights)
     cfgs = config.load_configs(a.configs)
     model = Gpt2Prefill(inf, store, cfgs, core=core, n_layers=a.layers, profile=a.profile)
+    model.with_tail = a.tail
     d = model.rt.dims
     if a.capture:
         model.set_capture(a.capture)
@@ -275,9 +278,16 @@ def main(argv=None, results=None):
     t0 = time.time()
     Xs, ch, rec = model.prefill(rows, on_block=on_block)
     wall = time.time() - t0
-    h = model.hidden(Xs, ch)
     out = {"wall": wall, "bts": int(inf.fhe.total_bootstraps)}
-    if model.n_layers == 12:
+    if a.tail:
+        from .head import decode_logits, decode_z
+        lg = decode_logits(model.rt, model.tail_tiles, model.vocab, model.W_tile)
+        rows_, s = report(lg[None, :], gt[-1:])
+        out.update(s)
+        print(f"[prefill] tail: position {a.tokens - 1} KL {rows_[0]['kl']:.3g} top1 {int(np.argmax(lg))} "
+              f"CutMax {int(np.argmax(decode_z(model.rt, Xs, model.vocab, model.W_tile)))}", flush=True)
+    elif model.n_layers == 12:
+        h = model.hidden(Xs, ch)
         rows_, s = report(plain_logits(store, h), gt)
         out.update(s)
         print("[prefill] per-position KL " + " ".join(f"{r['kl']:.3g}" for r in rows_), flush=True)
@@ -297,7 +307,7 @@ def main(argv=None, results=None):
     if a.profile and hasattr(model.rt.ops, "report"):
         print("[prefill] time split:\n" + model.rt.ops.report())
         print("[prefill] per step:\n" + model.rt.ops.report_steps(1))
-    ok = model.n_layers != 12 or (out["top1"] >= 0.9 * a.tokens and out["medianKL"] < 0.1)
+    ok = model.n_layers != 12 or (out["top1"] >= 0.9 * (1 if a.tail else a.tokens) and out["medianKL"] < 0.1)
     print("[prefill] PASS" if ok else "[prefill] FAIL")
     model.close()
     sess.close()

@@ -1351,6 +1351,7 @@ class PlannedPrefill:
         self.pcmm_cf, self.check_meta, self.log = pcmm_cf, check_meta, log
         self.schedule = schedule
         self.n_layers = model.n_layers
+        self.n_stages = self.n_layers               # record sets it from the model's stages
         self.labels = [f"block_{b}" for b in range(self.n_layers)]
 
     # ── setup (CPU) ──
@@ -1394,6 +1395,8 @@ class PlannedPrefill:
             if i == 0:
                 self.in_vals = vals
         self.recs = rec.blocks
+        self.n_stages = len(self.recs)             # the blocks, plus the model's extra stages (GPT-2: with_tail)
+        self.labels = [f"block_{b}" for b in range(self.n_stages)]
         self.record_s = time.time() - t0
         return self.recs
 
@@ -1407,7 +1410,7 @@ class PlannedPrefill:
         t0 = time.time()
         os.makedirs(self.work_dir, exist_ok=True)
         live, metas, self.in_pos = {}, {}, {}
-        for b in range(self.n_layers):
+        for b in range(self.n_stages):
             r, lab = self.recs[b], self.labels[b]
             d = os.path.join(self.work_dir, f"block_{b}")
             os.makedirs(d, exist_ok=True)
@@ -1425,7 +1428,7 @@ class PlannedPrefill:
                                          live_out=live, input_metas=metas)
         # registers: every block's outputs (the stage order), kept to the end (the per-block check reads them)
         self.reg, n = {}, 0
-        for b in range(self.n_layers):
+        for b in range(self.n_stages):
             p = self.progs[self.labels[b]]
             self.reg[b] = []
             for o in self.recs[b].out_names:
@@ -1445,17 +1448,13 @@ class PlannedPrefill:
                     out[lin.name] = lin
         return out
 
-    def setup(self, rows):
-        """`prepare` (CPU) + the planned Session: routes, keys (+ the PCMM keys, then the secret is dropped), slab,
-        registers, the PCMM service with every linear resident; every block bound, its plaintexts staged."""
-        import time
-        from perseus import _pc
-        if not hasattr(self, "progs"):
-            self.prepare(rows)
-        t0 = time.time()
+    def session_kwargs(self):
+        """The planned Session's arguments after (config, keys), which `Session.key_manifest` and `from_bundle` take
+        too; records the plaintext aliases `setup` binds."""
+        import hashlib
+        from .driver import register_levels
         progs = [self.progs[lab] for lab in self.labels]
         # plaintexts by value: the blocks' masks repeat (one resident slot per distinct (values, level))
-        import hashlib
         self.alias, uniq = {}, {}
         for b, p in enumerate(progs):
             r, lab = self.recs[b], self.labels[b]
@@ -1466,21 +1465,34 @@ class PlannedPrefill:
                 store = f"{lab}/{nm}" if (form == "at_use" or nm.startswith("pt_")) else nm
                 self.alias.setdefault(lab, {})[store] = key
                 uniq.setdefault((key, lv), v)
-        n_pts = len(uniq)
+        self.uniq = uniq
         # a compact plaintext slot holds the rows of its level (n32: 54 - level Q primes); the deepest plaintext sizes it
         pt_rows = self.pt_rows and max(self.pt_rows, 54 - min(lv for _k, lv in uniq))
-        lins = self.linears()
         t = self.model.rt.dims.t
         specs = [(lin.name, int(lin.t or t), int(lin.n_in), int(lin.n_out), int(lin.Wd.shape[0]), float(lin.w_scale),
-                  int(lin.shift)) for lin in lins.values()]
+                  int(lin.shift)) for lin in self.linears().values()]
+        reg_levels = register_levels(self.n_regs, [(progs[b], j, r) for b in range(self.n_stages) for j, r in self.reg[b]])
+        return dict(pool=self.pool, pt_slots=len(uniq) + 8, programs=progs, regs=self.n_regs, pt_rows=pt_rows,
+                    stc_cache=self.stc_cache, pcmm=specs or None, pcmm_cf=self.pcmm_cf, check_meta=self.check_meta,
+                    reg_levels=reg_levels, pt_levels=[lv for _k, lv in uniq])
+
+    def open_session(self, kw):
+        from perseus import _pc
+        return _pc.Session(self.cfg, self.keys, **kw)
+
+    def setup(self, rows):
+        """`prepare` (CPU) + the planned Session: routes, keys (+ the PCMM keys, then the secret is dropped), slab,
+        registers, the PCMM service with every linear resident; every block bound, its plaintexts staged."""
+        import time
+        if not hasattr(self, "progs"):
+            self.prepare(rows)
+        t0 = time.time()
+        kw = self.session_kwargs()
+        progs, uniq, lins, specs = kw["programs"], self.uniq, self.linears(), kw["pcmm"] or []
+        n_pts = len(uniq)
         from .driver import plan_rot_scope
         self.rot_keys = plan_rot_scope(self.plan_dir, progs)
-        from .driver import register_levels
-        reg_levels = register_levels(self.n_regs, [(progs[b], j, r) for b in range(self.n_layers) for j, r in self.reg[b]])
-        self.sess = _pc.Session(self.cfg, self.keys, pool=self.pool, pt_slots=n_pts + 8, programs=progs,
-                                regs=self.n_regs, pt_rows=pt_rows, stc_cache=self.stc_cache,
-                                pcmm=specs or None, pcmm_cf=self.pcmm_cf, check_meta=self.check_meta,
-                                reg_levels=reg_levels, pt_levels=[lv for _k, lv in uniq])
+        self.sess = self.open_session(kw)
         self.store = self.sess.pt_store
         for b, p in enumerate(progs):
             p.bind(self.sess, self.store)
@@ -1522,14 +1534,15 @@ class PlannedPrefill:
         return pack(rows)
 
     # ── the device run ──
-    def run(self, on_block=None, vals=None):
+    def run(self, on_block=None, vals=None, x0=None):
         """The forward on the device (asynchronous until the caller decrypts); `on_block(b, info)` after each block's
-        issue; `vals`: block 0's input slot vectors (default: the recorded prompt's; `input_values` for another).
-        Returns the last block's output registers."""
-        vals = self.in_vals if vals is None else vals
-        x0 = [self.fhe.encrypt(v, lv, dg) for v, (lv, dg) in zip(vals, self.in_metas[0])]
+        issue; `vals`: block 0's input slot vectors (default: the recorded prompt's; `input_values` for another);
+        `x0`: block 0's inputs already encrypted (a client's) instead. Returns the last stage's output registers."""
+        if x0 is None:
+            vals = self.in_vals if vals is None else vals
+            x0 = [self.fhe.encrypt(v, lv, dg) for v, (lv, dg) in zip(vals, self.in_metas[0])]
         info = []
-        for b in range(self.n_layers):
+        for b in range(self.n_stages):
             p = self.progs[self.labels[b]]
             if b == 0:
                 ins = [x0[j] for j in self.in_pos[0]]
@@ -1539,7 +1552,7 @@ class PlannedPrefill:
             info.append(p.run(ins, list(self.reg[b])))
             if on_block is not None:
                 on_block(b, info[-1])
-        return [reg for _j, reg in self.reg[self.n_layers - 1]]
+        return [reg for _j, reg in self.reg[self.n_stages - 1]]
 
     def ct(self, reg):
         from perseus import _pc
