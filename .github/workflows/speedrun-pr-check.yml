@@ -1,12 +1,12 @@
 # Every PR is checked before a maintainer is notified: speedrun/harness/check_pr.py (the speedrun's harness, rules and
 # records left alone; for an entry, its record folder, submission.json, the declared CKKS parameters at 128-bit security
 # and the client's code). It runs the base branch's checker and reads the PR through git only, so no submitted code runs
-# here. A plain PR that passes gets no comment. An entry that passes is labelled `checked` and its review requested; a
-# failure is labelled `check-failed` and explained in a comment.
+# here; the PR's description reaches it as a file. A plain PR that passes gets no comment. An entry that passes is
+# labelled `checked` and its review requested; a failure is labelled `check-failed` and explained in a comment.
 name: Speedrun PR check
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, edited]
 permissions:
   contents: read
   pull-requests: write
@@ -24,9 +24,11 @@ jobs:
         id: check
         env:
           AUTHOR: ${{ github.event.pull_request.user.login }}
+          BODY: ${{ github.event.pull_request.body }}
         run: |
+          printf '%s' "$BODY" > body.md
           if python3 speedrun/harness/check_pr.py --base "${{ github.event.pull_request.base.sha }}" --head pr-head \
-               --author "$AUTHOR" > report.md
+               --author "$AUTHOR" --body body.md > report.md
           then echo "ok=1" >> "$GITHUB_OUTPUT"; else echo "ok=0" >> "$GITHUB_OUTPUT"; fi
           cat report.md
       - name: Report and notify

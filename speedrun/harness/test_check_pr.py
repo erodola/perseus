@@ -50,9 +50,9 @@ class CheckPrTest(unittest.TestCase):
         self.write(f"{folder}/README.md", readme)
         self.write(f"{folder}/submission.json", json.dumps(sub))
 
-    def run_check(self, author=""):
+    def run_check(self, author="", body="I have read the Perseus CLA and agree to it for my contributions."):
         self.commit()
-        return check_pr.check(self.base, "HEAD", author)
+        return check_pr.check(self.base, "HEAD", author, body)
 
     def test_an_entry_with_its_code_passes_and_names_its_commit(self):
         self.record()
@@ -63,6 +63,13 @@ class CheckPrTest(unittest.TestCase):
         self.assertIn(f"time commit `{check_pr.git('rev-parse', 'HEAD').strip()}`", notes[0])
         self.assertTrue(any("Lattice Estimator" in n for n in notes))
         self.assertTrue(any("of record `2026-10-22_PerseusCore`, no new estimate" in n for n in notes))
+
+    def test_an_entry_must_accept_the_cla(self):
+        self.record()
+        self.assertTrue(any("CLA" in e for e in self.run_check(body="Faster GELU.")[0]))
+        errors, notes, _ = check_pr.check(self.base, "HEAD")          # run locally: no description, a reminder
+        self.assertEqual(errors, [])
+        self.assertTrue(any("CLA" in n for n in notes))
 
     def test_new_keys_are_flagged_for_the_estimator(self):
         self.record({**GOOD, "ckks": {**GOOD["ckks"], "log_qp": 1600}})

@@ -176,8 +176,9 @@ record's server is [`speedrun/server.py`](https://github.com/gladia-research-gro
      nothing else. That commit is built as both your server and your client. It runs as
      `bash speedrun/runner/entry.sh <name> ...`.
 
-   Leave the rest of this folder (`harness/`, `runner/`, `prompts/`, the other records, this README),
-   `.github/` and the licence as they are.
+   In the PR's description, accept Perseus's [CLA](../CLA.md): "I have read the Perseus CLA and agree to it for my
+   contributions." Leave the rest of this folder (`harness/`, `runner/`, `prompts/`, the other records, this
+   README), `.github/`, the licence and the CLA as they are.
 4. **A check runs on the PR**: that it leaves those alone, the record folder, the fields, the main key at
    128-bit security on the HE standard, and the client's code: a PR that changes `crates/pc-client/` or
    `python/perseus/client/` must bring its own client. When the check passes, a maintainer is asked to

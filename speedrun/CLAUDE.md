@@ -77,5 +77,6 @@ You need Linux, `bwrap`, a systemd user session, a GPU with 48 GB or more, and `
    (`crates/pc-client/`, `python/perseus/client/`).
 4. Before opening the PR, run the same check the PR gets:
    `python3 speedrun/harness/check_pr.py --base upstream/main --head HEAD`.
-5. Open the PR against `gladia-research-group/perseus` `main`. The maintainers time the commit the check names, on
+5. Open the PR against `gladia-research-group/perseus` `main`, with "I have read the Perseus CLA and agree to it for
+   my contributions." in its description (`CLA.md`; only the entrant can agree to it). The maintainers time the commit the check names, on
    the reference GPU and the hidden prompts, and post the results.

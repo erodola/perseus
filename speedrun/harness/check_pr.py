@@ -1,6 +1,6 @@
 """The check every Perseus PR gets before a maintainer is asked to review it (.github/workflows/speedrun-pr-check.yml).
 
-    python3 speedrun/harness/check_pr.py --base BASE_SHA --head HEAD_REF [--author LOGIN]
+    python3 speedrun/harness/check_pr.py --base BASE_SHA --head HEAD_REF [--author LOGIN] [--body FILE]
 
 It reads the PR through git only (`git diff`, `git show`), never running its code. Every PR leaves the speedrun's
 harness, rules and records and the repository's automation alone (PROTECTED), unless a maintainer wrote it. A PR that
@@ -11,8 +11,9 @@ that changes the client's code brings its own client, pinned to the commit befor
 and the client: the maintainers build that commit, as the server and the client. The report names the commit they
 time. submission.json must have the template's fields, and its CKKS parameters must reach 128-bit security on the HE
 standard's table (ternary secret, classic estimates): log QP within the bound of the ring dimension. The report says
-whether its keys are an existing record's or need the maintainers' Lattice Estimator run. Prints a Markdown report
-(nothing for a clean PR that is not an entry); exit 0 = pass. Standard library only.
+whether its keys are an existing record's or need the maintainers' Lattice Estimator run. An entry's description
+(`--body`) accepts the CLA (CLA.md). Prints a Markdown report (nothing for a clean PR that is not an entry); exit
+0 = pass. Standard library only.
 """
 from __future__ import annotations
 
@@ -28,9 +29,10 @@ FOLDER = re.compile(r"^speedrun/records/(\d{4}-\d{2}-\d{2}_[A-Za-z0-9][A-Za-z0-9
 CLIENT = re.compile(r"^speedrun/harness/[a-z0-9_]+_client\.py$")
 PIN = re.compile(r'^PERSEUS = "([0-9a-f]{40})"', re.M)
 MAINTAINERS = ("alexzilligmm",)
+CLA = "i have read the perseus cla and agree to it"
 PROTECTED = ("speedrun/harness/", "speedrun/runner/", "speedrun/prompts/", "speedrun/records/", "speedrun/README.md",
              "speedrun/CLAUDE.md", "speedrun/MAINTAINING.md", "speedrun/RULINGS.md", "speedrun/LICENSE",
-             "speedrun/.gitignore", ".github/", "LICENSE")
+             "speedrun/.gitignore", ".github/", "LICENSE", "CLA.md")
 CLIENT_CODE = ("crates/pc-client/", "python/perseus/client/")   # keygen, encryption, decryption: the client runs them
 FRAMING = ("speedrun/record1.py",)                              # record 1's output framing, next to its plan constants
 
@@ -51,7 +53,7 @@ def records(rev: str) -> set[str]:
         return set()
 
 
-def check(base: str, head: str, author: str = "") -> tuple[list[str], list[str], bool]:
+def check(base: str, head: str, author: str = "", body: str | None = None) -> tuple[list[str], list[str], bool]:
     """(errors, notes for the reviewer, whether the PR is an entry)."""
     errors, notes = [], []
     changes = [ln.split("\t") for ln in git("diff", "--no-renames", "--name-status", f"{base}...{head}").splitlines()]
@@ -86,6 +88,11 @@ def check(base: str, head: str, author: str = "") -> tuple[list[str], list[str],
     except (subprocess.CalledProcessError, ValueError) as e:
         return errors + [f"`{folder}/submission.json` is missing or not JSON ({type(e).__name__})"], notes, True
     errors += fields(sub)
+    if body is None:
+        notes.append(f"the PR's description must accept the CLA: \"{CLA[0].upper() + CLA[1:]} for my contributions.\"")
+    elif CLA not in " ".join(body.lower().split()):
+        errors.append("the PR's description does not accept the CLA (CLA.md): \"I have read the Perseus CLA and agree "
+                      "to it for my contributions.\"")
     e, n = security(sub.get("ckks", {}))
     e2, n2, timed = client_code(base, head, clients, folder)
     same = [r for r in sorted(records(base)) if declared(base, r) == sub.get("ckks")]
@@ -171,8 +178,13 @@ def main():
     p.add_argument("--base", required=True)
     p.add_argument("--head", required=True)
     p.add_argument("--author", default="", help="the PR author's GitHub login")
+    p.add_argument("--body", help="a file holding the PR's description")
     a = p.parse_args()
-    errors, notes, entry = check(a.base, a.head, a.author)
+    body = None
+    if a.body:
+        with open(a.body, encoding="utf-8", errors="replace") as f:
+            body = f.read()
+    errors, notes, entry = check(a.base, a.head, a.author, body)
     if not entry and not errors:
         return 0
     print("<!-- speedrun-pr-check -->")

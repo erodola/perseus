@@ -12,6 +12,13 @@ uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e ".[hf
 `perseus.plan`, `perseus.calibrate`, `perseus.hub` and `perseus.export` run without the extension; the models, the
 recorder and the runtime need it.
 
+## Licence of contributions
+
+Perseus is BUSL-1.1 and also licensed commercially, so every contribution is made under the
+[Contributor License Agreement](CLA.md): you keep your copyright and grant the Licensors the right to distribute your
+work under any terms. Accept it in your pull request's description: "I have read the Perseus CLA and agree to it for
+my contributions." A speedrun entry's PR check requires that sentence.
+
 ## Tests
 
 ```bash
