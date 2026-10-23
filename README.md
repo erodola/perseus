@@ -16,6 +16,7 @@
 
 <p align="center">
   <a href="#results">Results</a> ·
+  <a href="#runtime">Runtime</a> ·
   <a href="#reproduce">Reproduce</a> ·
   <a href="#0-install">Install</a> ·
   <a href="#python-api">Python API</a> ·
@@ -33,7 +34,7 @@ our 32-bit GPU port of [FIDESlib](https://github.com/CAPS-UMU/FIDESlib)).
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-overview-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-overview-light.png">
-      <img src="assets/paper-tables-overview-light.png" alt="Perseus, encrypted, end to end on one RTX PRO 6000 with 128-bit security. Llama-3-8B: prefill of a 128-token prompt 83.2 s, decode of one token at a 512-token context 16.2 s. GPT-2 small: prefill 21.6 s, decode 4.10 s per token at a 512-token context. ViT-B/16: 59.0 s per image. BERT-base: 23.9 s for 128 tokens." width="707">
+      <img src="assets/paper-tables-overview-light.png" alt="Perseus, encrypted, end to end on one RTX PRO 6000 with 128-bit security, and the peak GPU memory of each run (Llama-3-8B streams its weights from host memory, GPT-2 small keeps its weights on the GPU). Llama-3-8B: prefill of a 128-token prompt 83.2 s (76.6 GiB), decode of one token at a 512-token context 16.2 s (46.0 GiB when decoding 16 tokens). GPT-2 small: prefill 21.6 s (53.0 GiB), decode 4.10 s per token at a 512-token context (47.9 GiB when decoding 16 tokens). ViT-B/16: 59.0 s per image (57.5 GiB). BERT-base: 23.9 s for 128 tokens (53.5 GiB)." width="707">
     </picture>
   </a>
 </p>
@@ -99,6 +100,25 @@ ours where the code is released.
 
 Times exclude key generation, encryption and decryption; each model runs its default plan
 (`python/perseus/examples/defaults.py`).
+
+## Runtime
+
+`perseus-core` is the CKKS runtime in `crates/`, written in Rust and CUDA. Its primitives on one RTX PRO 6000:
+
+<p align="center">
+  <a href="assets/paper-tables-core-light.png">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-core-dark.png">
+      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-core-light.png">
+      <img src="assets/paper-tables-core-light.png" alt="perseus-core CKKS primitives on one RTX PRO 6000, device milliseconds per call for one ciphertext and per ciphertext in a batch of 8. Addition 0.022 and 0.057, multiplication by a scalar 0.026 and 0.040, by a plaintext 0.019 and 0.038, relinearized multiplication 0.540 and 0.563, rescale 0.084 and 0.130, rotation 0.512 and 0.536, forward and inverse NTT 0.076 and 0.103. Bootstrap: dense 20.3 and 19.2, StC first 17.1 and 15.5, sparse 512 slots 17.4 and 19.0, sparse 256 slots 16.4 and 18.6, one slot 10.0 and 11.3. Ring 2^16, 54 + 9 primes in 32-bit words, log QP 1706, dnum 6, 128-bit security." width="707">
+    </picture>
+  </a>
+</p>
+
+```bash
+cargo run --release -p pc-tools -F pc-gpu/mont --bin pc-bench -- modmul --k 1,8 --reps 20   # leaf operations
+cargo run --release -p pc-tools --bin pc-bench -- bts --all --k 1,8 --reps 20 --keys packed  # bootstraps
+```
 
 ## Reproduce
 
