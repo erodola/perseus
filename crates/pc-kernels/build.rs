@@ -1,6 +1,6 @@
 // Compiles the feature-selected instantiation TUs (kernels/inst/*.cu) with nvcc into one static archive.
 // PC_NVCC_JOBS (default 2) nvcc processes at a time: the box's shared-CPU budget. PERSEUS_CORE_ARCH (default 120)
-// selects -gencode arch=compute_<a>,code=sm_<a>.
+// selects -gencode arch=compute_<a>,code=sm_<a>, once per entry of a ';'- or ','-separated list ("89;120").
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -8,7 +8,13 @@ fn main() {
     let cuda = std::env::var("CUDA_HOME").unwrap_or_else(|_| "/usr/local/cuda-13.2".into());
     let nvcc = format!("{cuda}/bin/nvcc");
     let arch_env = std::env::var("PERSEUS_CORE_ARCH").unwrap_or_else(|_| "120".into());
-    let arch = arch_env.trim_start_matches("sm_").trim_start_matches("compute_").to_string();
+    let gencode: Vec<String> = arch_env
+        .split([';', ','])
+        .map(|a| a.trim().trim_start_matches("sm_").trim_start_matches("compute_"))
+        .filter(|a| !a.is_empty())
+        .flat_map(|a| ["-gencode".to_string(), format!("arch=compute_{a},code=sm_{a}")])
+        .collect();
+    assert!(!gencode.is_empty(), "PERSEUS_CORE_ARCH names no architecture");
     let jobs: usize = std::env::var("PC_NVCC_JOBS").ok().and_then(|v| v.parse().ok()).unwrap_or(2).max(1);
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
     let kdir = Path::new("kernels");
@@ -56,8 +62,7 @@ fn main() {
             let o = out.join(format!("{tu}.o"));
             let child = Command::new(&nvcc)
                 .args(["-O3", "-std=c++17", "-lineinfo", "--use_fast_math", "-Xcompiler", "-fPIC"])
-                .arg("-gencode")
-                .arg(format!("arch=compute_{arch},code=sm_{arch}"))
+                .args(&gencode)
                 .args(defs)
                 .args(["-I", "kernels", "-c"])
                 .arg(&src)
