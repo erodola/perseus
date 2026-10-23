@@ -16,8 +16,8 @@
 \pagecolor{bg}\color{fg}
 \arrayrulecolor{fg}
 \setlength{\dashlinedash}{3pt}\setlength{\dashlinegap}{3pt}
-% Perseus' numbers on the Rust + CUDA runtime (docs/REPORT.md, 2026-10-22: medians; default plan per model)
-\newcommand{\llamapf}{83.2}\newcommand{\llamadec}{13.8}\newcommand{\gptpf}{21.6}\newcommand{\gptdec}{3.36}
+% Perseus' numbers on the Rust + CUDA runtime (paper campaign 2026-10-22/23 and docs/REPORT.md: medians; default plan per model; decode at a 512-token context)
+\newcommand{\llamapf}{83.2}\newcommand{\llamadec}{16.2}\newcommand{\gptpf}{21.6}\newcommand{\gptdec}{4.10}
 \newcommand{\vitimg}{59.0}\newcommand{\bertin}{23.9}
 \newcommand{\oursrow}{\rowcolor{ours}}
 \newcommand{\oc}{\cellcolor{ours}}
@@ -40,9 +40,9 @@
 \textbf{Model} & \textbf{Task} & \textbf{Encrypted} \\
 \midrule
 Llama-3-8B & prefill, 128-token prompt & \textbf{\llamapf\ s} \\
-Llama-3-8B & decode, one token (17-token context) & \textbf{\llamadec\ s} \\
+Llama-3-8B & decode, one token (512-token context) & \textbf{\llamadec\ s} \\
 GPT-2 small & prefill, 128-token prompt & \textbf{\gptpf\ s} \\
-GPT-2 small & decode, one token & \textbf{\gptdec\ s} \\
+GPT-2 small & decode, one token (512-token context) & \textbf{\gptdec\ s} \\
 ViT-B/16 & one $224\times224$ image & \textbf{\vitimg\ s} \\
 BERT-base & 128-token input & \textbf{\bertin\ s} \\
 \bottomrule
@@ -80,7 +80,7 @@ AR-HE (Kanpak and Unat, 2026) & 32 & 1569.0\nt{\dagger} & H100 & \no \\
 ROSETTA (Yu et al., 2026) & 512 & 311.0\nt{\dagger} & A100 & \no \\
 Cachemir (Yu et al., 2026) & 512 & 97.0\nt{\dagger} & A100 & \semi \\
 Sylph (Park et al., 2026) & 128 & 31.0\nt{\dagger} & RTX PRO 6000 & \no \\
-\oursrow\textbf{Perseus (ours)} & 17 & \textbf{\llamadec} & RTX PRO 6000 & \yes \\
+\oursrow\textbf{Perseus (ours)} & 512 & \textbf{\llamadec} & RTX PRO 6000 & \yes \\
 \bottomrule
 \end{tabularx}
 \tcap{Encrypted Llama-3-8B decode of one token at the given context size. $^\dagger$Composed from per-block or per-operator
@@ -98,7 +98,7 @@ prefill (s) & AR-HE (Kanpak and Unat, 2026) & 128 & 18520.0 & H100 & \no \\
 decode (s / token) & AR-HE (Kanpak and Unat, 2026) & 33 & 544.0 & H100 & \no \\
  & ROSETTA (Yu et al., 2026) & 512 & 78.6\nt{\dagger} & A100 & \no \\
  & EncryptedLLM (Castro et al., 2025) & 128 & 68.0 & A100 & \semi \\
- & \oc\textbf{Perseus (ours)} & \oc 32 & \oc\textbf{\gptdec} & \oc RTX PRO 6000 & \oc\yes \\
+ & \oc\textbf{Perseus (ours)} & \oc 512 & \oc\textbf{\gptdec} & \oc RTX PRO 6000 & \oc\yes \\
 \bottomrule
 \end{tabularx}
 \tcap{Encrypted GPT-2 small: prefill of a prompt and decode of one token; \emph{tokens} is the prompt length (prefill) or

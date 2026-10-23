@@ -33,7 +33,7 @@ our 32-bit GPU port of [FIDESlib](https://github.com/CAPS-UMU/FIDESlib)).
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-overview-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-overview-light.png">
-      <img src="assets/paper-tables-overview-light.png" alt="Perseus, encrypted, end to end on one RTX PRO 6000 with 128-bit security. Llama-3-8B: prefill of a 128-token prompt 83.2 s, decode of one token at a 17-token context 13.8 s. GPT-2 small: prefill 21.6 s, decode 3.36 s per token. ViT-B/16: 59.0 s per image. BERT-base: 23.9 s for 128 tokens." width="707">
+      <img src="assets/paper-tables-overview-light.png" alt="Perseus, encrypted, end to end on one RTX PRO 6000 with 128-bit security. Llama-3-8B: prefill of a 128-token prompt 83.2 s, decode of one token at a 512-token context 16.2 s. GPT-2 small: prefill 21.6 s, decode 4.10 s per token at a 512-token context. ViT-B/16: 59.0 s per image. BERT-base: 23.9 s for 128 tokens." width="707">
     </picture>
   </a>
 </p>
@@ -68,7 +68,7 @@ ours where the code is released.
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-llama-decode-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-llama-decode-light.png">
-      <img src="assets/paper-tables-llama-decode-light.png" alt="Encrypted Llama-3-8B decode of one token, seconds per token at a context size. AR-HE 1569.0 at 32, ROSETTA 311.0 at 512, Cachemir 97.0 at 512, Sylph 31.0 at 128 (all composed timings); Perseus 13.8 at 17 on RTX PRO 6000, open source." width="707">
+      <img src="assets/paper-tables-llama-decode-light.png" alt="Encrypted Llama-3-8B decode of one token, seconds per token at a context size. AR-HE 1569.0 at 32, ROSETTA 311.0 at 512, Cachemir 97.0 at 512, Sylph 31.0 at 128 (all composed timings); Perseus 16.2 at 512 on RTX PRO 6000, open source." width="707">
     </picture>
   </a>
   <br>
@@ -76,7 +76,7 @@ ours where the code is released.
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-gpt2-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-gpt2-light.png">
-      <img src="assets/paper-tables-gpt2-light.png" alt="Encrypted GPT-2 small. AR-HE: 128-token prefill 18520.0 s, decode 544.0 s per token at context 33. ROSETTA: decode 78.6 s at 512 (composed). EncryptedLLM: decode 68.0 s at 128. Perseus: prefill 21.6 s, decode 3.36 s per token at context 32, on RTX PRO 6000, open source." width="707">
+      <img src="assets/paper-tables-gpt2-light.png" alt="Encrypted GPT-2 small. AR-HE: 128-token prefill 18520.0 s, decode 544.0 s per token at context 33. ROSETTA: decode 78.6 s at 512 (composed). EncryptedLLM: decode 68.0 s at 128. Perseus: prefill 21.6 s, decode 4.10 s per token at context 512, on RTX PRO 6000, open source." width="707">
     </picture>
   </a>
   <br>
