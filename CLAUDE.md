@@ -1,17 +1,18 @@
 # Entering the Encrypted GPT-2 Speedrun: instructions for Claude
 
 You are helping someone make an entry: a change to Perseus that runs encrypted GPT-2 small faster than the current
-record, at the same security and accuracy. `speedrun/README.md` is the rulebook. When this file and the README
+record, at the same security and accuracy. `README.md` is the rulebook. When this file and the README
 disagree, the README wins. Paths below are from the root of the Perseus checkout.
 
 ## Setup
 
-The entrant's fork of Perseus (the code being changed; it also holds this harness, in `speedrun/`), and next to it a
-build of the commit `speedrun/harness/perseus_core_client.py` pins (`PERSEUS`), as a worktree.
+Perseus's `speedrun` branch (the code being changed, and this harness, in `speedrun/`), on a branch of the entrant's
+own, and next to it a build of the commit `speedrun/harness/perseus_core_client.py` pins (`PERSEUS`), as a worktree.
 
 ```bash
-git clone https://github.com/<handle>/perseus && cd perseus     # a fork of gladia-research-group/perseus
-git remote add upstream https://github.com/gladia-research-group/perseus
+git clone -b speedrun https://github.com/gladia-research-group/perseus && cd perseus
+git remote add fork https://github.com/<handle>/perseus           # the entrant's fork, for the PR
+git switch -c <entry-name>
 git worktree add ../perseus-client <the PERSEUS sha>
 for d in . ../perseus-client; do (cd $d &&
   uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e ".[hf,examples,dev]" &&
@@ -76,7 +77,8 @@ You need Linux, `bwrap`, a systemd user session, a GPU with 48 GB or more, and `
    `bash speedrun/runner/entry.sh <name> ...`. The PR check requires it when the PR changes the client's code
    (`crates/pc-client/`, `python/perseus/client/`).
 4. Before opening the PR, run the same check the PR gets:
-   `python3 speedrun/harness/check_pr.py --base upstream/main --head HEAD`.
-5. Open the PR against `gladia-research-group/perseus` `main`, with "I have read the Perseus CLA and agree to it for
+   `python3 speedrun/harness/check_pr.py --base origin/speedrun --head HEAD`.
+5. Push the branch to the fork (`git push fork <entry-name>`) and open the PR against `gladia-research-group/perseus`
+   `speedrun`, with "I have read the Perseus CLA and agree to it for
    my contributions." in its description (`CLA.md`; only the entrant can agree to it). The maintainers time the commit the check names, on
    the reference GPU and the hidden prompts, and post the results.

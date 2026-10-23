@@ -1,4 +1,4 @@
-"""The check every Perseus PR gets before a maintainer is asked to review it (.github/workflows/speedrun-pr-check.yml).
+"""The check every PR to Perseus's speedrun branch gets before a maintainer reviews it (speedrun-pr-check.yml).
 
     python3 speedrun/harness/check_pr.py --base BASE_SHA --head HEAD_REF [--author LOGIN] [--body FILE]
 
@@ -30,9 +30,9 @@ CLIENT = re.compile(r"^speedrun/harness/[a-z0-9_]+_client\.py$")
 PIN = re.compile(r'^PERSEUS = "([0-9a-f]{40})"', re.M)
 MAINTAINERS = ("alexzilligmm",)
 CLA = "i have read the perseus cla and agree to it"
-PROTECTED = ("speedrun/harness/", "speedrun/runner/", "speedrun/prompts/", "speedrun/records/", "speedrun/README.md",
-             "speedrun/CLAUDE.md", "speedrun/MAINTAINING.md", "speedrun/RULINGS.md", "speedrun/LICENSE",
-             "speedrun/.gitignore", ".github/", "LICENSE", "CLA.md")
+PROTECTED = ("speedrun/harness/", "speedrun/runner/", "speedrun/prompts/", "speedrun/records/", "speedrun/MAINTAINING.md",
+             "speedrun/RULINGS.md", "speedrun/LICENSE", "speedrun/.gitignore", "README.md", "CLAUDE.md", ".github/",
+             "LICENSE", "CLA.md")
 CLIENT_CODE = ("crates/pc-client/", "python/perseus/client/")   # keygen, encryption, decryption: the client runs them
 FRAMING = ("speedrun/record1.py",)                              # record 1's output framing, next to its plan constants
 

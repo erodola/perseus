@@ -2,7 +2,7 @@
 
 What the maintainers (`MAINTAINERS` in [`harness/check_pr.py`](harness/check_pr.py), and
 [`.github/CODEOWNERS`](../.github/CODEOWNERS)) do when an entry's PR arrives. Commands run from the root of a clone of
-upstream `main`, your harness: never run the harness from an entry's checkout.
+upstream `speedrun`, your harness: never run the harness from an entry's checkout.
 
 The machine provides what this folder cannot:
 
@@ -14,7 +14,7 @@ The machine provides what this folder cannot:
 
 ## Once
 
-- Repository settings: protect `main`, require a code owner's review, allow the Speedrun PR check workflow.
+- Repository settings: protect `speedrun`, require a code owner's review, allow the Speedrun PR check workflow.
 - Build the commit the record's client pins (`PERSEUS` in [`harness/perseus_core_client.py`](harness/perseus_core_client.py)),
   with GPT-2's weights, and the current record if it is another commit:
   `EXPORT=1 bash speedrun/runner/build.sh https://github.com/gladia-research-group/perseus <commit> <client build>`.
@@ -24,7 +24,7 @@ The machine provides what this folder cannot:
 
 1. **Read the check's report** on the PR. It names the commit to time, says whether the keys need the Lattice
    Estimator, and lists client-side changes. A new push runs it again: review and time only the commit it names.
-2. **Review the diff** against the [rules](README.md#rules): computation on ciphertexts only, oblivious execution,
+2. **Review the diff** against the [rules](../README.md#rules): computation on ciphertexts only, oblivious execution,
    every input-dependent step inside the clock, no work moved into decode positions 0-7, the weights read from
    `$WEIGHTS_PATH`, Disclosures that match the diff. A new client file is security code: it holds the secret key.
 3. **Build the commit**, in the isolated place:
@@ -38,8 +38,8 @@ The machine provides what this folder cannot:
    at the modulus where it is used.
 6. **Post the results**: `gh pr comment <PR> --body-file <OUT>/report.md`, with the estimator's result and the review.
 7. **Accept** when the quality test passes, the speed test says NEW RECORD, the review finds no broken rule and the
-   keys hold: merge the PR with a merge commit, so the commit you timed stays in `main`'s history. Then, in a
-   maintainer commit: the record's rows in the two tables of [`README.md`](README.md#records) and in
+   keys hold: merge the PR with a merge commit, so the commit you timed stays in the branch's history. Then, in a
+   maintainer commit: the record's rows in the two tables of [`README.md`](../README.md#records) and in
    [`records/progress.csv`](records/progress.csv), `python3 speedrun/records/plot.py`, and "Running the current
    record" if the record's commit or its client's pin changed (rebuild the record, step "Once").
 

@@ -1,392 +1,286 @@
+# Encrypted GPT-2 Speedrun
+
+This branch of [Perseus](https://github.com/gladia-research-group/perseus) defines the Encrypted GPT-2 Speedrun, in which we optimize (collaboratively and
+competitively) encrypted transformer inference under FHE for GPT-2 (124M) on a single RTX PRO 6000.
+The client encrypts the request locally under CKKS at 128-bit security; the server receives the encrypted prompt and computes on ciphertexts only. It first populates the caches and then decodes the answer, as in an inference-as-a-service scenario.
+
+Under this framing, the task naturally includes two tracks:
+
+- **Prefill-128.** The user's encrypted prompt (128 tokens) populates the KV caches.
+- **Decode-8.** From a fixed, given cache state, the model decodes 8 tokens, at positions 8 to 15, under teacher forcing on unknown test sequences.
+
+The result of each is an end-to-end time, and a KL divergence between the plaintext GPT-2 logits and the encrypted ones, which must stay below 10⁻² in prefill, where it is taken on the last position's logits, and below 10⁻³ in decode, where it is the average over the timed positions.
+
+Every entry is a pull request to this branch, `speedrun`: a change to Perseus's code, and a record folder in
+`speedrun/records/`. Perseus itself, its results and its documentation, is on its
+[`main` branch](https://github.com/gladia-research-group/perseus/tree/main). You can also
+change the cryptographic backend. The default is [perseus-core](crates),
+Perseus's Rust + CUDA runtime. Modify it, or include another backend as a submodule and wire it in.
+
+To learn how to submit an entry, see [Submitting](#submitting).
+
+## Running the current record
+
+The current record is record 1, at the commit its client pins (`PERSEUS` in
+[`speedrun/harness/perseus_core_client.py`](speedrun/harness/perseus_core_client.py)). Clone this branch and build
+that commit next to it; the commands here run from the clone's root:
+
+```bash
+git clone -b speedrun https://github.com/gladia-research-group/perseus && cd perseus
+git worktree add ../perseus-client 89bc830017fe12ab967ddb10c24feae65d8af6df   # record 1, the client's commit
+cd ../perseus-client
+uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e ".[hf,examples,dev]"
+.venv/bin/maturin develop --release           # the Rust + CUDA runtime (rustup, CUDA 13.2)
+.venv/bin/perseus-export --model openai-community/gpt2 --out .cache/models/openai-community/gpt2
+cd ../perseus
+```
+
+Then time it as entries are timed, with the harness in `speedrun/`: the client (keys, encryption,
+the checks) and the server (the entry) run in separate sandboxes, on the dev prompts
+([`speedrun/prompts/dev.json`](speedrun/prompts/dev.json), from C4).
+
+```bash
+bash speedrun/runner/entry.sh perseus-core ../perseus-client decode 0    # Decode-8 on GPU 0
+bash speedrun/runner/entry.sh perseus-core ../perseus-client prefill 0   # Prefill-128
+python3 speedrun/harness/score.py --track decode --entry speedrun/runs/*/run.json
+```
+
+An entry runs the same way, from its own checkout built the same way, with that build as the client:
+`CLIENT=../perseus-client bash speedrun/runner/entry.sh perseus-core . decode 0`. The client holds the secret key
+and the prompts, so it only runs the Perseus commit its client file pins, built by you; `runner/run.py`
+refuses any other checkout. The server reads GPT-2's weights from the client checkout's export, read-only at
+`$WEIGHTS_PATH`. Its checkout may link outside itself (top-level symlinks, its venv's interpreter) only where the
+client's checkout links, or into the directories of `ALLOW=DIR[:DIR...]`.
+
+You need Linux, `bwrap`, a systemd user session and a GPU with 48 GB or more, and `HF_HOME` must hold
+the `openai-community/gpt2` weights, which the float64 reference reads. On a machine with several NUMA
+nodes, `NUMA=NODE[:MEMS]` pins the server to the GPU's node (with `numactl`). Perseus's own scripts
+(`scripts/repro/gpt2_decode.sh`, `scripts/repro/gpt2_prefill128.sh`) time the same models in one process.
+
+## Records
+
 <p align="center">
-  <a href="https://www.uniroma1.it/en"><img src="assets/sapienza-logo.svg" alt="Sapienza University of Rome" height="76"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <a href="https://www.gmu.edu"><img src="assets/GM-monogramRGB-r.png" alt="George Mason University" height="76"></a>
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/paradigma-symbol-white.svg">
-    <source media="(prefers-color-scheme: light)" srcset="assets/paradigma-symbol.svg">
-    <img src="assets/paradigma-symbol.svg" alt="Paradigma" height="76">
+    <source media="(prefers-color-scheme: dark)" srcset="speedrun/records/progress-dark.svg">
+    <img src="speedrun/records/progress-light.svg" width="100%" alt="Record progression of both GPT-2 tracks. Prefill-128: 35.78 s (record 0), 22.22 s (record 1). Decode-8: 3.993 s/token (record 0), 3.384 s/token (record 1).">
   </picture>
 </p>
 
-<h1 align="center">Perseus</h1>
+The chart fills in as records are accepted.
 
-<p align="center"><b>An open Python framework for encrypted inference of large language models</b></p>
+### Track 1: Prefill-128
 
-<p align="center">
-  <a href="#results">Results</a> ·
-  <a href="#runtime">Runtime</a> ·
-  <a href="#reproduce">Reproduce</a> ·
-  <a href="#0-install">Install</a> ·
-  <a href="#python-api">Python API</a> ·
-  <a href="#citation">Citation</a>
-</p>
+| # | Time to first token (s) | Peak GPU memory | Description | Date | Log | Contributors |
+|---|---|---|---|---|---|---|
+| 0 | 35.78 | 90.9 GiB | Baseline: Perseus on [FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits) | 2026-10-22 | [log](speedrun/records/2026-10-22_Perseus) | [@alexzilligmm](https://github.com/alexzilligmm), [@Davide-F5-Marincione](https://github.com/Davide-F5-Marincione) |
+| 1 | 22.22 | 57.4 GiB | Perseus on [perseus-core](crates), its Rust + CUDA runtime, with its own client | 2026-10-22 | [log](speedrun/records/2026-10-22_PerseusCore) | [@alexzilligmm](https://github.com/alexzilligmm), [@Davide-F5-Marincione](https://github.com/Davide-F5-Marincione) |
 
-Perseus runs transformers under fully homomorphic encryption on a single GPU, so the server computes
-on data it never sees in the clear. Models, packings, nonlinear approximations and bootstrap
-placement are plain Python; each block is compiled into a program that a Rust + CUDA CKKS runtime
-replays (its kernels descend from [FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits),
-our 32-bit GPU port of [FIDESlib](https://github.com/CAPS-UMU/FIDESlib)).
+### Track 2: Decode-8
 
-<p align="center">
-  <a href="assets/paper-tables-overview-light.png">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-overview-dark.png">
-      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-overview-light.png">
-      <img src="assets/paper-tables-overview-light.png" alt="Perseus, encrypted, end to end on one RTX PRO 6000 with 128-bit security, and the peak GPU memory of each run (Llama-3-8B streams its weights from host memory, GPT-2 small keeps its weights on the GPU). Llama-3-8B prefill of a 128-token prompt 83.2 s (76.6 GiB), decode of one token at a 512-token context 16.2 s (46.0 GiB when decoding 16 tokens). GPT-2 small prefill 21.6 s (53.0 GiB), decode 4.10 s per token at a 512-token context (47.9 GiB when decoding 16 tokens). ViT-B/16 59.0 s per image (57.5 GiB). BERT-base 23.9 s for 128 tokens (53.5 GiB)." width="707">
-    </picture>
-  </a>
-</p>
+| # | s/token | Peak GPU memory | Description | Date | Log | Contributors |
+|---|---|---|---|---|---|---|
+| 0 | 3.993 | 74.5 GiB | Baseline: Perseus on [FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits) | 2026-10-22 | [log](speedrun/records/2026-10-22_Perseus) | [@alexzilligmm](https://github.com/alexzilligmm), [@Davide-F5-Marincione](https://github.com/Davide-F5-Marincione) |
+| 1 | 3.384 | 47.8 GiB | Perseus on [perseus-core](crates), its Rust + CUDA runtime, with its own client | 2026-10-22 | [log](speedrun/records/2026-10-22_PerseusCore) | [@alexzilligmm](https://github.com/alexzilligmm), [@Davide-F5-Marincione](https://github.com/Davide-F5-Marincione) |
 
-## What's inside
+## Rules
 
-- **Python models, compiled.** GPT-2, Llama-3, BERT and ViT are Python programs on `perseus.impl`
-  (`python/perseus/examples/`), with readable packings, nonlinearities and layers. Each block is recorded
-  once on a CPU twin, compiled with its plan into a program, and replayed by the runtime with no Python on
-  the critical path, from one device arena sized at setup.
-- **In-kernel key regeneration.** Half of every key-switching key is regenerated on the GPU from a
-  ChaCha12 seed instead of being stored.
-- **Complex Cachemir packing.** Two real vectors per ciphertext, in the complex slots of CKKS.
-- **Packing- and magnitude-aware bootstrap placement.** GPT-2 runs 416 bootstraps per token,
-  against 584–894 for DaCapo, Orion and Fhelipe.
+The only rules are that new records must:
 
-## Results
+1. Change only the framework and its backend. The weights, the test prompts and the harness (the checks and the clock) are fixed. Key generation, encryption and decryption belong to the backend's client: an entry that changes the key or ciphertext formats adds its own, which the maintainers review and pin.
+2. Keep 128-bit security, with the server computing on ciphertexts only. Every secret and switching key must reach 128 bits on the Lattice Estimator, at the modulus where it is used, and the server gets only the public and evaluation keys.
+3. Attain a KL divergence from float64 GPT-2 below 10⁻² for Prefill-128 and 10⁻³ for Decode-8, at p < 0.01 over the official runs.
+4. Keep all input-dependent work inside the clock. Loading keys, encoding weights and loading plans are untimed setup and must not depend on the prompt.
+5. Run faster than the current record on the reference GPU, by at least 1 % (or three standard errors, if larger) at p < 0.01 over paired runs ([`speedrun/harness/score.py`](speedrun/harness/score.py)).
 
-One NVIDIA RTX PRO 6000, 128-bit security. Prior results on their own hardware, or replicated on
-ours where the code is released.
+The maintainers review every PR and may decline a record that moves work into the unscored decode positions, or that makes the framework much harder to read for a small gain. Other than that, anything and everything is fair game (e.g. the backend, kernels, CKKS parameters, packing, the approximations, bootstrap placement...).
 
-<p align="center">
-  <a href="assets/paper-tables-llama-prefill-light.png">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-llama-prefill-dark.png">
-      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-llama-prefill-light.png">
-      <img src="assets/paper-tables-llama-prefill-light.png" alt="Encrypted Llama-3-8B prefill of a 128-token prompt, seconds. MOAI 3592.0 on H200, NEXUS 829.0 on 4 A100, Euston 484.0, STIP 406.6 (composed timings, amortized over a batch); Odin 366.4 on H100; Cerium 347.5 (replicated on RTX PRO 6000); Sylph 116.0 (composed); Perseus 83.2 on RTX PRO 6000, open source." width="707">
-    </picture>
-  </a>
-  <br>
-  <a href="assets/paper-tables-llama-decode-light.png">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-llama-decode-dark.png">
-      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-llama-decode-light.png">
-      <img src="assets/paper-tables-llama-decode-light.png" alt="Encrypted Llama-3-8B decode of one token, seconds per token at a context size. AR-HE 1569.0 at 32, ROSETTA 311.0 at 512, Cachemir 97.0 at 512, Sylph 31.0 at 128 (all composed timings); Perseus 16.2 at 512 on RTX PRO 6000, open source." width="707">
-    </picture>
-  </a>
-  <br>
-  <a href="assets/paper-tables-gpt2-light.png">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-gpt2-dark.png">
-      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-gpt2-light.png">
-      <img src="assets/paper-tables-gpt2-light.png" alt="Encrypted GPT-2 small. AR-HE 128-token prefill 18520.0 s, decode 544.0 s per token at context 33. ROSETTA decode 78.6 s at 512 (composed). EncryptedLLM decode 68.0 s at 128. Perseus prefill 21.6 s, decode 4.10 s per token at context 512, on RTX PRO 6000, open source." width="707">
-    </picture>
-  </a>
-  <br>
-  <a href="assets/paper-tables-vit-light.png">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-vit-dark.png">
-      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-vit-light.png">
-      <img src="assets/paper-tables-vit-light.png" alt="Encrypted ViT inference of one image, seconds. FIONA, ViT-S/16, 374.4 on a 48-core CPU (amortized over a batch of 32, retrained polynomial model); ATLAS, ViT-B/16, 2259.0 on RTX 4090; Perseus, ViT-B/16, 59.0 on RTX PRO 6000, open source." width="707">
-    </picture>
-  </a>
-  <br>
-  <a href="assets/paper-tables-bert-light.png">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-bert-dark.png">
-      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-bert-light.png">
-      <img src="assets/paper-tables-bert-light.png" alt="Encrypted BERT inference of one input, seconds. THOR, BERT-base, 128 tokens, 602.0 on A100; POLARIS, BERT-Mini, 83.0 on A100; Cerium, BERT-base, 128 tokens, 43.6 (replicated on RTX PRO 6000); Perseus, BERT-base, 128 tokens, 23.9 on RTX PRO 6000, open source." width="707">
-    </picture>
-  </a>
-</p>
+## Tasks
 
-Times exclude key generation, encryption and decryption; each model runs its default plan
-(`python/perseus/examples/defaults.py`).
+Both tracks use [`openai-community/gpt2`](https://huggingface.co/openai-community/gpt2) (124M
+parameters). The weights are fixed. The approximations are part of the challenge: an entry can refit
+or replace the polynomials for LayerNorm, softmax, GELU and the argmax, as long as the outputs stay
+within the KL bound above.
 
-## Runtime
+The current record opens the session (CKKS parameters on the 32-bit chain, keys) with
+[`env.py`](python/perseus/examples/gpt2/env.py).
+Its approximations are fitted per layer in
+[`gpt2_base_n32`](python/perseus/configs/model/approximation/gpt2_base_n32) (Decode-8) and
+[`gpt2_base_n32_thor`](python/perseus/configs/model/approximation/gpt2_base_n32_thor) (Prefill-128):
+GELU, LayerNorm and softmax in every block, and CutMax for the argmax.
 
-`perseus-core` is the CKKS runtime in `crates/`, written in Rust and CUDA. The table times its
-primitives on one RTX PRO 6000, and the two commands under it reproduce the table.
+### Track 1: Prefill-128
 
-<p align="center">
-  <a href="assets/paper-tables-core-light.png">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-core-dark.png">
-      <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-core-light.png">
-      <img src="assets/paper-tables-core-light.png" alt="perseus-core CKKS primitives on one RTX PRO 6000, device milliseconds per call for one ciphertext and per ciphertext in a batch of 8. Addition 0.022 and 0.057, multiplication by a scalar 0.026 and 0.040, by a plaintext 0.019 and 0.038, relinearized multiplication 0.540 and 0.563, rescale 0.084 and 0.130, rotation 0.512 and 0.536, forward and inverse NTT 0.076 and 0.103. Bootstraps, dense 20.3 and 19.2, StC first 17.1 and 15.5, sparse 512 slots 17.4 and 19.0, sparse 256 slots 16.4 and 18.6, one slot 10.0 and 11.3. Ring 2^16, 54 + 9 primes in 32-bit words, log QP 1706, dnum 6, 128-bit security." width="707">
-    </picture>
-  </a>
-</p>
+The current record's server runs the planned prefill
+([`PlannedPrefill`](python/perseus/impl/prefill.py)) with the plan
+[`bootstrap_placements/gpt2_prefill128_m16s0_tail`](bootstrap_placements/gpt2_prefill128_m16s0_tail).
+[`scripts/repro/gpt2_prefill128.sh`](scripts/repro/gpt2_prefill128.sh) times the same prefill in one process,
+through [`run_prefill.py`](python/perseus/examples/gpt2/run_prefill.py).
 
-```bash
-cargo run --release -p pc-tools -F pc-gpu/mont --bin pc-bench -- modmul --k 1,8 --reps 20   # leaf operations
-cargo run --release -p pc-tools --bin pc-bench -- bts --all --k 1,8 --reps 20 --keys packed  # bootstraps
+- [`prefill.py`](python/perseus/examples/gpt2/prefill.py) runs the 128 positions through the 12 blocks, packed as complex chunk
+  pairs, and keeps every block's K and V on the GPU.
+- The timed pass follows one untimed warm-up on another prompt.
+- The speedrun adds the encrypted tail: the last position moves into the decode layout, then the final
+  LayerNorm, the LM head and CutMax run as in the decode, as two more stages (`Gpt2Prefill.tail_stages`).
+  Perseus's own script runs them with `--tail`, and otherwise computes them in the clear on decrypted rows
+  (`plain_logits`).
+
+### Track 2: Decode-8
+
+The current record's server drives Perseus's served decode,
+[`perseus.serve.gpt2_decode`](python/perseus/serve/gpt2_decode.py), with the plan
+[`bootstrap_placements/gpt2_decode_python_n32_m16i`](bootstrap_placements/gpt2_decode_python_n32_m16i).
+[`scripts/repro/gpt2_decode.sh`](scripts/repro/gpt2_decode.sh) times the same decode in one process, through
+[`run_decode.py`](python/perseus/examples/gpt2/run_decode.py), with per-token times.
+
+- [`model.py`](python/perseus/examples/gpt2/model.py) holds the per-block K/V caches and the decode step: the 12 blocks of
+  [`block.py`](python/perseus/examples/gpt2/block.py) on the new position, then the final LayerNorm, the LM head and the CutMax
+  encrypted argmax in [`head.py`](python/perseus/examples/gpt2/head.py).
+- The inputs are teacher-forced. Positions 0 to 7 fill the cache, and their time is reported but not
+  scored. The score is the time of positions 8 to 15, divided by 8.
+- Today the script decodes 16 tokens and reports the median of the steady tokens (position ≥ 1).
+
+### Client and server
+
+The harness runs the client and the server as separate processes, each in its own sandbox, and they
+talk only through files: the client writes `in/`, the server writes `out/`
+([`speedrun/harness/protocol.py`](speedrun/harness/protocol.py)). The server is the entry's `speedrun/serve.sh`, started
+with `--track {prefill,decode} --inbox IN --outbox OUT`. It must:
+
+1. write `out/keyspec`, its key request: the keys its plan needs, in its backend's terms. The client generates
+   only the keys its backend declares: record 1's refuses, for example, a SPRU block key of other than 64 blocks
+   or a sparse secret above the bottom level;
+2. wait for `in/keys.done`, then load the client's key bundle from `in/keys/` (it holds no secret key);
+3. set up, untimed (the weights from `$WEIGHTS_PATH`, plans, a warm-up on a public prompt), then write
+   `out/ready` with what the client needs to encrypt, such as the input level;
+4. answer every request k: Prefill-128 reads the encrypted prompt `in/k/0` and writes `out/k/0`, the last
+   position's logits and argmax; Decode-8 reads the tokens `in/k/0` to `in/k/15` one at a time, from an
+   empty cache, and writes `out/k/j` before token j + 1 is released;
+5. exit at `in/quit`.
+
+Every file is an 8-byte length and the payload, written under a temporary name and renamed. The current
+record's server is [`speedrun/server.py`](speedrun/server.py).
+
+## Submitting
+
+1. **Develop on any GPU** with 48 GB or more. Run the current record on the same GPU to compare (see
+   [Running the current record](#running-the-current-record)).
+2. **Push** every submodule repository your change pins.
+3. **Open a PR against this branch** with your change and a new folder `speedrun/records/<YYYY-MM-DD>_<Name>/`,
+   copied from [`speedrun/records/_template`](speedrun/records/_template):
+   - `README.md`: a short write-up, an ablation table and a Disclosures section;
+   - `submission.json`: the authors, a one-line summary, the CKKS parameters (`ckks`: log N, log QP,
+     the secret, every sparse key) and your numbers next to the record's on the same GPU;
+   - your run logs;
+   - if your backend has its own key or ciphertext formats, its client, `speedrun/harness/<name>_client.py`,
+     whose class `Backend` does the keygen for your server's key request, the encryption and the
+     decryption (see [`speedrun/harness/perseus_core_client.py`](speedrun/harness/perseus_core_client.py)), and which pins
+     your code's last commit (`PERSEUS = "<sha>"`): add the client and the record folder in a commit after it, and
+     nothing else. That commit is built as both your server and your client. It runs as
+     `bash speedrun/runner/entry.sh <name> ...`.
+
+   In the PR's description, accept Perseus's [CLA](CLA.md): "I have read the Perseus CLA and agree to it for my
+   contributions." Leave the rest of `speedrun/` (`harness/`, `runner/`, `prompts/`, the other records), this
+   README, `CLAUDE.md`, `.github/`, the licence and the CLA as they are.
+4. **A check runs on the PR**: that it leaves those alone, the record folder, the fields, the main key at
+   128-bit security on the HE standard, and the client's code: a PR that changes `crates/pc-client/` or
+   `python/perseus/client/` must bring its own client. When the check passes, a maintainer is asked to
+   review.
+5. **The maintainers time it** ([`speedrun/MAINTAINING.md`](speedrun/MAINTAINING.md)) within 72 hours of the check passing,
+   at the commit the check names (a new push starts the review again), with this branch's harness,
+   against the current record on the reference GPU and the hidden test prompts, run the Lattice Estimator on
+   new sparse keys, check the [rules](#rules) and post the results on the PR. An accepted record is merged into
+   this branch with a merge commit, so the commit they timed stays in its history, and becomes the one to beat.
+
+## Background
+
+**The NanoGPT speedrun.** This challenge is inspired by the NanoGPT speedrun
+([Jordan et al., 2024](https://github.com/KellerJordan/modded-nanogpt)), in which contributors
+search, collaboratively and competitively, for the fastest way to train a language model to 3.28
+cross-entropy loss on the FineWeb validation set with 8 NVIDIA H100 GPUs. Its record went from the
+45 minutes of the llm.c GPT-2 replication to under 40 seconds. We borrow its format: fixed hardware,
+a fixed quality bar, a public record history, and rules that leave everything else open. Here the
+workload is encrypted inference instead of training, and the bar is 128-bit security and the KL.
+
+**Threat model.** A client $`C`$ wants to prompt the model, and a server $`S`$ runs it. $`C`$ generates the
+keys, keeps the secret key $`sk`$ and gives $`S`$ the public and evaluation keys. $`C`$ tokenizes and
+encrypts the prompt locally, so $`S`$ never sees the tokens, the activations, the KV cache or the
+logits, which it returns encrypted. $`S`$ is honest but curious, i.e. it follows the protocol but may try to
+learn about the prompt from what it computes. Its computation must be oblivious, meaning that neither
+its control flow nor its memory accesses depend on the prompt. Hardware side channels and metadata
+such as the sequence length are out of scope.
+
+**Homomorphic arithmetic.** CKKS
+([Cheon et al., ASIACRYPT 2017](https://doi.org/10.1007/978-3-319-70694-8_15)) is an FHE scheme for
+approximate arithmetic on real and complex vectors. If $`c_1 \leftarrow \mathrm{Enc}_{pk}(\mathbf{p}_1)`$
+and $`c_2 \leftarrow \mathrm{Enc}_{pk}(\mathbf{p}_2)`$, then
+
+```math
+\mathrm{Dec}_{sk}(c_1 \oplus c_2) \approx \mathbf{p}_1 + \mathbf{p}_2, \qquad
+\mathrm{Dec}_{sk}(c_1 \otimes c_2) \approx \mathbf{p}_1 \odot \mathbf{p}_2, \qquad
+\mathrm{Dec}_{sk}(\mathrm{Rot}_k(c_1)) \approx \pi^k(\mathbf{p}_1),
 ```
 
-## Reproduce
+where $`\oplus`$ and $`\otimes`$ are encrypted addition and element-wise multiplication, and
+$`\mathrm{Rot}_k`$ rotates the vector cyclically by $`k`$ positions. The server has these three
+operations and nothing else.
 
-After the [install](#0-install), each script prints one row's time and its accuracy against the
-float64 model (`NODE`/`MEMS` bind it to the GPU's NUMA node); each runs the model's default plan
-(`python/perseus/examples/defaults.py`).
+**Encoding.** Let $`N`$ be a power of two ($`N = 2^{16}`$ here) and $`R = \mathbb{Z}[X]/(X^N + 1)`$. A vector
+$`\mathbf{z} \in \mathbb{C}^{N/2}`$ is encoded at a scale $`\Delta`$ as the integer polynomial
+$`m = \lfloor p \rceil \in R`$, where $`p`$ takes the value $`\Delta z_j`$ at the root $`\omega_j`$ of
+$`X^N + 1`$ and $`\Delta \bar{z}_j`$ at its conjugate. Decoding reads $`z_j \approx m(\omega_j)/\Delta`$.
+The $`N/2`$ entries of $`\mathbf{z}`$ are the *slots*. Evaluation at $`\omega_j`$ is a ring homomorphism,
+so sums and products of polynomials act on the slots element-wise, and encoding and decoding are an
+inverse and a forward discrete Fourier transform.
 
-```bash
-GPU=0 NODE=1 MEMS=1,2 bash scripts/repro/llama_prefill128.sh   # Llama-3-8B, 128-token prefill
-GPU=0 bash scripts/repro/llama_decode.sh                        # Llama-3-8B, decode
-GPU=0 bash scripts/repro/gpt2_decode.sh                         # GPT-2, steady-token decode
-GPU=0 bash scripts/repro/gpt2_decode_ctx512.sh                  # GPT-2, decode up to a 512-token context
-GPU=0 bash scripts/repro/gpt2_prefill128.sh                     # GPT-2, 128-token prefill
-GPU=0 bash scripts/repro/bert_base.sh                           # BERT-base, 128 tokens (SST-2)
-GPU=0 bash scripts/repro/vit_base.sh                            # ViT-B/16, four EuroSAT images
+**Levels.** A ciphertext of $`m`$ is a pair $`(b, a)`$ of polynomials modulo $`Q`$ with
+$`b + a s \equiv m + e \pmod{Q}`$, for the secret key $`s`$ and a small noise $`e`$. The product of two
+ciphertexts holds its message at scale $`\Delta^2`$, and *rescaling* divides it by $`\Delta`$, which
+removes a factor $`\Delta`$ from the modulus. With $`Q_\ell = q_0 \Delta^\ell`$, a fresh ciphertext has
+level $`L`$ and each multiplication spends one level, so a circuit deeper than $`L`$ needs a refresh.
+
+**Bootstrapping.** Bootstrapping
+([Gentry, 2009](https://crypto.stanford.edu/craig/craig-thesis.pdf); for CKKS,
+[Cheon et al., EUROCRYPT 2018](https://doi.org/10.1007/978-3-319-78381-9_14)) refreshes a ciphertext
+whose levels are spent. At level 0, $`b + a s = m + q_0 t`$ for an integer polynomial $`t`$ that depends
+on $`s`$. Bootstrapping raises the modulus, moves the coefficients into the slots with a homomorphic
+DFT (CoeffToSlot), removes the multiple of $`q_0`$ with a polynomial approximation of a sine (EvalMod)
+
+```math
+m_i \approx \frac{q_0}{2\pi} \sin\left(\frac{2\pi\,(m_i + q_0 t_i)}{q_0}\right), \qquad |m_i| \ll q_0,
 ```
 
-Llama-3-8B needs access to `meta-llama/Llama-3.1-8B`; Llama, BERT and ViT were measured on a 96 GB
-GPU.
+and moves the result back (SlotToCoeff). A bootstrap costs two to three orders of magnitude more than
+any other operation, so the depth of the circuit and where its bootstraps go decide most of the
+latency.
 
-## Layout
+**Why approximations.** Only additions, multiplications and rotations run under encryption, so every
+nonlinear operation is approximated. In GPT-2 these are the $`1/\sqrt{x}`$ of LayerNorm, the
+exponential and the division of softmax, GELU and the argmax. Common choices are Goldschmidt
+iterations for division, Newton–Raphson iterations for $`1/\sqrt{x}`$, and Chebyshev or Remez
+polynomials. An iterative method refines a seed $`F_0(x)`$ into estimates
+$`F_1(x), \ldots, F_n(x) \to f(x)`$, and for quadratically convergent methods
 
-- `crates/` the Rust + CUDA runtime
-  - `pc-core` the CUDA-free CKKS mathematics (parameters, encoding, keys, bootstrap constants);
-    `pc-shadow` the level/degree/scale engine the planner, the recorder and the runtime share;
-    `pc-config` the typed run configuration.
-  - `pc-cuda`, `pc-kernels`, `pc-cublas`, `pc-gpu` the device runtime (NTT, key switching,
-    bootstrap routes, PCMM/CCMM, the plaintext store, one frozen device arena).
-  - `pc-program` a recorded block + its plan -> a compiled program, and its replay.
-  - `pc-py` the Python extension `perseus._pc`; `pc-client` the CUDA-free client (keys, encryption,
-    the wire format); `pc-tools` benchmarks and cross-checks.
-- `python/perseus/`
-  - `impl/` the Python implementation of encrypted linear layers, attention, normalization and
-    activations, the recorder and the planned drivers.
-  - `plan/` the planner, which reads a recorded forward pass, simulates how levels are spent,
-    places the bootstraps and picks each one's type. It also holds our ports of the DaCapo,
-    Orion and Fhelipe planners.
-  - `examples/{gpt2,llama,bert,vit}/` the four models on `perseus.impl`, with their runners
-    and planning scripts (`make_plan.sh`); `defaults.py` the plan each runs by default.
-  - `calibrate/`, `export.py`, `hub.py` the fitting of the polynomial approximations, the export
-    of HuggingFace weights, the model download.
-  - `client/`, `serve/` the client that holds the secret key and the server that runs on its key bundle.
-  - `configs/model/approximation/` the fitted approximations of every model.
-- `graphs/` the recorded forward passes the plans are computed from (the Llama ones ship as a
-  release artifact, `graphs/RELEASE.txt`).
-- `bootstrap_placements/` one directory per plan, each with the recipe that regenerates it and
-  the runtime switches it was made for (`PLAN_CMD.txt`).
-- `scripts/repro/` one script per result; `scripts/make_plans.sh` replays every plan's recipe;
-  `scripts/utils/{dacapo,orion}_upstream/` run the released DaCapo and Orion tools.
-- `notebooks/` a custom model on the runtime's operations and the client-server split.
-- `speedrun/` the Encrypted GPT-2 Speedrun: its rules ([`speedrun/README.md`](speedrun/README.md)), the harness
-  that times entries, the records, and the current record's server.
-- `tools/` the repo gate (`ci.sh`) and the route-table tool.
-- `assets/` the logos and the paper's result tables (`paper-tables.tex`, `results-table.tex`, rendered by
-  `render.sh`).
-
-## Python API
-
-`perseus.impl` is where models are written, as encrypted layers in Python. The recorder runs them
-once on a CPU twin (no GPU and no values, only the op stream, the plaintexts and the levels), the
-runtime compiles them per block with the plan, and the planned drivers replay them token after token.
-`python/perseus/examples/gpt2` is GPT-2 written with it; its runner is the shortest way in.
-
-```bash
-source scripts/local_env.sh                     # the weights and the reference outputs (README step 1)
-.venv/bin/python -m perseus.examples.gpt2.run_decode --tokens 4 --argmax          # the default plan
-.venv/bin/python -m perseus.examples.gpt2.run_decode --fake --tokens 1 --argmax \
-    --capture graphs/my_capture                                                  # record for the planner (CPU)
+```math
+\varepsilon_n := \sup_{x \in \mathcal{D}} |F_n(x) - f(x)| \le M\, r^{2^n}, \qquad M > 0,\ r \in (0, 1),
 ```
 
-The runtime's operations are also callable one at a time, which is how a new model starts
-(`notebooks/custom_encrypted_model.ipynb`).
+where $`\mathcal{D}`$ is the set of inputs whose seed lies in the convergence interval. The error falls
+doubly exponentially in $`n`$, but each iteration costs a fixed number of multiplications, so the
+depth grows linearly. Every approximation trades accuracy for levels, and so for bootstraps. This
+trade is open in the speedrun: an entry can refit any approximation while the KL stays below
+$`10^{-2}`$ in prefill and $`10^{-3}`$ in decode.
 
-```python
-import numpy as np
-from perseus import _pc
+**Reference hardware.** Scored attempts will be run on a server with:
 
-cfg = _pc.Config.preset("n32_gpt2_decode")             # the 32-bit chain
-keys = _pc.KeySource.generate([1, 2, 4, 8], seed=0)     # secret key + the rotations the model uses
-sess = _pc.Session(cfg, keys, pool=32, pt_slots=8).complete_setup()
-fhe = sess.fhe
-x = np.zeros(fhe.slots); x[:16] = np.random.default_rng(0).standard_normal(16)
-y = fhe.rotate_and_sum(fhe.square(fhe.encrypt(x, 0)), 1, 16)   # sum of squares into slot 0
-print(np.real(fhe.decrypt_slots_complex(y)[0]), np.sum(x ** 2))
-sess.close()
-```
+- **GPU:** one NVIDIA RTX PRO 6000 Blackwell Server Edition (96 GB).
+- **CPU:** 2 x Xeon 6960P.
+- **RAM:** 256 GB.
 
-A new model subclasses `perseus.impl.driver.ImplModel` and lists its stages, the masks each
-step needs and its weights; `python/perseus/impl/__init__.py` describes the modules. The client
-(`perseus.client`) and the server (`perseus.serve`) split the key holder from the GPU
-(`notebooks/client_server.ipynb`).
-
-## Pipeline
-
-The complete sequence for GPT-2 on the 32-bit parameters, from the weights to an encrypted run.
-Llama-3 follows the same steps with `python/perseus/examples/llama/make_plan.sh`. The BERT and ViT
-plans ship ready to run. Every file a step produces is already in the repository, so any step can
-be skipped.
-
-### 0. Install
-
-You need the following.
-- Linux, an NVIDIA GPU of compute capability 12.0 (Blackwell; the kernels are built for `sm_120`)
-  and CUDA 13.2 (`CUDA_HOME`, default `/usr/local/cuda-13.2`).
-- A GPU with enough memory for the run. Decoding peaks at 47.9 GiB with GPT-2 and 46.0 GiB with
-  Llama-3-8B, and the prefills, BERT and ViT need more (the first table lists every peak, measured on a
-  96 GB GPU).
-- The Rust toolchain (`rustup`; `rust-toolchain.toml` pins the version) and Python 3.12.
-
-```bash
-git clone https://github.com/gladia-research-group/perseus
-cd perseus
-uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e ".[hf,examples,dev]"
-.venv/bin/maturin develop --release              # builds the runtime and installs perseus._pc
-```
-
-The planner, the weight export and the approximation fitting run without the extension.
-`scripts/local_env.sh` sets where the data lives, and a variable you export yourself always wins.
-
-| variable | what it points at | default |
-|---|---|---|
-| `PERSEUS_DATA` | where the weights, the calibration text and the reference outputs live | `.cache/` |
-| `WEIGHTS_PATH` | the exported weights (`weights.bin.zip`) | under `PERSEUS_DATA` |
-| `ALL_BLOCKS_IO_DIR` | the reference outputs that encrypted runs are checked against | under `PERSEUS_DATA` |
-
-The CKKS parameters and the runtime switches come from the plan (its `PLAN_CMD.txt`) and the
-typed configuration (`perseus._pc.Config`).
-
-### 1. Export the weights, fit the approximations, compute the reference outputs
-
-```bash
-.venv/bin/perseus-export --model openai-community/gpt2 --out .cache/models/openai-community/gpt2
-.venv/bin/python -c 'import numpy as np; from omegaconf import OmegaConf; from perseus.calibrate import data; \
-    np.save(".cache/pools/openwebtext_gpt2.npy", np.asarray(data.load_token_pool("openai-community/gpt2", \
-    OmegaConf.load("python/perseus/configs/dataset/openwebtext.yaml"))))'
-.venv/bin/perseus-calibrate model=gpt2 dataset=openwebtext
-.venv/bin/python scripts/utils/gen_gpt2_oracle.py --model openai-community/gpt2 \
-    --pool .cache/pools/openwebtext_gpt2.npy --out .cache/oracle/gpt2/all_blocks_io
-```
-
-The export packs the weights for the runtime. The calibration fits a polynomial approximation
-to every nonlinear function (LayerNorm, softmax, GELU and the encrypted argmax) on the value
-ranges it sees on OpenWebText; the shipped `gpt2_base_n32/configs.json` is the one the results
-use. The last command runs the plaintext model on a fixed piece of text and saves its inputs
-and output logits, the reference outputs that encrypted runs are compared against.
-
-A model fine-tuned for encryption, such as the HEAT GPT-2, is exported on top of its base model
-with `--checkpoint` (a `model.pt` file or a HuggingFace repository id).
-
-```bash
-.venv/bin/perseus-export --model openai-community/gpt2 \
-    --checkpoint gladia/heat-gpt2-small-openwebtext --tag heat --out .cache/models/gladia/heat-gpt2
-.venv/bin/python scripts/utils/gen_gpt2_oracle.py --model openai-community/gpt2 \
-    --checkpoint gladia/heat-gpt2-small-openwebtext \
-    --pool .cache/pools/openwebtext_gpt2.npy --out .cache/oracle/gpt2_heat/all_blocks_io
-```
-
-### 2. Record a forward pass
-
-The planner reads a record of one encrypted forward pass, with every encrypted value, how its data
-is laid out and the largest magnitude it reaches. The first token runs without a plan on the
-CPU twin (the numpy model of the runtime, values included) and is recorded block by block, the
-encrypted argmax included.
-
-```bash
-source scripts/local_env.sh
-.venv/bin/python -m perseus.examples.gpt2.run_decode --fake --tokens 1 --argmax \
-    --capture graphs/gpt2_decode_python_n32
-```
-
-A recording belongs to one approximation config and one set of runtime switches, and changing either
-means recording again.
-
-### 3. Plan
-
-The planner runs on the CPU, in seconds per plan (the comparison tools take minutes). Each plan
-directory's `PLAN_CMD.txt` holds its recipe, and `make_plans.sh` replays them.
-
-```bash
-bash scripts/make_plans.sh gpt2_decode_python_n32     # the 32-bit plan
-bash scripts/make_plans.sh                            # every plan in the repository
-```
-
-`python -m perseus.plan --help` lists the planner's options, among them the safety margin on
-recorded magnitudes (`--mag-safety`), the accuracy target (`--err-target`), the largest scaling
-setting (`--cf-max`), the sizes of the cheaper bootstrap (`--sparse-slots`), removing bootstraps
-that turn out redundant (`--prune`) and the placement algorithm
-(`--placer {min_cut,ilp,orion,dacapo,fhelipe}`, where `ilp` is the exact algorithm). The 32-bit
-plans estimate each bootstrap's error from measurements (`python/perseus/plan/data/bts_accuracy_n32.json`),
-the 64-bit plans from a formula.
-
-The comparison plans of the placement study come from the released
-tools. DaCapo needs its compiler, `hecate-opt`, built once (LLVM/MLIR 18); Orion's solver is
-downloaded and patched on first use.
-
-```bash
-bash scripts/utils/dacapo_upstream/build_hecate.sh
-bash scripts/make_plans.sh python/dacapo python/orion python/fhelipe
-```
-
-### 4. Run encrypted
-
-```bash
-source scripts/local_env.sh
-DECODE=".venv/bin/python -m perseus.examples.gpt2.run_decode --tokens 16 --argmax"
-$DECODE                                                        # the default plan
-$DECODE --plan bootstrap_placements/gpt2_decode_python_n32     # the min-cut plan of the placement study
-bash scripts/repro/gpt2_decode_ctx512.sh                       # up to a 512-token context (its reference: the script)
-```
-
-Generation feeds each token back without decrypting it. The encrypted argmax picks the token, its
-embedding is computed from the ciphertext, and the next position starts from there
-(`run_generate`, which checks the tokens against greedy decoding of the plaintext model).
-
-```bash
-.venv/bin/python -m perseus.examples.gpt2.run_generate --prompt 3 --tokens 4
-```
-
-The runtime runs planned only. Every block is a program compiled from its recording and its
-plan, and a plan that does not bind fails at compile time. The decode runs are teacher-forced
-(each position's input is the reference token's embedding); the encrypted argmax runs on every
-position. A plan that binds at every cache length (`SM_PERIODIC=2` in its `runtime=` line, the
-512-context plan) records every position at setup and compiles one program per structure class.
-
-A run passes when it prints `[decode] PASS`, which means that at every position the reference token
-stays among the top few of the encrypted output, and the divergence from the plaintext output stays
-small (a broken run shows a KL above 50). Matching the plaintext top token is reported but not
-required. Time a run on an otherwise idle machine, with the process pinned to the GPU's NUMA node
-(`numactl --cpunodebind=<node> --membind=<node>`).
-
-## Encrypted GPT-2 Speedrun
-
-A public leaderboard for encrypted GPT-2 small on one GPU, in two tracks, Prefill-128 and Decode-8, at 128-bit
-security and a fixed accuracy. Every entry is a pull request to this repository. The rules, the harness and the
-records are in [`speedrun/`](speedrun/README.md).
-
-## Citation
-
-If you use Perseus, please cite the paper (GitHub's *Cite this repository* button reads
-[`CITATION.cff`](CITATION.cff)).
-
-```bibtex
-@misc{zirilli2026perseus,
-  title  = {Perseus: A Bootstrap Placer for Faster Encrypted Transformer Inference},
-  author = {Zirilli, Alessandro and Marincione, Davide and Kornaropoulos, Evgenios M. and Ateniese, Giuseppe and Rodol{\`a}, Emanuele},
-  year   = {2026},
-  url    = {https://github.com/gladia-research-group/perseus}
-}
-```
+The server runs pinned to the GPU's NUMA node, with its CPU time capped at that node's CPUs and its memory at
+160 GB; the client's memory is capped at 64 GB.
 
 ## License
 
-Perseus is released under the [Business Source License 1.1](LICENSE), free for any
-non-commercial use (research, academic, evaluation); commercial use requires prior written
-permission from the authors. On the Change Date (2030-08-18) the license converts to GPLv2. The speedrun's
-harness, prompts and records (`speedrun/harness/`, `runner/`, `prompts/`, `records/`) are under Apache-2.0
-([`speedrun/LICENSE`](speedrun/LICENSE)).
-
-<p align="center">
-  <a href="https://gladia.di.uniroma1.it">
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/gladia-logo-white.svg">
-      <source media="(prefers-color-scheme: light)" srcset="assets/gladia-logo.svg">
-      <img src="assets/gladia-logo.svg" alt="GLADIA Research Group" height="56">
-    </picture>
-  </a>
-</p>
-
-<p align="center"><sub><i>Perseus slew Medusa without ever looking at her, only at her reflection in a polished
-shield. Perseus runs language models the same way, looking only at the ciphertext.</i></sub></p>
+In `speedrun/`, `harness/`, `runner/`, `prompts/` and `records/` are under [Apache-2.0](speedrun/LICENSE). The rest
+of this branch, Perseus with the server files in `speedrun/` (`server.py`, `serve.sh`, `record1.py`,
+`make_tail_plan.sh`), is under [BUSL-1.1](LICENSE): free for non-commercial use.

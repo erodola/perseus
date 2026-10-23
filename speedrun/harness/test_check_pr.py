@@ -84,7 +84,10 @@ class CheckPrTest(unittest.TestCase):
         self.assertTrue(any("perseus_core_client.py" in e for e in self.run_check()[0]))
         self.record()
         self.write(".github/workflows/x.yml", "evil\n")
-        self.assertTrue(any(".github" in e for e in self.run_check()[0]))
+        self.write("README.md", "new rules\n")
+        self.write("CLAUDE.md", "new rules\n")
+        errors = self.run_check()[0]
+        self.assertTrue(all(any(p in e for e in errors) for p in (".github", "`README.md`", "`CLAUDE.md`")))
 
     def test_a_maintainer_may_touch_the_harness(self):
         self.write("speedrun/runner/run.py", "better\n")

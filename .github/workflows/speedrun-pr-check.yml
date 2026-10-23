@@ -1,4 +1,4 @@
-# Every PR is checked before a maintainer is notified: speedrun/harness/check_pr.py (the speedrun's harness, rules and
+# Every PR to the speedrun branch is checked before a maintainer is notified: speedrun/harness/check_pr.py (the speedrun's harness, rules and
 # records left alone; for an entry, its record folder, submission.json, the declared CKKS parameters at 128-bit security
 # and the client's code). It runs the base branch's checker and reads the PR through git only, so no submitted code runs
 # here; the PR's description reaches it as a file. A plain PR that passes gets no comment. An entry that passes is
@@ -6,6 +6,7 @@
 name: Speedrun PR check
 on:
   pull_request_target:
+    branches: [speedrun]
     types: [opened, synchronize, reopened, edited]
 permissions:
   contents: read
