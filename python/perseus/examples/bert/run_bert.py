@@ -4,7 +4,7 @@ attention, blocked layout, PCMM linears) -> client pooler + classifier, gated ag
     .venv/bin/python -m perseus.examples.bert.run_bert --fake [--text 128 | --sst2 0,1,2] [--layers 12]
         [--capture graphs/X --structure-only] [--plan bootstrap_placements/X] [--check]
     tools/gpu.sh <log> .venv/bin/python -m perseus.examples.bert.run_bert --text 128 \
-        [--plan bootstrap_placements/bert_base_sst2_128_m16s0] [--check]   # default plan: examples.defaults
+        [--plan bootstrap_placements/bert_sst2_128] [--check]   # default plan: examples.defaults
 
 The device path runs planned only (examples.bert.planned.BertPlannedPrefill): the forward's op stream recorded once
 on the CPU twin, every block a compiled Program run in Rust, the PCMM linears and the CCMM attention `Finish` ops
@@ -188,8 +188,6 @@ def main(argv=None, results=None):
     for k, v in over.items():
         if k.startswith("PF_"):
             os.environ.setdefault(k, str(v))
-    # the CCMM's landing on the device (the calibration checks it against the twin's)
-    os.environ.setdefault("PF_CCMM_FAKE_LAND", "30")
     if a.plan and not os.environ.get("PF_PCMM_CALIB_IN"):
         cal = os.path.join(a.plan, "pcmm_calib.json")
         if os.path.exists(cal):

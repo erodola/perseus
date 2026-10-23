@@ -2,7 +2,7 @@
 
     .venv/bin/python -m perseus.examples.llama.run_prefill --fake --tokens 127 --capture graphs/<name>
     GPU_JOB_TIMEOUT=7200 tools/gpu.sh <log> .venv/bin/python -m perseus.examples.llama.run_prefill --tokens 127 \
-        --plan bootstrap_placements/llama31_8b_prefill_python_n32_pr9_m9c [--check]
+        --plan bootstrap_placements/llama31_8b_prefill128 [--check]
 
 The device path runs planned only (examples.llama.planned.LlamaPlannedPrefill): the forward's op stream
 recorded once on the CPU twin, every block a compiled Program run in Rust, the PCMM linears and the CCMM attention
@@ -48,7 +48,7 @@ def _planned(a, model, toks, gt, ref, results=None):
     cfg = _plan_config(a.plan)
     cfg["exec.use_graphs"] = bool(a.graphs)
     keys = _pc.KeySource.generate([], conj=True, layout=a.key_layout)
-    work = a.work_dir or os.path.join(os.environ.get("PC_WORK_DIR", "/tmp"), f"m9c_prefill_{os.getpid()}")
+    work = a.work_dir or os.path.join(os.environ.get("PC_WORK_DIR", "/tmp"), f"llama_prefill_{os.getpid()}")
     run = LlamaPlannedPrefill(model, resolve(a.plan), cfg, keys, work_dir=work, pt_rows=a.pt_rows,
                               stc_cache=a.stc_cache, check_meta=a.check_meta, log=lambda m: print(m, flush=True),
                               tap_block=a.tap_block, ccmm_kappa=[float(x) for x in a.ccmm_kappa.split(",")],
@@ -254,9 +254,8 @@ def main(argv=None, results=None):
     t0 = time.time()
     pruned = None
     if planned:
-        # the CPU twin: the fake session under the plan's runtime; the CCMM lands where the device's lands (the
-        # calibration probe checks it)
-        os.environ.setdefault("PF_CCMM_FAKE_LAND", "30")
+        # the CPU twin: the fake session under the plan's runtime; its PCMM / CCMM finishes land where the Shadow
+        # says the device's do (`finish_landing`; the CCMM calibration probe checks it)
         from perseus.impl import fakecap
         cvd = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         env.export_env(a.device, chain="n32", **{"CKKS_COMPLEX": "1", **over})

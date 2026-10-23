@@ -290,16 +290,16 @@ class LlamaPlannedPrefill(PlannedPrefill):
         del xa, xb
         sess.ccmm_set(c_unit, *self.ccmm_kappa)
         land = (int(ys[0].level), int(ys[0].deg))
-        fake_land = int(os.environ.get("PF_CCMM_FAKE_LAND", "28"))
+        fake_land = CC.fake_landing(getattr(getattr(self.model, "inf", None), "fhe", None))
         self.ccmm_cal = {"c_unit": c_unit, "nf_ref": nf_ref, "nf_split": nf_split, "probe_rel_err": float(err),
                          "land": land, "s": time.time() - t0}
         self.log(f"[ccmm] calibrated: c_unit {c_unit:.6g} (probe rel. err {err:.2e}, "
                  f"{np.log2(1 / max(err, 1e-300)):.1f} bits), nf_ref 2^{np.log2(nf_ref):.3f}, nf_split "
-                 f"2^{np.log2(nf_split):.3f}, landing {land} (the twin's PF_CCMM_FAKE_LAND {fake_land}), "
+                 f"2^{np.log2(nf_split):.3f}, landing {land} (the twin's {fake_land}), "
                  f"{time.time() - t0:.1f} s")
         if land[0] != fake_land:
             raise RuntimeError(f"CCMM lands at level {land[0]} on the device, the CPU twin recorded {fake_land} "
-                               f"(PF_CCMM_FAKE_LAND)")
+                               f"(ccmm.fake_landing)")
         for kappa in self.ccmm_sweep:
             for case in ("qk", "pv"):
                 bits = self.ccmm_case(case, kappa, L)

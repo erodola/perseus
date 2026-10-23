@@ -71,9 +71,9 @@ struct Opts {
 fn parse(a: &[String]) -> Res<Opts> {
     let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let mut o = Opts {
-        plan: assets.join("bootstrap_placements/gpt2_decode_python_n32"),
+        plan: assets.join("bootstrap_placements/gpt2_decode"),
         // the shipped decode plan's graph (v1) and a v2 fake capture of it (exact scalars, CPU only)
-        graph: assets.join("graphs/gpt2_decode_python_n32_gcheb"),
+        graph: assets.join("graphs/gpt2_decode"),
         scalars: Some(PathBuf::from(V2_SCALARS)).filter(|p| p.is_dir()),
         g0: PathBuf::from(ORACLE),
         block: "block_0".into(),

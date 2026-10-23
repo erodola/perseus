@@ -118,7 +118,9 @@ fn run_dump_with(file: &str, quirks: &Quirks, verbose: bool) -> Option<(usize, u
     let mut bare = Tally { nodes: 0, diffs: 0, hints: 0, over: 0 };
     let name = file.trim_end_matches(".json");
     for b in doc["blocks"].as_array().unwrap() {
-        let gf = b["graph_file"].as_str().unwrap();
+        // relative to the repository root (sim_dump.py runs there)
+        let gf = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").join(b["graph_file"].as_str().unwrap());
+        let gf = gf.to_str().unwrap();
         if !std::path::Path::new(gf).is_file() {
             println!("SKIP: {gf} not readable");
             return None;
@@ -211,7 +213,7 @@ fn run_dump_with(file: &str, quirks: &Quirks, verbose: bool) -> Option<(usize, u
 /// Plan-free runs of the dumped sim.py land a fired hint without a landing spec at (bootstrap level, deg 2); the
 /// rules realize it (deg 1, one level deeper). Nodes downstream of such a hint differ, per dump (planned runs pin
 /// every hint's landing: 0 there).
-const BARE_HINT_LANDINGS: (usize, usize, usize) = (480, 12, 32);
+const BARE_HINT_LANDINGS: (usize, usize, usize, usize) = (480, 12, 4, 4);
 
 #[test]
 fn gpt2_decode() {
@@ -230,10 +232,18 @@ fn gpt2_prefill() {
 }
 
 #[test]
+fn llama_decode() {
+    if let Some((n, d1, d2, _, _)) = run_dump("sim_llama_decode.json") {
+        assert!(n > 0);
+        assert_eq!((d1, d2), (0, BARE_HINT_LANDINGS.2));
+    }
+}
+
+#[test]
 fn llama_prefill() {
     if let Some((n, d1, d2, _, _)) = run_dump("sim_llama_prefill.json") {
         assert!(n > 0);
-        assert_eq!((d1, d2), (0, BARE_HINT_LANDINGS.2));
+        assert_eq!((d1, d2), (0, BARE_HINT_LANDINGS.3));
     }
 }
 
@@ -242,7 +252,7 @@ fn llama_prefill() {
 /// full planner set is what reproduces sim.py.
 #[test]
 fn quirk_dependence() {
-    let files = ["sim_gpt2_decode.json", "sim_gpt2_prefill.json", "sim_llama_prefill.json"];
+    let files = ["sim_gpt2_decode.json", "sim_gpt2_prefill.json", "sim_llama_decode.json", "sim_llama_prefill.json"];
     for q in Quirks::planner().0.iter() {
         let mut qs = Quirks::planner();
         qs.0.remove(q);

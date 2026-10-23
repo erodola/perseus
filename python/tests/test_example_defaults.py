@@ -14,7 +14,7 @@ def test_default_plans_exist():
 
 
 def test_shape_lookup():
-    assert default_plan("gpt2_prefill", 128).endswith("gpt2_prefill128_m16s0")
+    assert default_plan("gpt2_prefill", 128).endswith("bootstrap_placements/gpt2_prefill128")
     assert default_plan("gpt2_prefill", 64) is None
-    assert default_plan("gpt2_decode", 16).endswith("_m16i")
+    assert default_plan("gpt2_decode", 16).endswith("bootstrap_placements/gpt2_decode")
     assert default_plan("nope") is None

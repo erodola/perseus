@@ -25,7 +25,7 @@ from perseus.plan import equiv as _equiv
 
 REPO = ASSETS
 BP = REPO / "bootstrap_placements"
-MAIN = "gpt2_decode_python_n32"
+MAIN = "gpt2_decode"
 # the released DaCapo / Orion drivers were repo scripts, not ported
 UPSTREAM = ("scripts/utils/orion_upstream/plan.sh", "scripts/utils/dacapo_upstream/plan.sh")
 GPT2_TOOL = "python/perseus/examples/gpt2/make_plan.sh"
@@ -44,79 +44,45 @@ STAMPS = ("capture_env", "config")
 PLAN_FIELDS = ("placements", "rescale_after", "sparse_slots", "correction_factor", "real_route", "raise_drop",
                "hint_fire", "summary.final_named_levels", "summary.final_named_degs")
 
-# The StC-first prefill pipes' extra planner env (old repo logs/prefill/q_g2stcf.sh / q_stcf.sh `K`): in no
-# PLAN_CMD.txt (gpt2's has no recipe= line; llama's records only make_plan.sh's own RECIPE keys).
+# The StC-first prefill pipes' extra planner env: in no recipe= line (gpt2_prefill128's is PLAN_PRUNE=1 only, the
+# encoders' PLAN_CMD.txt has none), spelled out in each one's replanned= note.
 _STCF = ("BTS_LEVEL=28 PLAN_RAISE_DROP_MAX=0 PLAN_RAISE_LANDING_MAX=42 PLAN_RAISE_ROUTES=0 "
          "PLAN_REFRESH_ENV_CAP_ROUTES=0:46 PLAN_SLIM_CUBIC=1 PLAN_STC_FIRST_ENTRY=46 PLAN_STC_FIRST_FALLBACK=34:1")
-# the route table's measured landings (`tools/route_table.py --recipe`, the blocked prefill / encoder runtime=)
-_M16L = ("BTS_LEVEL=34 PLAN_SPARSE_BTS_OUT=1:16,512:24 "
-         f"PLAN_ACC_TABLE={PKG / 'plan' / 'data' / 'route_table_n32.json'}")
-_M16S = "PLAN_SPARSE_BTS_OUT=1:16,512:24 " + _STCF
+# with the runtime's measured route landings (tools/route_table.py --recipe)
+_STCF_LANDED = "PLAN_SPARSE_BTS_OUT=1:16,512:24 " + _STCF
 # StC-first captures whose deliberate refreshes past the entry take the shipped order (no StC-first input cap)
-_M18S = _M16S.replace("PLAN_REFRESH_ENV_CAP_ROUTES=0:46 ", "") + " PLAN_STC_FIRST_REROUTE=1"
+_STCF_REROUTE = _STCF_LANDED.replace("PLAN_REFRESH_ENV_CAP_ROUTES=0:46 ", "") + " PLAN_STC_FIRST_REROUTE=1"
 # name -> (graph override, recipe beyond PLAN_CMD.txt's recipe= line, tool override, stages); None = as shipped
 GATE: dict[str, tuple | None] = {
-    "gpt2_decode_python_n32": None,
-    # ILP placer (scipy milp = HiGHS); PLAN_CMD.txt has no tool= line but the plan ships argmax + feedback stages.
-    # Shipped 2026-10-07 (old repo ce7ac6a), before make_plan.sh defaulted the real route + raise-drop set (d5db400,
-    # 10-08) and shared realize anchors (6d23015, 10-12): those defaults off, as the recipe then ran
-    "gpt2_decode_python_n32_ilp": (None, "PLAN_REAL_ROUTE=0 PLAN_RAISE_DROP_SET= PLAN_SHARED_REALIZE=", GPT2_TOOL,
-                                   None),
-    # logs/prefill/pipe2.sh: gpt2's plan_env is empty
-    "gpt2_prefill_python_n32_pcmmstcf": ("graphs/gpt2_prefill_python_n32_pcmmstcf", _STCF,
-                                         GPT2_TOOL, ("blocks",)),
-    # shipped 2026-10-11 (9a65ce9), before make_plan.sh defaulted shared realize anchors (6d23015, 10-12)
-    "llama31_8b_decode_python_n32": (None, "PLAN_SHARED_REALIZE=", None, None),
-    # the hand-off decode plan (old repo logs/prefill/HANDOFF.md, 2026-10-14), as its recipe= line ran
-    "llama31_8b_decode_python_n32_dsw48": None,
-    # dsw48 cut for a prefill hand-off's cache (KV_ENTRY_LEVEL + PLAN_KEEP_PLACEMENTS in the recipe= line): pr9
-    # hands K / V at 36, llama31_8b_prefill128 at 38
-    "llama31_8b_decode_python_n32_dsw48_ho36": None,
-    "llama31_8b_decode_python_n32_dsw48_ho38": None,
-    # ho38 with every softmax refresh one CF lower (PLAN_SITE_CF=softmax:-1 in its recipe= line)
-    "llama31_8b_decode_python_n32_dsw48_ho38_m18e": None,
-    # logs/prefill/pipe.sh llama plan_env (PLAN_DRIFT_RECUT=1 is not in the recipe= line) + the StC-first K
-    "llama31_8b_prefill_python_n32_pcmmstcf": (None, "PLAN_DRIFT_RECUT=1 " + _STCF, None, None),
-    # the encoder pipes (logs/bert/pipe.sh, logs/vit/pipe_cc.sh) rewrote PLAN_CMD.txt to runtime= / configs= only:
-    # gpt2 make_plan.sh blocks stage with PLAN_DELIB_DEG=captured (local_env.sh's only planner input,
-    # PLAN_SPARSE_SLOTS=512,1, is make_plan.sh's default)
-    "bert_base_python_n32_cc2": ("graphs/bert_base_python_n32_cc2", "PLAN_DELIB_DEG=captured", GPT2_TOOL, ("blocks",)),
-    "vit_base_224_python_n32_cc3": ("graphs/vit_base_224_python_n32_cc3", "PLAN_DELIB_DEG=captured", GPT2_TOOL,
-                                    ("blocks",)),
-    # the paged prefill pipe (logs/fin/q_pr.sh) exported these on top of the recipe= line it recorded
-    "llama31_8b_prefill_python_n32_pr2": (None, "PLAN_DELIB_DEG=captured PLAN_DRIFT_RECUT=1", None, None),
-    "llama31_8b_prefill_python_n32_pr9": (None, "PLAN_DELIB_DEG=captured PLAN_DRIFT_RECUT=1", None, None),
-    # the 2026-10-19 result plans (pers/dev 31ab85f, docs/RESULTS_2026-10-19.md): gpt2_decode_python_n32 is MAIN
-    # unchanged; three are renames of plans above (same files) and replan from the same graphs and recipes
-    "bert_base_sst2_128": ("graphs/bert_base_sst2_128", "PLAN_DELIB_DEG=captured", GPT2_TOOL, ("blocks",)),
-    "vit_b16_224": ("graphs/vit_b16_224", "PLAN_DELIB_DEG=captured", GPT2_TOOL, ("blocks",)),
-    # = gpt2_prefill_python_n32_blocked; its graph is a fake v2 capture (0 structural diffs vs the old repo's,
-    # which was never tracked), recipe as the blocked plan's REPLAN.sh
-    "gpt2_prefill128": ("graphs/gpt2_prefill128", "PLAN_PRUNE=1", GPT2_TOOL, ("blocks",)),
-    # pr2's graph + the recipe= line it records, with q_pr.sh's exports (as pr2/pr9)
-    "llama31_8b_prefill128": (None, "PLAN_DELIB_DEG=captured PLAN_DRIFT_RECUT=1", None, None),
-    # replans on the new runtime's measured route table (tools/route_table.py): landings (`--recipe`), sparse curves;
-    # `_m16l` the shipped captures, `_m16s0` captures with StC-first dense refreshes (runtime= adds the switches)
-    "gpt2_prefill128_m16l": ("graphs/gpt2_prefill128", "PLAN_PRUNE=1 " + _M16L, GPT2_TOOL, ("blocks",)),
-    "bert_base_sst2_128_m16l": ("graphs/bert_base_sst2_128", "PLAN_DELIB_DEG=captured " + _M16L, GPT2_TOOL, ("blocks",)),
-    "vit_b16_224_m16l": ("graphs/vit_b16_224", "PLAN_DELIB_DEG=captured " + _M16L, GPT2_TOOL, ("blocks",)),
-    "gpt2_prefill128_m16s0": ("graphs/gpt2_prefill128_stcf_m16", "PLAN_PRUNE=1 " + _M16S, GPT2_TOOL, ("blocks",)),
-    "bert_base_sst2_128_m16s0": ("graphs/bert_sst2_128_stcf_m16", "PLAN_DELIB_DEG=captured " + _M16S, GPT2_TOOL,
-                                 ("blocks",)),
-    "vit_b16_224_m18s3": ("graphs/vit_b16_224_stcf_m16", "PLAN_DELIB_DEG=captured " + _M18S, GPT2_TOOL, ("blocks",)),
-    # the main recipe (recipe= line) on the ILP placer (objective: total refresh count)
-    "gpt2_decode_python_n32_m16i": (None, "PLAN_PLACER=ilp PLAN_ILP_TIME_LIMIT=600", GPT2_TOOL, None),
+    # the decode recipe (recipe= line) on the ILP placer (objective: total refresh count)
+    "gpt2_decode": (None, "PLAN_PLACER=ilp PLAN_ILP_TIME_LIMIT=600", GPT2_TOOL, None),
+    "gpt2_decode_ctx512": None,
+    "gpt2_prefill128": ("graphs/gpt2_prefill128", "PLAN_PRUNE=1 " + _STCF_LANDED, GPT2_TOOL, ("blocks",)),
+    # gpt2_prefill128's blocks + the encrypted tail (TAIL_STAGES)
+    "gpt2_prefill128_tail": ("graphs/gpt2_prefill128", "PLAN_PRUNE=1 " + _STCF_LANDED, GPT2_TOOL, ("blocks",)),
+    # the encoders: the gpt2 make_plan.sh blocks stage with PLAN_DELIB_DEG=captured
+    "bert_sst2_128": ("graphs/bert_sst2_128", "PLAN_DELIB_DEG=captured " + _STCF_LANDED, GPT2_TOOL, ("blocks",)),
+    "vit_b16_224": ("graphs/vit_b16_224", "PLAN_DELIB_DEG=captured " + _STCF_REROUTE, GPT2_TOOL, ("blocks",)),
+    # shipped before make_plan.sh defaulted shared realize anchors
+    "llama31_8b_decode": (None, "PLAN_SHARED_REALIZE=", None, None),
+    # one planner run on the fake recording: the llama make_plan.sh prefill stage (its recipe= line)
+    "llama31_8b_prefill128": (None, "", None, ("prefill",)),
+    # the decode cut for the prefill's K / V (KV_ENTRY_LEVEL, PLAN_KEEP_PLACEMENTS, PLAN_SITE_CF in its recipe= line)
+    "llama31_8b_handoff_decode": None,
 }
-# the 10-19 table plans: `python python/tests/test_paper_plans.py table` replans these five
-TABLE = ("llama31_8b_prefill128", "gpt2_prefill128", "gpt2_decode_python_n32", "bert_base_sst2_128", "vit_b16_224")
+# the result plans: `python python/tests/test_paper_plans.py table` replans these
+TABLE = ("llama31_8b_prefill128", "gpt2_prefill128", "gpt2_decode", "bert_sst2_128", "vit_b16_224")
+# PLAN_KEEP_PLACEMENTS dirs that are not shipped: name -> the recipe changes that make them from the plan's own recipe
+# (KV_ENTRY_LEVEL, PLAN_KEEP_PLACEMENTS and PLAN_SITE_CF dropped; PLAN_CMD.txt `sites=`), replanned first
+KEEP_SITES = {"llama31_8b_handoff_decode": "PLAN_REFRESH_ENV_CAP=48"}
+_KEEP_DROP = ("KV_ENTRY_LEVEL", "PLAN_KEEP_PLACEMENTS", "PLAN_SITE_CF")
+# stages a separate tool plans from a graph that is not shipped (speedrun/make_tail_plan.sh): not regenerated here
+TAIL_STAGES = {"gpt2_prefill128_tail": ("block_12_placement.json", "block_13_placement.json")}
 
 
-# summary diagnostics a later planner computes differently than the shipped file recorded (same on the old sim.py and
-# on the Shadow-backed sim; no runtime field): left out of the body comparison of that plan only
-SUMMARY_DRIFT = {
-    # placed_input_levels / _hist were redefined after this plan shipped (2026-10-07)
-    "gpt2_decode_python_n32_ilp": ("bts_quality.placed_input_levels", "bts_quality.placed_input_level_hist"),
-}
+# summary diagnostics a later planner computes differently than the shipped file recorded: left out of the body
+# comparison of that plan only
+SUMMARY_DRIFT: dict[str, tuple[str, ...]] = {}
 # summary lists the planner fills in set-iteration order (PYTHONHASHSEED): compared as sets, every plan
 UNORDERED = ("bts_quality.env_cap.placed_past_cap",)
 
@@ -231,6 +197,14 @@ def replan(name: str, log: Path) -> tuple[Path, float]:
     env = dict(os.environ, GRAPH_DIR=graph, OUT_NAME=out_name, PYTHON=sys.executable,
                CUDA_VISIBLE_DEVICES="", OMP_NUM_THREADS="4", PYTHONPATH=pypath)
     env.update(kv.split("=", 1) for kv in recipe)
+    pre = []
+    if name in KEEP_SITES:          # the kept-sites plan first, into the dir the recipe names
+        keep = Path(env["PLAN_KEEP_PLACEMENTS"]).name
+        base = [kv for kv in recipe if kv.split("=", 1)[0] not in _KEEP_DROP] + shlex.split(KEEP_SITES[name])
+        benv = {k: v for k, v in env.items() if k not in _KEEP_DROP}
+        benv.update(kv.split("=", 1) for kv in base)
+        benv["OUT_NAME"] = keep
+        pre = [(["bash", str(TOOLS[tool]), graph, keep], benv)]
     if tool is None:
         cmds = [["bash", str(PKG / "plan" / "run_bootstrap_all_blocks.sh")]]
     elif tool in UPSTREAM:
@@ -245,9 +219,13 @@ def replan(name: str, log: Path) -> tuple[Path, float]:
         cmds = [["bash", str(TOOLS[tool]), graph, out_name] + ([] if s == "blocks" else [s]) for s in stages]
     rc = 0
     t0 = time.perf_counter()
-    with log.open("w") as f:
-        for cmd in cmds:
-            rc = rc or subprocess.run(cmd, cwd=REPO, env=env, stdout=f, stderr=subprocess.STDOUT).returncode
+    try:
+        with log.open("w") as f:
+            for cmd, e in pre + [(c, env) for c in cmds]:
+                rc = rc or subprocess.run(cmd, cwd=REPO, env=e, stdout=f, stderr=subprocess.STDOUT).returncode
+    finally:
+        for _, e in pre:
+            subprocess.run(["rm", "-rf", str(BP / e["OUT_NAME"])], check=False)
     wall = time.perf_counter() - t0
     assert rc == 0, log.read_text()[-3000:]
     return BP / out_name, wall
@@ -257,7 +235,7 @@ def compare(name: str, regen: Path, tmp: Path) -> dict:
     """{block file: {field: differing leaves}}, plus "<file>:body" -> equiv's reason where the body differs and
     "<file>:stamp" where the replanned Config stamp is not the shipped legacy stamp read through the Config."""
     plan_dir = BP / name
-    blocks = sorted(plan_dir.glob("block_*_placement.json"))
+    blocks = sorted(b for b in plan_dir.glob("block_*_placement.json") if b.name not in TAIL_STAGES.get(name, ()))
     assert blocks, f"no block files in {plan_dir}"
     out: dict = {}
     for ref in blocks:

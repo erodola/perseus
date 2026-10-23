@@ -34,7 +34,7 @@ sys.path.insert(0, ".")
 import networkx as nx                                                    # noqa: E402
 
 CLONE = Path(os.environ["ORION_SRC"])
-GRAPHS = Path(os.environ.get("GRAPH_DIR", "graphs/gpt2_decode_python_n32"))
+GRAPHS = Path(os.environ.get("GRAPH_DIR", "graphs/gpt2_decode_baselines"))
 OUT_JSON = Path(os.environ["OUT_JSON"])
 DENSE = os.environ.get("PLAN_DENSE", "0") == "1"
 

@@ -55,10 +55,14 @@ def test_config_errors_name_the_knob():
 
 def test_plan_runtime_matches_the_env_dicts():
     from perseus.examples.gpt2 import env
-    for plan in ("bootstrap_placements/gpt2_decode_python_n32", "bootstrap_placements/gpt2_prefill_python_n32_pcmmstcf",
-                 None):
+    for plan in ("bootstrap_placements/python/dacapo", None):          # runtime= line only
         assert config.to_env(config.plan_runtime(plan)) == env.plan_runtime(plan, "n32")
-    assert config.plan_configs("bootstrap_placements/gpt2_decode_python_n32") == \
+    for plan in ("bootstrap_placements/gpt2_decode", "bootstrap_placements/gpt2_prefill128"):
+        # Config-stamped plans: the stamp adds the capture's load-bearing fields, the runtime levers agree
+        got, want = config.to_env(config.plan_runtime(plan)), env.plan_runtime(plan, "n32")
+        for k, v in want.items():
+            assert got.get(k) == v or (got.get(k) is None and v == env.RUNTIME_LEGACY.get(k)), (plan, k)
+    assert config.plan_configs("bootstrap_placements/gpt2_decode") == \
         "configs/model/approximation/gpt2_base_n32/configs.json"
 
 
@@ -240,6 +244,55 @@ def test_fakecap_landings_follow_the_config(tmp_path):
     assert {n["output_level"] for n in g["nodes"] if n["op_type"] == "auto_bootstrap"} == {30}
 
 
+def test_finish_landings_from_the_shadow(tmp_path, monkeypatch):
+    """The PCMM / CCMM finishes land where the Shadow says (`finish_landing`: the StC-first route under the raise
+    drop, + the CCMM's StC stage), in every mode: the fake capture records what the runtime pins."""
+    cfg = config.preset("n32_llama_prefill")
+    want = {("pcmm", d): (26 + 2 * d, 2) for d in range(7)} | {("ccmm", d): (30 + 2 * d, 1) for d in range(7)}
+    for mode in ("runtime", "fakecap", "fake"):
+        sh = _pc.Shadow(cfg, mode)
+        assert {k: sh.finish_landing(*k) for k in want} == want, mode
+    with pytest.raises(_pc.ConfigError, match="finish_landing"):
+        _pc.Shadow(cfg, "runtime").finish_landing("gemm")
+    from perseus.impl import ccmm
+    monkeypatch.delenv("PF_CCMM_FAKE_LAND", raising=False)
+    assert ccmm.fake_landing() == 30
+    monkeypatch.setenv("PF_CCMM_FAKE_LAND", "28")
+    assert ccmm.fake_landing() == 28
+    monkeypatch.delenv("PF_CCMM_FAKE_LAND")
+    fhe, _ = _small_capture(tmp_path, config.preset("n32_gpt2_decode"))
+    fhe.nodes = []
+    for op, d in (("pcmm", 0), ("pcmm", 5), ("ccmm", 4)):
+        x = fakecap.CapCt(np.zeros(1024), 42, packing=None)
+        fhe.record_external_bootstrap(x, ["a"], [42], desc={"op": op, "raise_drop": d})
+        n = fhe.nodes[-1]
+        assert (n["output_level"], n["output_noise_level"]) == want[(op, d)] == tuple(n["args"]["landing"])
+    fhe.pcmm_landing = (24, 2)                                  # an explicit override keeps the drop
+    fhe.record_external_bootstrap(fakecap.CapCt(np.zeros(1024), 42, packing=None), ["a"], [42],
+                                  desc={"op": "pcmm", "raise_drop": 1})
+    assert fhe.nodes[-1]["output_level"] == 26
+
+
+@pytest.mark.skipif(not (ROOT / "graphs" / "llama31_8b_prefill128" / "block_0").is_dir(),
+                    reason="the Llama prefill recording (release artifact) is not unpacked")
+def test_llama_prefill_finishes_land_where_the_runtime_pins():
+    """Every finish of the shipped Llama prefill recording (PCMM raise drops 0-6, CCMM drops 0 and 4) sits at the
+    runtime Shadow's `finish_landing` for its descriptor."""
+    rt = _pc.Shadow(config.preset("n32_llama_prefill"), "runtime")
+    seen = set()
+    for b in sorted((ROOT / "graphs" / "llama31_8b_prefill128").glob("block_*")):
+        for n in json.loads((b / "graph.json").read_text())["nodes"]:
+            e = (n.get("args") or {}).get("external")
+            if isinstance(e, dict):
+                d = int(e.get("raise_drop", 0))
+                got = (n["output_level"], n["output_noise_level"])
+                assert got == rt.finish_landing(e["op"], d), (b.name, n["output"])
+                seen.add((e["op"], d))
+    if not seen:
+        pytest.skip("a v1 recording (no finish descriptors)")
+    assert {("pcmm", d) for d in (0, 1, 2, 4, 5, 6)} | {("ccmm", 0), ("ccmm", 4)} <= seen
+
+
 # ── the gate ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 GATE = os.environ.get("PC_M4B_GATE") == "1"
@@ -252,7 +305,7 @@ def _gate_capture(tmp_path, mode):
            "WEIGHTS_PATH": str(CACHE / "models/openai-community/gpt2/classic/weights.bin.zip"),
            "ALL_BLOCKS_IO_DIR": str(CACHE / "oracle/gpt2/all_blocks_io")}
     preset = "n32_gpt2_decode" if mode == "decode" else "n32_gpt2_prefill"
-    plan = "gpt2_decode_python_n32" if mode == "decode" else "gpt2_prefill_python_n32_pcmmstcf"
+    plan = "gpt2_decode" if mode == "decode" else "gpt2_prefill128"
     env["FAKECAP_LANDINGS"] = config.preset(preset)["quirks.fakecap_landings"]
     sets = [x for kv in config.runtime_env(f"bootstrap_placements/{plan}").items() for x in ("--set", "=".join(kv))]
     out = tmp_path / mode
@@ -260,7 +313,7 @@ def _gate_capture(tmp_path, mode):
         cmd = ["-m", "perseus.examples.gpt2.run_decode", "--fake", "--tokens", "1", "--argmax",
                "--structure-only", "--configs", "configs/model/approximation/gpt2_base_n32/configs.json"]
     else:
-        env["PF_PCMM_CALIB_IN"] = str(OLD / "bootstrap_placements" / plan / "pcmm_calib.json")
+        env["PF_PCMM_CALIB_IN"] = str(ROOT / "bootstrap_placements" / plan / "pcmm_calib.json")
         cmd = ["-m", "perseus.examples.gpt2.run_prefill", "--fake"]
     subprocess.run([sys.executable, *cmd, "--capture", str(out), *sets], env=env, check=True, cwd=ROOT,
                    stdout=subprocess.DEVNULL)
@@ -268,11 +321,10 @@ def _gate_capture(tmp_path, mode):
 
 
 @pytest.mark.skipif(not (GATE and CACHE.exists()), reason="PC_M4B_GATE=1 and the GPT-2 export needed")
-@pytest.mark.parametrize("mode,ref", [("decode", "gpt2_decode_python_n32_gcheb"),
-                                      ("prefill", "gpt2_prefill_python_n32_pcmmstcf")])
+@pytest.mark.parametrize("mode,ref", [("decode", "gpt2_decode"), ("prefill", "gpt2_prefill128")])
 def test_gate_fake_capture_equals_shipped(tmp_path, mode, ref):
     out = _gate_capture(tmp_path, mode)
-    diffs = fakecap.compare_graphs(OLD / "graphs" / ref, out)
+    diffs = fakecap.compare_graphs(ROOT / "graphs" / ref, out)
     print(f"[gate] {mode} vs {ref}: {diffs}")
     assert diffs and set(diffs.values()) == {0}
     if mode == "prefill":      # every PCMM finish names its linear and output (args.external)

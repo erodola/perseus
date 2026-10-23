@@ -54,6 +54,34 @@ pub struct Landing {
     pub deg: u8,
 }
 
+fn staged_n32() -> Landing {
+    Landing { level: 28, deg: 1 }
+}
+
+/// A refresh the program issues outside the plan's sites: the outputs of a matrix product (a `Finish` op), refreshed
+/// on the StC-first dense route whatever route the plan's own dense sites take (the StC is paid on the staged input
+/// side), each output under its own raise drop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Finish {
+    /// A PCMM output (perseus pcmm.py; drops PF_PCMM_RAISE / PF_PCMM_RAISE_HI): the route's EvalMod output,
+    /// unrealized (degree 2).
+    Pcmm,
+    /// A CCMM output (ccmm.py SinCBoot; drops PF_CCMM_RAISE): one StC stage past the route's landing, degree 1
+    /// (pc-gpu `ccmm::stage0_level`).
+    Ccmm,
+}
+
+impl Finish {
+    /// The finish a descriptor's `op` names (`args.external.op` of a capture).
+    pub fn of_op(op: &str) -> Option<Finish> {
+        match op {
+            "pcmm" => Some(Finish::Pcmm),
+            "ccmm" => Some(Finish::Ccmm),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BtsConfig {
     /// The planner's bootstrap level: the dense landing every consumed depth is measured from (recipe BTS_LEVEL).
@@ -81,6 +109,11 @@ pub struct BtsConfig {
     pub raise_drops: Vec<u32>,
     /// Ciphertexts per batched bootstrap launch.
     pub k_max: u32,
+    /// The StC-first route's landing for the staged finishes (`finish_landing`), raise drop 0: the measured n32
+    /// StC-first landing (28, realized; route table `landings.stcf`), or the raw degree-2 form a fake capture lands
+    /// at (26, 2). Kept apart from `landings[0]`, which follows the order the plan's own dense sites run in.
+    #[serde(default = "staged_n32")]
+    pub staged: Landing,
 }
 
 impl BtsConfig {
@@ -100,7 +133,24 @@ impl BtsConfig {
             cf_window: (2, 20),
             raise_drops: vec![1, 3, 5],
             k_max: 8,
+            staged: staged_n32(),
         }
+    }
+
+    /// Where a finish's output lands under `raise_drop`: the staged route's EvalMod output (`staged`, unrealized),
+    /// `raise_drop` CKKS levels deeper (the variant raises that much below the chain top), plus the CCMM's StC
+    /// stage. The finishes' inputs are capped at the StC-first entry by the code (pcmm.py / ccmm.py
+    /// `bootstrap_hint` + `level_hint`), so no fallback applies. Every drop a finish uses gets its variant
+    /// (pc-py `route_needs`), so `raise_drops` does not bound it.
+    pub fn finish_landing(&self, chain: ChainShape, finish: Finish, raise_drop: u32) -> Landing {
+        let u = chain.unit;
+        let s = self.staged;
+        let raw = if s.deg == 1 { Landing { level: s.level - u, deg: 2 } } else { s };
+        let base = match finish {
+            Finish::Pcmm => raw,
+            Finish::Ccmm => Landing { level: effective_level(raw.level, raw.deg, u) + u, deg: 1 },
+        };
+        Landing { level: base.level + raise_drop * u, deg: base.deg }
     }
 
     /// The landing of a refresh of `input` on `route` (degree as listed; a refresh's own realize is part of it).
@@ -161,6 +211,18 @@ pub const EVALMOD_LEVELS: u32 = 10;
 /// order {4, 3} at 34, SparseB's depth-1 transforms ({1, 1}) at 24.
 pub fn multi_stage_landing(budget: [u32; 2], unit: u32) -> Landing {
     Landing { level: unit * (budget[0] + EVALMOD_LEVELS + budget[1]), deg: 1 }
+}
+
+/// FIDESLIB_CTS_ALT_BUDGET (`cts_alt`, 0 = off): a raise variant of drop >= 1 runs the alternative CtS of
+/// `budget[0] + 1` stages, raised one level higher, spending that level on the extra stage. Returns the variant's
+/// level budget and the drop it raises at; its landing is the drop's own (`multi_stage_landing` of the two agree,
+/// tested), so the lever changes stage shapes and precision, never a landing.
+pub fn cts_alt_variant(budget: [u32; 2], cts_alt: u32, raise_drop: u32) -> Result<([u32; 2], u32)> {
+    match cts_alt {
+        0 => Ok((budget, raise_drop)),
+        b if b == budget[0] + 1 => Ok(if raise_drop >= 1 { ([b, budget[1]], raise_drop - 1) } else { (budget, 0) }),
+        b => Err(Error::Bts { knob: "cts_alt_budget", msg: format!("{b}: must be the CtS level budget + 1 ({})", budget[0] + 1) }),
+    }
 }
 
 /// A linear-transform stage's plaintext encoding: the level it is encoded at and its scale.
@@ -260,5 +322,42 @@ mod tests {
         assert_eq!(multi_stage_landing([1, 1], 2), Landing { level: 24, deg: 1 });
         assert_eq!(Some(multi_stage_landing([4, 3], 2)), b.stc_first_fallback);
         assert_eq!(multi_stage_landing([3, 3], 2), Landing { level: 32, deg: 1 });
+    }
+
+    /// The staged finishes on the n32 measured landing (StC-first 28): PCMM outputs at (26 + 2 d, 2), CCMM outputs at
+    /// (30 + 2 d, 1), the levels the runtime pins for them (Llama prefill128: pcmm drops 0..6, ccmm drops 0 and 4);
+    /// the fake capture's raw form of the same landing gives the same levels.
+    #[test]
+    fn finish_landings() {
+        // the Llama prefill runtime's variants (FIDESLIB_BTS_RAISE_DROPS=1,2,4,5,6)
+        let rt = BtsConfig { raise_drops: vec![1, 2, 4, 5, 6], ..BtsConfig::n32_shipped() };
+        let mut cap = rt.clone();
+        cap.staged = Landing { level: 26, deg: 2 };
+        for b in [&rt, &cap] {
+            for d in 0..=6 {
+                assert_eq!(b.finish_landing(ChainShape::N32, Finish::Pcmm, d), Landing { level: 26 + 2 * d, deg: 2 });
+                assert_eq!(b.finish_landing(ChainShape::N32, Finish::Ccmm, d), Landing { level: 30 + 2 * d, deg: 1 });
+            }
+        }
+        // the same landing as a planned StC-first refresh of an input inside the entry, before its realize
+        let r = Route { stc_first: true, raise_drop: 4, ..Route::dense() };
+        let planned = rt.landing(ChainShape::N32, &Quirks::none(), &r, 42, 2).unwrap();
+        assert_eq!(planned, Landing { level: 36, deg: 1 });
+        assert_eq!(rt.finish_landing(ChainShape::N32, Finish::Pcmm, 4).level + 2, planned.level);
+    }
+
+    /// FIDESLIB_CTS_ALT_BUDGET = 5 on the dense {4, 3} route: every drop lands where it lands without it.
+    #[test]
+    fn cts_alt_keeps_landings() {
+        let budget = [4, 3];
+        for d in 0..=6 {
+            let (b2, d2) = cts_alt_variant(budget, 5, d).unwrap();
+            let with = multi_stage_landing(b2, 2).level + 2 * d2;
+            let without = multi_stage_landing(budget, 2).level + 2 * d;
+            assert_eq!(with, without, "drop {d}");
+            assert_eq!(b2[0], if d >= 1 { 5 } else { 4 });
+        }
+        assert_eq!(cts_alt_variant(budget, 0, 3).unwrap(), (budget, 3));
+        assert!(cts_alt_variant(budget, 6, 1).is_err());
     }
 }

@@ -1,7 +1,7 @@
-"""Llama-3.1-8B prefill, planned on the device: blocks 0-1 of the paged pr9 plan (BOS + 127 tokens),
+"""Llama-3.1-8B prefill, planned on the device: blocks 0-1 of the 128-token plan (BOS + 127 tokens),
 every block a compiled `Program` with its PCMM linears and CCMM attention served as `Finish` ops inside the replay.
 
-Gates (the full gate is `run_prefill --tokens 127 --plan bootstrap_placements/llama31_8b_prefill_python_n32_pr9_m9c
+Gates (the full gate is `run_prefill --tokens 127 --plan bootstrap_placements/llama31_8b_prefill128
 --check`): every finish served, compiled metadata == executed metadata, block outputs within the FIDESlib
 reference's per-block error class vs the float64 model (1.5e-3 / 1.2e-3 at |x| 0.41 / 0.49), device memory flat.
 """
@@ -15,7 +15,7 @@ pytestmark = pytest.mark.gpu
 
 _pc = pytest.importorskip("perseus._pc")
 
-PLAN = "bootstrap_placements/llama31_8b_prefill_python_n32_pr9_m9c"
+PLAN = "bootstrap_placements/llama31_8b_prefill128"
 
 
 @pytest.mark.skipif(not os.environ.get("HF_HOME"), reason="Llama weights / oracle cache (HF_HOME) missing")
@@ -30,5 +30,5 @@ def test_llama_prefill_planned_two_blocks(tmp_path, monkeypatch, capsys):
     assert "metadata vs compile: 0 mismatches" in out
     errs = [float(line.split("maxerr=")[1].split()[0]) for line in out.splitlines() if "] block " in line and "maxerr=" in line]
     assert len(errs) == 2 and errs[0] < 5e-3 and errs[1] < 1e-2, errs
-    assert got["pcmm_calls"] == 2 * 4 and got["ccmm_calls"] == 1 + 2 * 2, got
+    assert (got["pcmm_calls"], got["ccmm_calls"]) == (2 * 8, 1 + 2 * 4), (got["pcmm_calls"], got["ccmm_calls"])
     assert len(set(got["block_free_gb"][0])) == 1, got["block_free_gb"]

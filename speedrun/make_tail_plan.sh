@@ -3,12 +3,12 @@
 # position into the decode layout and runs ln_f and the LM head, stage 13 is CutMax. Their capture comes from the
 # CPU twin with the plan's runtime (run_prefill --fake --tail); stage 12 enters at block 11's planned exit, stage 13
 # at stage 12's (make_plan.sh's argmax pass). The recipe is the decode tail's, with the prefill plan's landings.
-#   bash speedrun/make_tail_plan.sh            -> bootstrap_placements/gpt2_prefill128_m16s0_tail
+#   bash speedrun/make_tail_plan.sh            -> bootstrap_placements/gpt2_prefill128_tail
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/local_env.sh
 export CUDA_VISIBLE_DEVICES="" PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}"
-BASE=gpt2_prefill128_m16s0 OUT=gpt2_prefill128_m16s0_tail GR=graphs/gpt2_prefill128_m16s0_tail
+BASE=gpt2_prefill128 OUT=gpt2_prefill128_tail GR=graphs/gpt2_prefill128_tail
 if [ ! -d "$GR/block_13" ]; then
     SETS=$(grep "^runtime=" "bootstrap_placements/$BASE/PLAN_CMD.txt" | sed 's/^runtime=//' | tr ' ' '\n' | grep = | sed 's/^/--set /')
     PF_PCMM_CALIB_IN="bootstrap_placements/$BASE/pcmm_calib.json" "$PYTHON" -m perseus.examples.gpt2.run_prefill \

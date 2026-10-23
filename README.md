@@ -285,7 +285,7 @@ encrypted argmax included.
 ```bash
 source scripts/local_env.sh
 .venv/bin/python -m perseus.examples.gpt2.run_decode --fake --tokens 1 --argmax \
-    --capture graphs/gpt2_decode_python_n32
+    --capture graphs/gpt2_decode
 ```
 
 A recording belongs to one approximation config and one set of runtime switches, and changing either
@@ -297,7 +297,7 @@ The planner runs on the CPU, in seconds per plan (the comparison tools take minu
 directory's `PLAN_CMD.txt` holds its recipe, and `make_plans.sh` replays them.
 
 ```bash
-bash scripts/make_plans.sh gpt2_decode_python_n32     # the 32-bit plan
+bash scripts/make_plans.sh gpt2_decode                # the GPT-2 decode plan
 bash scripts/make_plans.sh                            # every plan in the repository
 ```
 
@@ -324,7 +324,6 @@ bash scripts/make_plans.sh python/dacapo python/orion python/fhelipe
 source scripts/local_env.sh
 DECODE=".venv/bin/python -m perseus.examples.gpt2.run_decode --tokens 16 --argmax"
 $DECODE                                                        # the default plan
-$DECODE --plan bootstrap_placements/gpt2_decode_python_n32     # the min-cut plan of the placement study
 bash scripts/repro/gpt2_decode_ctx512.sh                       # up to a 512-token context (its reference: the script)
 ```
 

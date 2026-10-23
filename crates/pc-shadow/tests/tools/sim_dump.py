@@ -3,7 +3,10 @@
 Usage (read-only on the old repo; no bytecode is written there):
     PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/data02/users/mithrillo/projects/perseus \
         /data02/users/mithrillo/projects/perseus/.venv/bin/python crates/pc-shadow/tests/tools/sim_dump.py \
-        <graph dir> <placement dir> <out.json>
+        <graph dir> <placement dir> <out.json> [KEY=VALUE ...]
+
+KEY=VALUE pairs are planner env the plan was made with beyond its recipe= line (test_paper_plans.py GATE extras).
+Run from the repository root with relative dirs: the dump records the paths as given.
 
 The final sim of a plan is reconstructed from the shipped placement file (`dump_block`: refreshed landings, hint_force,
 realized anchors, chained seeds) and must reproduce its `final_named_levels/degs` for every output, or is refused.
@@ -40,6 +43,7 @@ SIM_ENV = ("PLAN_DELIB_LANDING_REMAP", "PLAN_DELIB_DEG", "PLAN_STC_FIRST_KV_LAND
 def main() -> None:
     graph_dir, placement_dir, out_path = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3])
     env = recipe_env(placement_dir)
+    env.update(kv.split("=", 1) for kv in sys.argv[4:])
     for k in SIM_ENV:
         os.environ.pop(k, None)
         if k in env:

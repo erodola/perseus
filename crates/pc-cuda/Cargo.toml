@@ -6,7 +6,7 @@ publish.workspace = true
 description = "perseus: hand-written cudart FFI with safe wrappers (device guard, lane-typed streams, events, graphs, arena memory)"
 
 [features]
-# cuBLASLt int8 -> int32 GEMM: pc-cublas (card M9s) re-exported by src/blas.rs, version-checked at handle creation.
+# cuBLASLt int8 -> int32 GEMM: pc-cublas re-exported by src/blas.rs, version-checked at handle creation.
 cublas = ["dep:pc-cublas"]
 
 [dependencies]

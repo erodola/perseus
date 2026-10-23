@@ -1,7 +1,7 @@
 #!/bin/bash
 # make_plans.sh — regenerate the shipped bootstrap plans from their recipes (CPU only).
 #   bash scripts/make_plans.sh                    # every plan directory with a recipe
-#   bash scripts/make_plans.sh gpt2_decode_python_n32 python/dacapo   # just these
+#   bash scripts/make_plans.sh gpt2_decode python/dacapo   # just these
 # Each bootstrap_placements/<dir>/PLAN_CMD.txt names the graph, the tool (make_plan.sh, or the
 # released DaCapo / Orion tools under scripts/utils/*_upstream/), the recipe and, for an
 # upstream tool's dense plan, the route; python/tests/test_paper_plans.py checks the committed plans

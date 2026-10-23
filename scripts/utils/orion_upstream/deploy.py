@@ -31,7 +31,7 @@ import perseus.plan.placer.baselines.orion as ob                        # noqa: 
 ML = int(os.environ.get("ML", "48"))
 CF_MAX = int(os.environ.get("CF_MAX", "20"))
 DENSE = os.environ.get("PLAN_DENSE", "0") == "1"
-GRAPHS = Path(os.environ.get("GRAPH_DIR", "graphs/gpt2_decode_python_n32"))
+GRAPHS = Path(os.environ.get("GRAPH_DIR", "graphs/gpt2_decode_baselines"))
 OUT = Path("bootstrap_placements") / os.environ["OUT"]
 UP = json.load(open(os.environ["RESULTS"]))
 OUT.mkdir(parents=True, exist_ok=True)

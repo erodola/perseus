@@ -1,30 +1,47 @@
 # Bootstrap plans
 
 A plan says where an encrypted model refreshes its values (bootstraps) and how. Every directory
-here holds one plan file per model stage, `block_N_placement.json` (blocks 0-11 are GPT-2's
-transformer blocks, 12 is the final LayerNorm and output layer, 13 is the encrypted argmax),
-and a `PLAN_CMD.txt` with the exact recipe that regenerates it: the recorded forward pass it was
-computed from (under `graphs/`), the planner settings and the error model. `bash
-scripts/make_plans.sh [<dir>...]` replays the recipes, and `tests/test_paper_plans.py` replans
-every directory and checks that the result is identical to the committed files.
+here holds one plan file per model stage, `block_N_placement.json`, and a `PLAN_CMD.txt` with the
+recipe that regenerates it: the recorded forward pass it was computed from (`graph=`, under
+`graphs/`, same name as the plan), the planner settings (`recipe=`), the runtime switches the plan
+was cut for (`runtime=`, applied by `--plan`) and the approximation configs (`configs=`).
+`replanned=` notes the planner settings a replan adds on top of `recipe=`; `python/tests/test_paper_plans.py`
+replans every directory below (its `GATE` spells those settings out) and checks that the result is
+identical to the committed files. The Llama recordings ship as a release artifact
+(`graphs/RELEASE.txt`).
 
-All plans are for encrypted GPT-2 small on the Python implementation, computed from
-`graphs/gpt2_decode_python_{n32,n64}` (n32: 32-bit parameters, n64: 64-bit). Perseus and
-Fhelipe are planned with `examples/gpt2_from_primitives/make_plan.sh` (the blocks first, then
-the encrypted argmax), which also removes bootstraps that turn out redundant (`PLAN_PRUNE=1`,
-the default). DaCapo and Orion are planned by their released tools (see below) and left as the
-tools output them. *Planned* counts the bootstraps a plan places; *executed* also counts the 23
-per token that the model code performs itself, the same for every system.
+## Result plans
+
+Each runs with `--plan` alone, and each is its model's default plan
+(`python/perseus/examples/defaults.py`); `scripts/repro/` has one script per result.
+
+| directory | model and task |
+|---|---|
+| `gpt2_decode` | GPT-2, decode with the encrypted argmax (ILP placement); block 0 also has its generation plan, `block_0_feedback_placement.json` (`run_generate`: prompt teacher-forced, then each token fed back) |
+| `gpt2_decode_ctx512` | GPT-2, decode up to a 512-token context (below) |
+| `gpt2_prefill128` | GPT-2, 128-token prefill, StC-first dense refreshes |
+| `gpt2_prefill128_tail` | `gpt2_prefill128` + the encrypted tail (stage 12: last position, final LayerNorm and LM head; stage 13: encrypted argmax), planned by `speedrun/make_tail_plan.sh` from `graphs/gpt2_prefill128_tail` |
+| `bert_sst2_128` | BERT-base, SST-2 classification of a 128-token input |
+| `vit_b16_224` | ViT-B/16, one 224 x 224 image |
+| `llama31_8b_decode` | Llama-3.1-8B, decode |
+| `llama31_8b_prefill128` | Llama-3.1-8B, 128-token prefill: one planner run (python/perseus/examples/llama/make_plan.sh, `prefill` stage) on the fake recording made under its runtime= line |
+| `llama31_8b_handoff_decode` | Llama-3.1-8B, decode on the K / V handed over by `llama31_8b_prefill128` (`run_handoff`): cut for the hand-off's cache level (`KV_ENTRY_LEVEL=38`), on the refresh sites of the same recipe's plain decode plan (`PLAN_KEEP_PLACEMENTS`, see its `sites=` line), every softmax refresh one scaling step lower (`PLAN_SITE_CF=softmax:-1`) |
+
+## Placement study (`python/`)
+
+Encrypted GPT-2 small on the 32-bit parameters, every plan computed from
+`graphs/gpt2_decode_baselines`. Fhelipe is planned with `python/perseus/examples/gpt2/make_plan.sh`
+(the blocks first, then the encrypted argmax), which also removes bootstraps that turn out redundant
+(`PLAN_PRUNE=1`, the default). DaCapo and Orion are planned by their released tools (see below) and
+left as the tools output them. *Planned* counts the bootstraps a plan places; *executed* also counts
+the 23 per token that the model code performs itself, the same for every system. Perseus' own plan
+of that study (393 planned, 416 executed per token) has been replaced by `gpt2_decode`.
 
 | directory | system | planned | executed / token |
 |---|---|---|---|
-| `gpt2_decode_python_n32` | Perseus, 32-bit | 393 | 416 |
-| `gpt2_decode_python_n64` | Perseus, 64-bit | 384 | 407 |
 | `python/dacapo` | DaCapo (its compiler, `hecate-opt`), level budget 48 | 595 | 618 |
 | `python/orion` | Orion (its released solver), level budget 48, 68 bootstraps added by our repair step | 871 | 894 |
 | `python/fhelipe` | Fhelipe (our reimplementation), level budget 48, repaired, redundant bootstraps removed | 561 | 584 |
-| `gpt2_decode_python_n32_dense` | Perseus, 32-bit, full-size bootstraps only | 465 | 488 |
-| `gpt2_decode_python_n64_dense` | Perseus, 64-bit, full-size bootstraps only | 473 | 496 |
 | `python/dacapo_dense` | DaCapo, full-size bootstraps only, level budget 48 | 609 | 632 |
 | `python/orion_dense` | Orion, full-size bootstraps only, level budget 50 (no plan exists at 48) | 816 | 839 |
 | `python/fhelipe_dense` | Fhelipe, full-size bootstraps only, level budget 50 with its depth limit at 48 | 754 | 777 |
@@ -42,27 +59,10 @@ fresh encryption, so block 0 needs its own plan for those tokens:
 (`make_plan.sh ... feedback`; the DaCapo and Orion scripts rerun the tool's block-0 choices). Every
 plan above has one except the ablations and `python/orion_dense`: on full-size bootstraps,
 Orion's choices cannot fit block 0's first LayerNorm in the level budget from that starting
-point, even after repair, so generation refuses that plan.
-
-The HEAT GPT-2 ([`gladia/heat-gpt2-small-openwebtext`](https://huggingface.co/gladia/heat-gpt2-small-openwebtext),
-approximations in `configs/model/approximation/gpt2_heat_n32`) has two plans, both computed from
-`graphs/gpt2_heat_decode_python_n32` on the 32-bit parameters with the cheaper bootstraps and
-redundant ones removed, and both with the block-0 plan for generation. They run with the HEAT
-weights, config and reference outputs (README, step 1).
-
-| directory | placement algorithm | bootstraps / token |
-|---|---|---|
-| `gpt2_heat_decode_python_n32_ilp` | exact (`--placer ilp`) | 259 |
-| `gpt2_heat_decode_python_n32` | minimum cut (the default) | 267 |
-
-Notes.
-* The 32-bit plans estimate each bootstrap's error from measurements; the 64-bit plans use a
-  formula (`PLAN_ACC_CHAIN=`).
-* The 64-bit plans use the cheaper bootstrap automatically wherever it applies (`SPARSE_AUTO=2`,
-  which needs `CORRECTION_FACTOR=7` on the 64-bit parameters), as the default configuration does.
-* In a *full-size bootstraps only* plan, the few bootstraps the model code performs itself (in the
-  encrypted argmax) are also full-size, as they are in such a run (`PLAN_DELIBERATE_CLAMP0`, set
-  by `make_plan.sh` and by the DaCapo and Orion scripts).
+point, even after repair, so generation refuses that plan. In a *full-size bootstraps only* plan,
+the few bootstraps the model code performs itself (in the encrypted argmax) are also full-size, as
+they are in such a run (`PLAN_DELIBERATE_CLAMP0`, set by `make_plan.sh` and by the DaCapo and Orion
+scripts).
 
 ## DaCapo
 
@@ -72,7 +72,7 @@ Notes.
 
 ```bash
 bash scripts/utils/dacapo_upstream/build_hecate.sh      # hecate-opt into .cache/dacapo_upstream (LLVM/MLIR 18, SEAL 4.0)
-PLAN_PRUNE=0 bash scripts/utils/dacapo_upstream/plan.sh graphs/gpt2_decode_python_n32 python/dacapo   # add `dense` for full-size bootstraps only
+PLAN_PRUNE=0 bash scripts/utils/dacapo_upstream/plan.sh graphs/gpt2_decode_baselines python/dacapo   # add `dense` for full-size bootstraps only
 ```
 
 `dacapo_4616402.patch` only adds a `--dacapo-plan` pipeline, which runs DaCapo's own analysis
@@ -93,7 +93,7 @@ input), repairs anything that would run out of levels, and plans the encrypted a
 `scripts/utils/orion_upstream/`:
 
 ```bash
-PLAN_PRUNE=0 bash scripts/utils/orion_upstream/plan.sh graphs/gpt2_decode_python_n32 python/orion   # add `dense` for full-size bootstraps only
+PLAN_PRUNE=0 bash scripts/utils/orion_upstream/plan.sh graphs/gpt2_decode_baselines python/orion   # add `dense` for full-size bootstraps only
 ```
 
 The solver works with a budget of 50 levels: it cannot represent a block input that has no
@@ -114,51 +114,9 @@ The solver iterates over Python sets of node names, so its choices depend on Pyt
 the recipe fixes `PYTHONHASHSEED=0`. Both scripts remove redundant bootstraps unless
 `PLAN_PRUNE=0`; the shipped DaCapo and Orion plans are the ones without that removal.
 
-## Chebyshev GELU main plan (32-bit)
-
-Since the per-block Chebyshev GELU, the main 32-bit plan `gpt2_decode_python_n32` evaluates each block's GELU as one
-Chebyshev series on 1.25x the block's input range (degree 63 to 511, 7 to 10 levels) instead of the composite THOR
-polynomial (two composed series, about 12 levels), with the same 1/xmax fold into the up projection. The shallower
-GELU lets the MLP chain fit between refreshes: 184 bootstraps per token instead of 191, about 0.14 s per token
-faster, at a mean KL of a few 1e-4 against the plaintext model instead of about 1e-4. The configs live in
-`configs/model/approximation/gpt2_base_n32`; a plan names its configs in a `configs=` line of its PLAN_CMD.txt, and
-an n32 plan without the line (every plan cut before this one, the prefill plans included) runs the composite GELU of
-`gpt2_base_n32_thor`. To switch back, run `--plan bootstrap_placements/gpt2_decode_python_n32_thor` (the previous
-main plan); the last composite-GELU state is the `composite-gelu` branch and the `composite-gelu-3.98s` tag.
-
-## StC-first main plan (32-bit)
-
-The main 32-bit plans run their full-size refreshes StC-first: the
-slots-to-coefficients transform is applied to the input at the bottom of the chain, before the
-raise, CoeffsToSlots and EvalMod (`FIDESLIB_BTS_STC_FIRST=2`, set by the plan's `runtime=` line).
-That is about 0.18 s per token faster than the shipped order, at a mean KL of about 1e-4 against
-the plaintext model instead of about 1e-6. To switch back, run the previous main plan:
-`--plan bootstrap_placements/gpt2_decode_python_n32_shipped` (shipped order everywhere).
-`gpt2_decode_python_n32_stcf_accurate` is the middle ground: StC-first except the residual-stream
-refreshes and the K/V push (mean KL about 3e-5, about 0.05 s per token faster than shipped). The
-StC-first plans are cut from `graphs/gpt2_decode_python_n32_stcf`.
-
-The main plan also raises the 512-slot refreshes one composite level below the top
-(`FIDESLIB_BTS_RAISE_DROP=512:1` in its `runtime=` line, `PLAN_SPARSE_BTS_OUT=1:16,512:26` in its
-recipe): those bootstraps run on two fewer limbs and land one level lower, at the same precision
-and the same bootstrap count, about 0.065 s per token faster. To switch back, run
-`--plan bootstrap_placements/gpt2_decode_python_n32_top512` (the 512-slot route raised to the top).
-
-`gpt2_decode_python_n32_smcheb` is an option, off by default: the softmax reciprocal rounds run Chebyshev-scaled
-Goldschmidt on exact per-cache-length bands (`SM_CHEB_GS=1`, in its `runtime=` line; graph
-`graphs/gpt2_decode_python_n32_smcheb`). It keeps the softmax accurate past 32 cached tokens, where the default
-seeds drift, at about 0.01 s per token faster and a mean KL about 2-3x the main plan's within 32 tokens.
-
-## Channel-blocked prefill plans (32-bit)
-
-`gpt2_prefill128` (the GPT-2 result plan below), `llama31_8b_prefill_python_n32_blocked` and
-`llama31_8b_prefill_python_n32_blocked_gqa` are 128-token PCMM prefills on the channel-blocked layout (`PF_LAYOUT=blocked`: 512 channels and 128 tokens per
-ciphertext, whole heads per block; `_gqa` keeps each Llama KV head once, `PF_GQA=1`). Their switches are in the
-`runtime=` line, so `--plan` alone runs them: GPT-2 0.46 s per token, Llama 3.8 s (blocked) and 3.5 s (GQA).
-
 ## 512-context decode plan (32-bit)
 
-`gpt2_decode_python_n32_ctx512` decodes up to a 512-token context (the main plan binds up to 32 cached keys). It is
+`gpt2_decode_ctx512` decodes up to a 512-token context (the main plan binds up to 32 cached keys). It is
 captured at position 0 with step-scoped names and the general softmax period, so one plan binds at every cache
 length; past 32 keys the softmax refreshes on a sparse route of Gp x 512 slots that the runtime builds as the cache
 grows (1024 from 33 keys, up to 8192 from 257), multi-stage past 1024 slots, which is why its softmax refreshes are
@@ -171,15 +129,3 @@ states in pinned host memory and every route resident; `IMPL_RESIDENT_BLOCKS` is
 not read. 512 positions (`scripts/repro/gpt2_decode_ctx512.sh`, RTX PRO 6000): top-1 506/512 against the plaintext
 model (the six others at rank 1), the encrypted argmax 512/512, median KL 4.0e-4, 4.10 s per token at 500-511 keys
 (3.83 s within 32), peak 66 GB on the GPU; setup 17 min (recording 512 positions).
-
-## Result plans (README tables, tag `table-2026-10-19`)
-
-Each runs with `--plan` alone: every switch is in its `runtime=` line. `scripts/repro/` has one script per plan.
-
-| directory | model and task | result |
-|---|---|---|
-| `llama31_8b_prefill128` | Llama-3.1-8B, 128-token prefill (pr2 capture with the lever patches of 10-17..10-19, listed in its `lineage=` line) | 111.0 s |
-| `gpt2_prefill128` | GPT-2, 128-token prefill | 33.1 s |
-| `gpt2_decode_python_n32` | GPT-2, decode with the encrypted argmax | 3.78 s / token |
-| `bert_base_sst2_128` | BERT-base, SST-2 classification of a 128-token input | 37.7 s |
-| `vit_b16_224` | ViT-B/16, one 224 x 224 image | 123.2 s |

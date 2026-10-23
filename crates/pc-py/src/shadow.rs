@@ -5,7 +5,7 @@
 //!     PlanConfig recipe's (bootstrap level, sparse_bts_out, StC-first entry/fallback), no input guard;
 //!   * "fake"     — `Quirks::fake()`: every refresh lands at `quirks.fake_bts_out` (34) realized;
 //!   * "fakecap"  — `Quirks::fakecap()`: raw (degree 2) landings from `quirks.fakecap_landings`, StC-first entry /
-//!     drop from `quirks.fakecap_stc_entry` / `fakecap_stc_drop`.
+//!     drop from `quirks.fakecap_stc_entry` / `fakecap_stc_drop` (also the finishes' StC-first landing, `staged`).
 //! `quirks.shadow` (a list of `Quirk` names) replaces the mode's preset. `strict` keeps the real chain bottom in
 //! the fake modes (a level past q0 raises LevelError).
 use crate::config::{PyConfig, PyPlanConfig};
@@ -104,6 +104,8 @@ pub fn shadow_config(c: &Config, plan: Option<&PlanConfig>, mode: &str, strict: 
             bts.landings.insert(0, Landing { level: dense.level.saturating_sub(drop), deg: dense.deg });
             bts.stc_first_fallback = Some(dense);
             bts.stc_first_entry = Some(u32_of("quirks.fakecap_stc_entry", c.quirks.fakecap_stc_entry, 46)?);
+            // the finishes run the StC-first route whatever the capture's own dense refreshes take: its raw landing
+            bts.staged = Landing { level: dense.level.saturating_sub(drop), deg: dense.deg };
             bts.max_input_level = u32::MAX;
         }
         "planner" => {
@@ -377,6 +379,14 @@ impl PyShadow {
     fn landing(&self, route: &PyRoute, meta: &PyCtMeta) -> PyResult<(u32, u8)> {
         let out = self.s.bootstrap(&meta.0, &route.0).map_err(level_err)?.out;
         Ok((out.level, out.deg))
+    }
+    /// Where a matrix product's finish output lands (`BtsConfig::finish_landing`): `op` "pcmm" | "ccmm" (the
+    /// descriptor's `op`), under its raise drop: (level, deg).
+    #[pyo3(signature = (op, raise_drop=0))]
+    fn finish_landing(&self, op: &str, raise_drop: u32) -> PyResult<(u32, u8)> {
+        let f = pc_shadow::Finish::of_op(op).ok_or_else(|| cfg_err("finish_landing", format!("op {op:?} (pcmm | ccmm)")))?;
+        let l = self.s.cfg.bts.finish_landing(self.s.cfg.chain, f, raise_drop);
+        Ok((l.level, l.deg))
     }
 }
 

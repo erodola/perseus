@@ -123,19 +123,44 @@ fn gate(plan: &str, graph: &str) -> Option<Vec<(String, Program)>> {
 
 #[test]
 fn gpt2_decode() {
-    let Some(progs) = gate("gpt2_decode_python_n32", "gpt2_decode_python_n32_gcheb") else { return };
+    let Some(progs) = gate("gpt2_decode", "gpt2_decode") else { return };
     let p = &progs.iter().find(|(l, _)| l == "block_0").unwrap().1;
     println!("[m7a] gpt2 decode block_0 batch_report: {}", serde_json::to_string(&p.batch_report).unwrap());
 }
 
 #[test]
 fn gpt2_prefill() {
-    gate("gpt2_prefill_python_n32_pcmmstcf", "gpt2_prefill_python_n32_pcmmstcf");
+    gate("gpt2_prefill128", "gpt2_prefill128");
+}
+
+#[test]
+fn gpt2_decode_ctx512() {
+    gate("gpt2_decode_ctx512", "gpt2_decode_ctx512");
+}
+
+#[test]
+fn bert() {
+    gate("bert_sst2_128", "bert_sst2_128");
+}
+
+#[test]
+fn vit() {
+    gate("vit_b16_224", "vit_b16_224");
+}
+
+#[test]
+fn llama_decode() {
+    gate("llama31_8b_decode", "llama31_8b_decode");
 }
 
 #[test]
 fn llama_prefill() {
-    gate("llama31_8b_prefill_python_n32_pcmmstcf", "llama31_8b_prefill_python_n32_pcmmstcf");
+    gate("llama31_8b_prefill128", "llama31_8b_prefill128");
+}
+
+#[test]
+fn llama_handoff_decode() {
+    gate("llama31_8b_handoff_decode", "llama31_8b_handoff_decode");
 }
 
 /// Informational: the two schedules side by side (launches, bootstrap launches, arena), every block compiled
@@ -144,9 +169,9 @@ fn llama_prefill() {
 fn schedules() {
     use pc_program::compile::batch::Schedule;
     for (plan, graph) in [
-        ("gpt2_decode_python_n32", "gpt2_decode_python_n32_gcheb"),
-        ("gpt2_prefill_python_n32_pcmmstcf", "gpt2_prefill_python_n32_pcmmstcf"),
-        ("llama31_8b_prefill_python_n32_pcmmstcf", "llama31_8b_prefill_python_n32_pcmmstcf"),
+        ("gpt2_decode", "gpt2_decode"),
+        ("gpt2_prefill128", "gpt2_prefill128"),
+        ("llama31_8b_decode", "llama31_8b_decode"),
     ] {
         let pd = assets().join("bootstrap_placements").join(plan);
         let Some(gd) = find_graph(graph) else { continue };

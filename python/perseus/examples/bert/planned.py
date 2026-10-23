@@ -220,16 +220,16 @@ class EncoderPlannedPrefill(PlannedPrefill):
         del xa, xb
         sess.ccmm_set(c_unit, *self.ccmm_kappa)
         land = (int(ys[0].level), int(ys[0].deg))
-        fake_land = int(os.environ.get("PF_CCMM_FAKE_LAND", "28"))
+        fake_land = CC.fake_landing(getattr(getattr(self.model, "inf", None), "fhe", None))
         self.ccmm_cal = {"c_unit": c_unit, "nf_ref": nf_ref, "nf_split": nf_split, "probe_rel_err": float(err),
                          "land": land}
         self.log(f"[ccmm] calibrated: c_unit {c_unit:.6g} (probe {np.log2(1 / max(err, 1e-300)):.1f} bits), nf_ref "
                  f"2^{np.log2(nf_ref):.3f}, nf_split 2^{np.log2(nf_split):.3f}, landing {land} (twin "
-                 f"PF_CCMM_FAKE_LAND {fake_land}), kappa QK {self.ccmm_kappa[0]:g} PV {self.ccmm_kappa[1]:g}, "
+                 f"{fake_land}), kappa QK {self.ccmm_kappa[0]:g} PV {self.ccmm_kappa[1]:g}, "
                  f"{time.time() - t0:.1f} s")
         if land[0] != fake_land:
             raise RuntimeError(f"CCMM lands at level {land[0]} on the device, the CPU twin recorded {fake_land} "
-                               f"(PF_CCMM_FAKE_LAND)")
+                               f"(ccmm.fake_landing)")
         for kappa in self.ccmm_sweep:
             for case in ("qk", "pv"):
                 bits = self.ccmm_case(case, kappa, L)

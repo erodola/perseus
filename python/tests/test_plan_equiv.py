@@ -8,7 +8,7 @@ import pytest
 from perseus._paths import ASSETS
 from perseus.plan import equiv as _equiv
 
-PLAN = ASSETS / "bootstrap_placements" / "gpt2_decode_python_n32" / "block_0_placement.json"
+PLAN = ASSETS / "bootstrap_placements" / "gpt2_decode" / "block_0_placement.json"
 
 
 @pytest.fixture(scope="module")

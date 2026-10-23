@@ -30,7 +30,7 @@ name = "ks"
 harness = false
 
 
-# card M5b: host overhead of the leaf ops (GPU: run the built binary under tools/gpu.sh)
+# host overhead of the leaf ops (GPU: run the built binary under tools/gpu.sh)
 [[bench]]
 name = "ops"
 harness = false

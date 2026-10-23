@@ -3,7 +3,7 @@ runtime of a plan dir, the capture stamp, and the bridge to the legacy env the r
 
     from perseus import config
     cfg = config.preset("n32_gpt2_decode", LN_CHEB="0")        # a preset + legacy-env overrides
-    cfg = config.plan_runtime("bootstrap_placements/gpt2_decode_python_n32", base=cfg)
+    cfg = config.plan_runtime("bootstrap_placements/gpt2_decode", base=cfg)
     config.to_env(cfg)                                          # {"LN_CHEB": "0", ...} for os.environ
 
 Presets (``config.PRESETS``) are the configurations the old run paths exported, derived from the old env dicts
