@@ -221,8 +221,8 @@ be skipped.
 You need:
 - Linux, an NVIDIA GPU of compute capability 12.0 (Blackwell; the kernels are built for `sm_120`)
   and CUDA 13.2 (`CUDA_HOME`, default `/usr/local/cuda-13.2`).
-- A GPU with 48 GB or more of memory for GPT-2 (decode peaks at about 48 GiB); Llama-3-8B, BERT and
-  ViT need more (they were measured on 96 GB).
+- A GPU with the memory of the run: decoding peaks at 47.9 GiB with GPT-2 and 46.0 GiB with Llama-3-8B,
+  and the prefills, BERT and ViT need more (the first table lists every peak, measured on a 96 GB GPU).
 - The Rust toolchain (`rustup`; `rust-toolchain.toml` pins the version) and Python 3.12.
 
 ```bash
