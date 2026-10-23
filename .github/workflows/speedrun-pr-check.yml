@@ -1,8 +1,11 @@
-# Every PR to the speedrun branch is checked before a maintainer is notified: speedrun/harness/check_pr.py (the speedrun's harness, rules and
-# records left alone; for an entry, its record folder, submission.json, the declared CKKS parameters at 128-bit security
-# and the client's code). It runs the base branch's checker and reads the PR through git only, so no submitted code runs
-# here; the PR's description reaches it as a file. A plain PR that passes gets no comment. An entry that passes is
-# labelled `checked` and its review requested; a failure is labelled `check-failed` and explained in a comment.
+# The PR check of the Encrypted GPT-2 Speedrun, for every PR to the speedrun branch, before a maintainer is notified:
+# speedrun/harness/check_pr.py (the speedrun's harness, rules and records left alone; for an entry, its record folder,
+# submission.json, the declared CKKS parameters at 128-bit security, the client's code and the CLA). GitHub runs
+# pull_request_target workflows from the default branch, so this file lives on main and checks out the PR's base on
+# speedrun, whose checker it runs; it reads the PR through git only, so no submitted code runs here, and the PR's
+# description reaches it as a file. A plain PR that passes gets no comment. An entry that passes is labelled `checked`
+# and its review requested; a failure is labelled `check-failed` and explained in a comment. A repository Actions
+# policy allows pull_request_target for this file (speedrun/MAINTAINING.md).
 name: Speedrun PR check
 on:
   pull_request_target:
@@ -18,6 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
       - name: Fetch the PR without running it
         run: git fetch origin "pull/${{ github.event.pull_request.number }}/head:pr-head"
@@ -27,20 +31,22 @@ jobs:
           AUTHOR: ${{ github.event.pull_request.user.login }}
           BODY: ${{ github.event.pull_request.body }}
         run: |
-          printf '%s' "$BODY" > body.md
+          printf '%s' "$BODY" > "$RUNNER_TEMP/body.md"
           if python3 speedrun/harness/check_pr.py --base "${{ github.event.pull_request.base.sha }}" --head pr-head \
-               --author "$AUTHOR" --body body.md > report.md
+               --author "$AUTHOR" --body "$RUNNER_TEMP/body.md" > "$RUNNER_TEMP/report.md"
           then echo "ok=1" >> "$GITHUB_OUTPUT"; else echo "ok=0" >> "$GITHUB_OUTPUT"; fi
-          cat report.md
+          cat "$RUNNER_TEMP/report.md"
       - name: Report and notify
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}
+          GH_REPO: ${{ github.repository }}
         run: |
-          [ -s report.md ] || exit 0
+          [ -s "$RUNNER_TEMP/report.md" ] || exit 0
           gh label create checked --color 0e8a16 --force >/dev/null
           gh label create check-failed --color d93f0b --force >/dev/null
-          gh pr comment "$PR" --edit-last --body-file report.md || gh pr comment "$PR" --body-file report.md
+          gh pr comment "$PR" --edit-last --body-file "$RUNNER_TEMP/report.md" ||
+            gh pr comment "$PR" --body-file "$RUNNER_TEMP/report.md"
           if [ "${{ steps.check.outputs.ok }}" = 1 ]; then
             gh pr edit "$PR" --add-label checked --remove-label check-failed
             gh pr edit "$PR" --add-reviewer alexzilligmm || true
