@@ -271,7 +271,7 @@ class Gpt2Model(ImplModel):
         results = []
         for t in range(len(inputs)):
             t0 = time.time()
-            reg, hostrec = run.token(t, inputs)
+            reg, hostrec = run.token(t, inputs, argmax=argmax)
             lg = self.logits([run.ct(r) for r in (reg if isinstance(reg, list) else [reg])])
             rec = {"pos": t, "decode_s": time.time() - t0, "logits": lg, "top1": int(np.argmax(lg)), **hostrec}
             if gt_logits is not None and t < len(gt_logits) and len(gt_logits[t]):
