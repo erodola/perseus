@@ -46,8 +46,8 @@ cat "$OUT/score.txt"
     echo "<!-- speedrun-official track=$T -->"
     echo "**Official timing, $([ "$T" = decode ] && echo Decode-8 || echo Prefill-128).** The entry at" \
          "\`$(git -C "$B" rev-parse HEAD)\` against the record at \`$(git -C "$A" rev-parse HEAD)\`, on" \
-         "$(nvidia-smi --query-gpu=name --format=csv,noheader -i "$G"): $(wc -w <<< "$ORDER") pairs ($ORDER), each on" \
-         "$N prompts of the hidden test set; harness \`$(git -C "$H" rev-parse HEAD)\`."
+         "$(nvidia-smi --query-gpu=name --format=csv,noheader -i "$G"): $(wc -w <<< "$ORDER") pairs ($ORDER) of runs on" \
+         "the hidden test set, $N per run from prompt $OFFSET; harness \`$(git -C "$H" rev-parse HEAD)\`."
     echo
     echo '```'
     cat "$OUT/score.txt"
