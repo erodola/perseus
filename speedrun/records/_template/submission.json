@@ -1,0 +1,46 @@
+{
+  "name": "ShortRecordName",
+  "tracks": [
+    "prefill",
+    "decode"
+  ],
+  "authors": [
+    {
+      "name": "Your Name",
+      "github": "your-handle",
+      "affiliation": "Your institution or company"
+    }
+  ],
+  "summary": "One sentence: what changed.",
+  "ckks": {
+    "log_n": 16,
+    "log_qp": 0,
+    "secret": "uniform-ternary",
+    "sparse_keys": [
+      {
+        "role": "<what the key does>",
+        "secret": "<its distribution>",
+        "modulus": "<where it is used>"
+      }
+    ]
+  },
+  "systems_only": false,
+  "ai_assistance": {
+    "used": false,
+    "share_of_changed_lines": 0.0,
+    "tools": []
+  },
+  "dev_result": {
+    "gpu": "e.g. NVIDIA H100 80GB",
+    "prefill": {
+      "request_s": 0.0,
+      "record_request_s_same_gpu": 0.0,
+      "mean_kl": 0.0
+    },
+    "decode": {
+      "s_per_token": 0.0,
+      "record_s_per_token_same_gpu": 0.0,
+      "mean_kl": 0.0
+    }
+  }
+}

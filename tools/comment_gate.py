@@ -16,8 +16,9 @@ import tokenize
 BANNED_CS = re.compile(r"\bM[0-9]+[a-z]?\b|\bPLAN\b|\bRUNLOG\b")
 BANNED_CI = re.compile(r"prototype|orchestrator|successor|\bold stack\b", re.IGNORECASE)
 MAX_HEADER = 12
-# scripts/: research and reproduction utilities, outside the package
-EXCLUDE = ("target/", ".venv/", "bootstrap_placements/", "graphs/", "scripts/")
+# scripts/: research and reproduction utilities, outside the package; the speedrun's harness keeps its own conventions
+EXCLUDE = ("target/", ".venv/", "bootstrap_placements/", "graphs/", "scripts/", "speedrun/harness/", "speedrun/runner/",
+           "speedrun/records/")
 CODE_EXT = (".rs", ".cu", ".cuh", ".h")
 
 

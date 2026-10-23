@@ -1,0 +1,65 @@
+{
+  "name": "Perseus",
+  "tracks": [
+    "prefill",
+    "decode"
+  ],
+  "authors": [
+    {
+      "name": "Alex Zirilli",
+      "github": "alexzilligmm",
+      "affiliation": "Sapienza University of Rome"
+    },
+    {
+      "name": "Davide Marincione",
+      "github": "Davide-F5-Marincione",
+      "affiliation": "Sapienza University of Rome"
+    }
+  ],
+  "perseus": {
+    "repo": "https://github.com/gladia-research-group/perseus",
+    "commit": "39493d5a98122c1fb595c99070bf4e435df752f0"
+  },
+  "summary": "Record 0: Perseus at launch.",
+  "ckks": {
+    "log_n": 16,
+    "log_qp": 1706,
+    "secret": "uniform-ternary",
+    "sparse_keys": [
+      {
+        "role": "encapsulation, dense to sparse",
+        "secret": "ternary, Hamming weight 32",
+        "modulus": "q_0 .. q_{d-1} and P"
+      },
+      {
+        "role": "SPRU block key",
+        "secret": "binary, one 1 in each of 64 blocks",
+        "modulus": "q_0 .. q_{d-1} and P"
+      },
+      {
+        "role": "PCMM ring switch (Prefill-128)",
+        "secret": "ternary on ring dimension 4096",
+        "modulus": "q_0 q_1 P"
+      }
+    ]
+  },
+  "systems_only": false,
+  "ai_assistance": {
+    "used": true,
+    "share_of_changed_lines": 0.0,
+    "tools": []
+  },
+  "dev_result": {
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "prefill": {
+      "request_s": 35.78,
+      "record_request_s_same_gpu": 0.0,
+      "mean_kl": 0.00282
+    },
+    "decode": {
+      "s_per_token": 3.993,
+      "record_s_per_token_same_gpu": 0.0,
+      "mean_kl": 0.000442
+    }
+  }
+}

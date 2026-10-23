@@ -170,6 +170,8 @@ GPU.
 - `scripts/repro/` one script per result; `scripts/make_plans.sh` replays every plan's recipe;
   `scripts/utils/{dacapo,orion}_upstream/` run the released DaCapo and Orion tools.
 - `notebooks/` a custom model on the runtime's operations and the client-server split.
+- `speedrun/` the Encrypted GPT-2 Speedrun: its rules ([`speedrun/README.md`](speedrun/README.md)), the harness
+  that times entries, the records, and the current record's server.
 - `tools/` the repo gate (`ci.sh`) and the route-table tool.
 - `assets/` the logos and the paper's result tables (`paper-tables.tex`, `results-table.tex`, rendered by
   `render.sh`).
@@ -348,6 +350,12 @@ small (a broken run shows a KL above 50). Matching the plaintext top token is re
 required. Time a run on an otherwise idle machine, with the process pinned to the GPU's NUMA node
 (`numactl --cpunodebind=<node> --membind=<node>`).
 
+## Encrypted GPT-2 Speedrun
+
+A public leaderboard for encrypted GPT-2 small on one GPU, in two tracks, Prefill-128 and Decode-8, at 128-bit
+security and a fixed accuracy. Every entry is a pull request to this repository. The rules, the harness and the
+records are in [`speedrun/`](speedrun/README.md).
+
 ## Citation
 
 If you use Perseus, please cite the paper (GitHub's *Cite this repository* button reads
@@ -366,7 +374,9 @@ If you use Perseus, please cite the paper (GitHub's *Cite this repository* butto
 
 Perseus is released under the [Business Source License 1.1](LICENSE), free for any
 non-commercial use (research, academic, evaluation); commercial use requires prior written
-permission from the authors. On the Change Date (2030-08-18) the license converts to GPLv2.
+permission from the authors. On the Change Date (2030-08-18) the license converts to GPLv2. The speedrun's
+harness, prompts and records (`speedrun/harness/`, `runner/`, `prompts/`, `records/`) are under Apache-2.0
+([`speedrun/LICENSE`](speedrun/LICENSE)).
 
 <p align="center">
   <a href="https://gladia.di.uniroma1.it">
