@@ -17,8 +17,8 @@ CONFIGS=configs/model/approximation/gpt2_base_n32_pf/configs.json
 RUNTIME="$(grep "^runtime=" "bootstrap_placements/$BASE/PLAN_CMD.txt" | sed 's/^runtime=//') PF_LAST_QUERY=1 \
 FIDESLIB_BTS_RAISE_DROP=512:1 SM_CHEB_GS=1 PF_QKV_PACK=1 PF_ATTN_PACK=3"
 RECIPE="PLAN_PRUNE=1 PLAN_SPARSE_BTS_OUT=1:16,512:26 BTS_LEVEL=28 PLAN_RAISE_DROP_MAX=0 PLAN_RAISE_LANDING_MAX=42 \
-PLAN_RAISE_ROUTES=0 PLAN_REFRESH_ENV_CAP_ROUTES=0:46 PLAN_SLIM_CUBIC=1 PLAN_STC_FIRST_ENTRY=46 PLAN_STC_FIRST_FALLBACK=34:1 \
-PLAN_PLACER=ilp PLAN_ILP_TIME_LIMIT=600"
+PLAN_RAISE_ROUTES=0 PLAN_REFRESH_ENV_CAP_ROUTES=0:46 PLAN_SLIM_CUBIC=1 PLAN_STC_FIRST_ENTRY=46 \
+PLAN_STC_FIRST_FALLBACK=34:1 PLAN_PLACER=ilp PLAN_ILP_TIME_LIMIT=600"
 if [ ! -d "$GR/block_13" ]; then
     SETS=$(echo "$RUNTIME" | tr ' ' '\n' | grep = | sed 's/^/--set /')
     PF_PCMM_CALIB_IN="bootstrap_placements/$BASE/pcmm_calib.json" "$PYTHON" -m perseus.examples.gpt2.run_prefill \
@@ -60,7 +60,18 @@ for b in range(14):
         steps |= {int(v) for x in n["inputs"] if x.startswith("rot(") for v in x[4:-1].split(",")}
 json.dump(sorted(steps), open(f, "w"))
 PY
-printf '%s\n' "graph=$GR" "tool=speedrun/make_prefill_plan.sh (make_plan.sh blocks + argmax, the tail as make_tail_plan.sh)" \
-    "recipe=$RECIPE" "runtime=$RUNTIME" "configs=$CONFIGS" \
+"$PYTHON" - "$GR" <<'PY'
+import glob, json, sys
+for f in glob.glob(f"{sys.argv[1]}/**/capture_config.json", recursive=True):    # the capturing machine's paths out
+    c = json.load(open(f))
+    for sec in (v for v in c.values() if isinstance(v, dict)):
+        for k in [k for k, v in sec.items() if isinstance(v, str) and (v.startswith("/") or k == "pythonpath")]:
+            del sec[k]
+    open(f, "w").write(json.dumps(c, indent=2))
+PY
+PLANNER="$(git log -1 --format=%h -- python/perseus/plan) (python/perseus/plan's last commit; PLAN_PLACER=ilp)"
+printf '%s\n' "graph=$GR" \
+    "tool=speedrun/make_prefill_plan.sh (make_plan.sh blocks + argmax, the tail as make_tail_plan.sh)" \
+    "planner=$PLANNER" "recipe=$RECIPE" "runtime=$RUNTIME" "configs=$CONFIGS" \
     "pcmm_calib=$BASE's (the PCMM band shifts)" > "bootstrap_placements/$OUT/PLAN_CMD.txt"
 ls "bootstrap_placements/$OUT"
