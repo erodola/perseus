@@ -29,6 +29,7 @@ class CheckPrTest(unittest.TestCase):
         for path in ("speedrun/harness/perseus_core_client.py", "speedrun/records/2026-10-22_PerseusCore/README.md",
                      "speedrun/server.py", "crates/pc-client/src/lib.rs", "python/perseus/model.py"):
             self.write(path, "x\n")
+        self.write("speedrun/records/2026-10-22_PerseusCore/submission.json", json.dumps(GOOD))
         self.base = self.commit()
 
     def tearDown(self):
@@ -59,8 +60,13 @@ class CheckPrTest(unittest.TestCase):
         self.write("speedrun/server.py", "faster\n")
         errors, notes, entry = self.run_check()
         self.assertEqual((errors, entry), ([], True))
-        self.assertIn(check_pr.git("rev-parse", "HEAD").strip(), notes[0])
+        self.assertIn(f"time commit `{check_pr.git('rev-parse', 'HEAD').strip()}`", notes[0])
         self.assertTrue(any("Lattice Estimator" in n for n in notes))
+        self.assertTrue(any("of record `2026-10-22_PerseusCore`, no new estimate" in n for n in notes))
+
+    def test_new_keys_are_flagged_for_the_estimator(self):
+        self.record({**GOOD, "ckks": {**GOOD["ckks"], "log_qp": 1600}})
+        self.assertTrue(any(n.startswith("keys: new or changed") for n in self.run_check()[1]))
 
     def test_a_plain_pr_is_not_an_entry(self):
         self.write("python/perseus/model.py", "fix\n")
@@ -119,6 +125,7 @@ class CheckPrTest(unittest.TestCase):
         errors, notes, _ = self.run_check()
         self.assertEqual(errors, [])
         self.assertTrue(any("rust_client.py" in n for n in notes) and any("pc-client" in n for n in notes))
+        self.assertIn(f"time commit `{code}`", notes[0])
 
     def test_a_client_pinned_outside_the_pr_fails(self):
         self.record()
@@ -131,7 +138,7 @@ class CheckPrTest(unittest.TestCase):
         self.write("crates/pc-client/src/lib.rs", "newer format\n")
         self.record()
         self.write("speedrun/harness/rust_client.py", f'PERSEUS = "{code}"\n')
-        self.assertTrue(any("differs from the head's" in e for e in self.run_check()[0]))
+        self.assertTrue(any("may only add the record folder" in e for e in self.run_check()[0]))
 
     def test_a_client_file_outside_an_entry_fails(self):
         self.write("speedrun/harness/rust_client.py", f'PERSEUS = "{self.base}"\n')

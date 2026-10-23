@@ -7,11 +7,12 @@ harness, rules and records and the repository's automation alone (PROTECTED), un
 adds a record folder `speedrun/records/<YYYY-MM-DD>_<Name>/` is an entry: its change to Perseus plus that one folder
 (README.md with a Disclosures section, submission.json) and, for an entry with its own key or ciphertext formats, at
 most one new client `speedrun/harness/<name>_client.py`. The client runs the commit its client file pins, so an entry
-that changes the client's code brings its own client, pinned to a commit of the PR with the head's client code.
-submission.json must have the template's fields, and its CKKS parameters must reach 128-bit security on the HE
-standard's table (ternary secret, classic estimates): log QP within the bound of the ring dimension. The sparse keys
-it declares are listed for the maintainers' Lattice Estimator run, which this check does not do. Prints a Markdown
-report (nothing for a clean PR that is not an entry); exit 0 = pass. Standard library only.
+that changes the client's code brings its own client, pinned to the commit before the one that adds the record folder
+and the client: the maintainers build that commit, as the server and the client. The report names the commit they
+time. submission.json must have the template's fields, and its CKKS parameters must reach 128-bit security on the HE
+standard's table (ternary secret, classic estimates): log QP within the bound of the ring dimension. The report says
+whether its keys are an existing record's or need the maintainers' Lattice Estimator run. Prints a Markdown report
+(nothing for a clean PR that is not an entry); exit 0 = pass. Standard library only.
 """
 from __future__ import annotations
 
@@ -28,8 +29,8 @@ CLIENT = re.compile(r"^speedrun/harness/[a-z0-9_]+_client\.py$")
 PIN = re.compile(r'^PERSEUS = "([0-9a-f]{40})"', re.M)
 MAINTAINERS = ("alexzilligmm",)
 PROTECTED = ("speedrun/harness/", "speedrun/runner/", "speedrun/prompts/", "speedrun/records/", "speedrun/README.md",
-             "speedrun/CLAUDE.md", "speedrun/RULINGS.md", "speedrun/LICENSE", "speedrun/.gitignore", ".github/",
-             "LICENSE")
+             "speedrun/CLAUDE.md", "speedrun/MAINTAINING.md", "speedrun/RULINGS.md", "speedrun/LICENSE",
+             "speedrun/.gitignore", ".github/", "LICENSE")
 CLIENT_CODE = ("crates/pc-client/", "python/perseus/client/")   # keygen, encryption, decryption: the client runs them
 FRAMING = ("speedrun/record1.py",)                              # record 1's output framing, next to its plan constants
 
@@ -67,8 +68,6 @@ def check(base: str, head: str, author: str = "") -> tuple[list[str], list[str],
                           "automation are the maintainers'")
     if not folders or (len(folders) > 1 and author in MAINTAINERS):     # a maintainer's records, not an entry
         return errors, notes, False
-    notes.insert(0, f"checked: this PR at `{git('rev-parse', head).strip()}`. The maintainers review and time this "
-                    "commit; a new push runs the check again")
     if len(folders) != 1:
         return errors + [f"the PR adds {len(folders)} record folders, not one"], notes, True
     folder = f"speedrun/records/{folders.pop()}"
@@ -88,14 +87,27 @@ def check(base: str, head: str, author: str = "") -> tuple[list[str], list[str],
         return errors + [f"`{folder}/submission.json` is missing or not JSON ({type(e).__name__})"], notes, True
     errors += fields(sub)
     e, n = security(sub.get("ckks", {}))
-    e2, n2 = client_code(base, head, clients)
+    e2, n2, timed = client_code(base, head, clients, folder)
+    same = [r for r in sorted(records(base)) if declared(base, r) == sub.get("ckks")]
+    n.append(f"keys: the CKKS parameters and sparse keys of record `{same[0]}`, no new estimate" if same else
+             "keys: new or changed CKKS parameters or sparse keys, for the Lattice Estimator")
+    notes.insert(0, f"checked: this PR at `{git('rev-parse', head).strip()}`; the maintainers time commit `{timed}`. "
+                    "A new push runs the check again")
     return errors + e + e2, notes + n + n2, True
 
 
-def client_code(base, head, clients) -> tuple[list[str], list[str]]:
-    """The PR's changes to the client's code: they need the entry's own client, pinned to a commit of the PR whose
-    client code is the head's."""
-    errors, notes = [], []
+def declared(rev: str, record: str):
+    """A record's declared `ckks` block at `rev` (None if it has none)."""
+    try:
+        return json.loads(git("show", f"{rev}:speedrun/records/{record}/submission.json")).get("ckks")
+    except (subprocess.CalledProcessError, ValueError, AttributeError):
+        return None
+
+
+def client_code(base, head, clients, folder) -> tuple[list[str], list[str], str]:
+    """The PR's changes to the client's code, which need the entry's own client, and the commit the maintainers time:
+    the head, or the commit the client pins, from which the head differs only by the record folder and the client."""
+    errors, notes, timed = [], [], git("rev-parse", head).strip()
     code = git("diff", "--name-only", f"{base}...{head}", "--", *CLIENT_CODE, *FRAMING).splitlines()
     for c in clients:
         own = PIN.search(git("show", f"{head}:{c}"))
@@ -103,14 +115,18 @@ def client_code(base, head, clients) -> tuple[list[str], list[str]]:
             errors.append(f"`{c}` pins no commit: `PERSEUS = \"<sha>\"`, a commit of this PR")
         elif not ancestor(own.group(1), head) or ancestor(own.group(1), base):
             errors.append(f"`{c}` pins `{own.group(1)[:12]}`, which is not a commit of this PR")
-        elif git("diff", "--name-only", own.group(1), head, "--", *CLIENT_CODE, *FRAMING).strip():
-            errors.append(f"`{c}` pins `{own.group(1)[:12]}`, whose client code differs from the head's")
+        elif set(git("diff", "--name-only", own.group(1), head).splitlines()) - {c} - set(
+                git("ls-tree", "-r", "--name-only", head, f"{folder}/").splitlines()):
+            errors.append(f"`{c}` pins `{own.group(1)[:12]}`: the PR's later commits may only add the record folder "
+                          "and the client")
+        else:
+            timed = own.group(1)
     if any(f.startswith(CLIENT_CODE) for f in code) and not clients:
         errors.append(f"the PR changes the client's code ({', '.join(f'`{f}`' for f in code)}), which the client runs "
                       "at its pinned commit: bring your own client, `speedrun/harness/<name>_client.py`")
     if code:
         notes.append(f"client-side changes, for the client's review: {', '.join(f'`{f}`' for f in code)}")
-    return errors, notes
+    return errors, notes, timed
 
 
 def fields(sub: dict) -> list[str]:

@@ -26,6 +26,7 @@ client's result and these checks).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -203,6 +204,8 @@ def main() -> int:
                       "--backend", a.backend, "--prompts", prompts, "--ref", ref]
         client_ro += [a.perseus, prompts, ref]
         report["client_perseus"] = git(a.perseus, "rev-parse", "HEAD")
+        with open(client, "rb") as f:
+            report["client_file"] = hashlib.sha256(f.read()).hexdigest()
     try:
         server_ro = ro(a.ro, [*(links(os.path.abspath(a.perseus)) if a.perseus else []), *a.allow])
     except ValueError as e:

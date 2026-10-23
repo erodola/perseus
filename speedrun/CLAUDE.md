@@ -71,8 +71,8 @@ You need Linux, `bwrap`, a systemd user session, a GPU with 48 GB or more, and `
    - `dev_logs/`: the `run.json` files.
 3. Only if the entry has its own key or ciphertext formats: add one file, `speedrun/harness/<name>_client.py`, whose
    class `Backend` generates the keys the server's key request asks for, encrypts the inputs and decrypts the outputs
-   (see `speedrun/harness/perseus_core_client.py`), and that pins a commit of the PR whose client code is final,
-   `PERSEUS = "<sha>"` (commit the code first, then the client file). It runs as
+   (see `speedrun/harness/perseus_core_client.py`), and that pins the code's last commit, `PERSEUS = "<sha>"`; the
+   client file and the record folder go in a later commit, with nothing else. It runs as
    `bash speedrun/runner/entry.sh <name> ...`. The PR check requires it when the PR changes the client's code
    (`crates/pc-client/`, `python/perseus/client/`).
 4. Before opening the PR, run the same check the PR gets:

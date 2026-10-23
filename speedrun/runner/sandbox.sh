@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run one command on untrusted entry code: an allowlisted filesystem (no /home, /data02 or /run), one GPU device
+# Run one command on untrusted entry code: an allowlisted filesystem (no home or data directories, no /run), one GPU device
 # node, no network, no new user namespaces, an empty environment, and memory / task / wall-time limits enforced
 # from outside by a systemd user service (named, so the runner can query it and sample its memory: the peak systemd
 # prints on exit is stale unless the unit was queried while alive), and a seccomp filter (runner/seccomp.py: no

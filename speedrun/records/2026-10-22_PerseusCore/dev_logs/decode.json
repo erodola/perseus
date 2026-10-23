@@ -3,7 +3,7 @@
  "track": "decode",
  "server_cmd": [
   "bash",
-  "/data02/users/azirilli/perseus-wt/core/speedrun/serve.sh",
+  "<perseus>/speedrun/serve.sh",
   "--device",
   "0"
  ],

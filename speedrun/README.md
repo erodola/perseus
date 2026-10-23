@@ -172,7 +172,8 @@ record's server is [`speedrun/server.py`](https://github.com/gladia-research-gro
    - if your backend has its own key or ciphertext formats, its client, `speedrun/harness/<name>_client.py`,
      whose class `Backend` does the keygen for your server's key request, the encryption and the
      decryption (see [`harness/perseus_core_client.py`](harness/perseus_core_client.py)), and which pins
-     a commit of your PR that has its final client code (`PERSEUS = "<sha>"`). It runs as
+     your code's last commit (`PERSEUS = "<sha>"`): add the client and the record folder in a commit after it, and
+     nothing else. That commit is built as both your server and your client. It runs as
      `bash speedrun/runner/entry.sh <name> ...`.
 
    Leave the rest of this folder (`harness/`, `runner/`, `prompts/`, the other records, this README),
@@ -181,11 +182,11 @@ record's server is [`speedrun/server.py`](https://github.com/gladia-research-gro
    128-bit security on the HE standard, and the client's code: a PR that changes `crates/pc-client/` or
    `python/perseus/client/` must bring its own client. When the check passes, a maintainer is asked to
    review.
-5. **The maintainers time it** within 72 hours of the check passing, at the commit the check names
-   (a new push starts the review again), with the harness of Perseus `main`, against the current record on
-   the reference GPU and the hidden test prompts, run the Lattice Estimator on the sparse keys, check
-   the [rules](#rules) and post the results on the PR. An accepted record is merged into `main` with a
-   merge commit, so the commit they timed stays in its history, and becomes the one to beat.
+5. **The maintainers time it** ([`MAINTAINING.md`](MAINTAINING.md)) within 72 hours of the check passing,
+   at the commit the check names (a new push starts the review again), with the harness of Perseus `main`,
+   against the current record on the reference GPU and the hidden test prompts, run the Lattice Estimator on
+   new sparse keys, check the [rules](#rules) and post the results on the PR. An accepted record is merged into
+   `main` with a merge commit, so the commit they timed stays in its history, and becomes the one to beat.
 
 ## Background
 
