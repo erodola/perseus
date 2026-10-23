@@ -56,6 +56,11 @@ class Rt:
             self._masks[key] = m
         return m
 
+    def forget_masks(self):
+        """Drop the memoised numpy masks (a new geometry, e.g. BERT's next token count: what it needs is rebuilt on
+        use; the memo would otherwise keep every earlier geometry's masks, ~110 MB each)."""
+        self._masks.clear()
+
     @staticmethod
     def mask_key(key):
         return "mask." + (key if isinstance(key, str) else ".".join(str(k) for k in key))

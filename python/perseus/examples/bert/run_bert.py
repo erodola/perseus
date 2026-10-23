@@ -59,6 +59,7 @@ def _planned(a, model, groups, cl, st, results=None):
     from .planned import BertPlannedPrefill, plan_config
     rows_out = []
     for n, items in groups.items():
+        model.rt.forget_masks()         # the previous token count's masks
         cfg = plan_config(a.plan)
         keys = _pc.KeySource.generate([], conj=True, layout=a.key_layout)
         work = a.work_dir or os.path.join(os.environ.get("PC_WORK_DIR", "/tmp"), f"m10_bert_{os.getpid()}_{n}")
