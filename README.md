@@ -23,7 +23,7 @@
   <a href="#citation">Citation</a>
 </p>
 
-Perseus runs transformers under fully homomorphic encryption on a single GPU: the server computes
+Perseus runs transformers under fully homomorphic encryption on a single GPU, so the server computes
 on data it never sees in the clear. Models, packings, nonlinear approximations and bootstrap
 placement are plain Python; each block is compiled into a program that a Rust + CUDA CKKS runtime
 replays (its kernels descend from [FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits),
@@ -34,7 +34,7 @@ our 32-bit GPU port of [FIDESlib](https://github.com/CAPS-UMU/FIDESlib)).
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-overview-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-overview-light.png">
-      <img src="assets/paper-tables-overview-light.png" alt="Perseus, encrypted, end to end on one RTX PRO 6000 with 128-bit security, and the peak GPU memory of each run (Llama-3-8B streams its weights from host memory, GPT-2 small keeps its weights on the GPU). Llama-3-8B: prefill of a 128-token prompt 83.2 s (76.6 GiB), decode of one token at a 512-token context 16.2 s (46.0 GiB when decoding 16 tokens). GPT-2 small: prefill 21.6 s (53.0 GiB), decode 4.10 s per token at a 512-token context (47.9 GiB when decoding 16 tokens). ViT-B/16: 59.0 s per image (57.5 GiB). BERT-base: 23.9 s for 128 tokens (53.5 GiB)." width="707">
+      <img src="assets/paper-tables-overview-light.png" alt="Perseus, encrypted, end to end on one RTX PRO 6000 with 128-bit security, and the peak GPU memory of each run (Llama-3-8B streams its weights from host memory, GPT-2 small keeps its weights on the GPU). Llama-3-8B prefill of a 128-token prompt 83.2 s (76.6 GiB), decode of one token at a 512-token context 16.2 s (46.0 GiB when decoding 16 tokens). GPT-2 small prefill 21.6 s (53.0 GiB), decode 4.10 s per token at a 512-token context (47.9 GiB when decoding 16 tokens). ViT-B/16 59.0 s per image (57.5 GiB). BERT-base 23.9 s for 128 tokens (53.5 GiB)." width="707">
     </picture>
   </a>
 </p>
@@ -77,7 +77,7 @@ ours where the code is released.
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-gpt2-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-gpt2-light.png">
-      <img src="assets/paper-tables-gpt2-light.png" alt="Encrypted GPT-2 small. AR-HE: 128-token prefill 18520.0 s, decode 544.0 s per token at context 33. ROSETTA: decode 78.6 s at 512 (composed). EncryptedLLM: decode 68.0 s at 128. Perseus: prefill 21.6 s, decode 4.10 s per token at context 512, on RTX PRO 6000, open source." width="707">
+      <img src="assets/paper-tables-gpt2-light.png" alt="Encrypted GPT-2 small. AR-HE 128-token prefill 18520.0 s, decode 544.0 s per token at context 33. ROSETTA decode 78.6 s at 512 (composed). EncryptedLLM decode 68.0 s at 128. Perseus prefill 21.6 s, decode 4.10 s per token at context 512, on RTX PRO 6000, open source." width="707">
     </picture>
   </a>
   <br>
@@ -103,14 +103,15 @@ Times exclude key generation, encryption and decryption; each model runs its def
 
 ## Runtime
 
-`perseus-core` is the CKKS runtime in `crates/`, written in Rust and CUDA. Its primitives on one RTX PRO 6000:
+`perseus-core` is the CKKS runtime in `crates/`, written in Rust and CUDA. The table times its
+primitives on one RTX PRO 6000, and the two commands under it reproduce the table.
 
 <p align="center">
   <a href="assets/paper-tables-core-light.png">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="assets/paper-tables-core-dark.png">
       <source media="(prefers-color-scheme: light)" srcset="assets/paper-tables-core-light.png">
-      <img src="assets/paper-tables-core-light.png" alt="perseus-core CKKS primitives on one RTX PRO 6000, device milliseconds per call for one ciphertext and per ciphertext in a batch of 8. Addition 0.022 and 0.057, multiplication by a scalar 0.026 and 0.040, by a plaintext 0.019 and 0.038, relinearized multiplication 0.540 and 0.563, rescale 0.084 and 0.130, rotation 0.512 and 0.536, forward and inverse NTT 0.076 and 0.103. Bootstrap: dense 20.3 and 19.2, StC first 17.1 and 15.5, sparse 512 slots 17.4 and 19.0, sparse 256 slots 16.4 and 18.6, one slot 10.0 and 11.3. Ring 2^16, 54 + 9 primes in 32-bit words, log QP 1706, dnum 6, 128-bit security." width="707">
+      <img src="assets/paper-tables-core-light.png" alt="perseus-core CKKS primitives on one RTX PRO 6000, device milliseconds per call for one ciphertext and per ciphertext in a batch of 8. Addition 0.022 and 0.057, multiplication by a scalar 0.026 and 0.040, by a plaintext 0.019 and 0.038, relinearized multiplication 0.540 and 0.563, rescale 0.084 and 0.130, rotation 0.512 and 0.536, forward and inverse NTT 0.076 and 0.103. Bootstraps, dense 20.3 and 19.2, StC first 17.1 and 15.5, sparse 512 slots 17.4 and 19.0, sparse 256 slots 16.4 and 18.6, one slot 10.0 and 11.3. Ring 2^16, 54 + 9 primes in 32-bit words, log QP 1706, dnum 6, 128-bit security." width="707">
     </picture>
   </a>
 </p>
@@ -124,7 +125,7 @@ cargo run --release -p pc-tools --bin pc-bench -- bts --all --k 1,8 --reps 20 --
 
 After the [install](#0-install), each script prints one row's time and its accuracy against the
 float64 model (`NODE`/`MEMS` bind it to the GPU's NUMA node); each runs the model's default plan
-(`python/perseus/examples/defaults.py`):
+(`python/perseus/examples/defaults.py`).
 
 ```bash
 GPU=0 NODE=1 MEMS=1,2 bash scripts/repro/llama_prefill128.sh   # Llama-3-8B, 128-token prefill
@@ -141,19 +142,19 @@ GPU.
 
 ## Layout
 
-- `crates/` the Rust + CUDA runtime:
+- `crates/` the Rust + CUDA runtime
   - `pc-core` the CUDA-free CKKS mathematics (parameters, encoding, keys, bootstrap constants);
     `pc-shadow` the level/degree/scale engine the planner, the recorder and the runtime share;
     `pc-config` the typed run configuration.
-  - `pc-cuda`, `pc-kernels`, `pc-cublas`, `pc-gpu` the device runtime: NTT, key switching,
-    bootstrap routes, PCMM/CCMM, the plaintext store, one frozen device arena.
+  - `pc-cuda`, `pc-kernels`, `pc-cublas`, `pc-gpu` the device runtime (NTT, key switching,
+    bootstrap routes, PCMM/CCMM, the plaintext store, one frozen device arena).
   - `pc-program` a recorded block + its plan -> a compiled program, and its replay.
   - `pc-py` the Python extension `perseus._pc`; `pc-client` the CUDA-free client (keys, encryption,
     the wire format); `pc-tools` benchmarks and cross-checks.
 - `python/perseus/`
-  - `impl/` the Python implementation: encrypted linear layers, attention, normalization and
+  - `impl/` the Python implementation of encrypted linear layers, attention, normalization and
     activations, the recorder and the planned drivers.
-  - `plan/` the planner: it reads a recorded forward pass, simulates how levels are spent,
+  - `plan/` the planner, which reads a recorded forward pass, simulates how levels are spent,
     places the bootstraps and picks each one's type. It also holds our ports of the DaCapo,
     Orion and Fhelipe planners.
   - `examples/{gpt2,llama,bert,vit}/` the four models on `perseus.impl`, with their runners
@@ -175,10 +176,10 @@ GPU.
 
 ## Python API
 
-`perseus.impl` is where models are written: encrypted layers in Python, which the recorder runs
-once on a CPU twin (no GPU, no values: the op stream, the plaintexts and the levels), the runtime
-compiles per block with the plan, and the planned drivers replay token after token.
-`python/perseus/examples/gpt2` is GPT-2 written with it; its runner is the shortest way in:
+`perseus.impl` is where models are written, as encrypted layers in Python. The recorder runs them
+once on a CPU twin (no GPU and no values, only the op stream, the plaintexts and the levels), the
+runtime compiles them per block with the plan, and the planned drivers replay them token after token.
+`python/perseus/examples/gpt2` is GPT-2 written with it; its runner is the shortest way in.
 
 ```bash
 source scripts/local_env.sh                     # the weights and the reference outputs (README step 1)
@@ -188,7 +189,7 @@ source scripts/local_env.sh                     # the weights and the reference 
 ```
 
 The runtime's operations are also callable one at a time, which is how a new model starts
-(`notebooks/custom_encrypted_model.ipynb`):
+(`notebooks/custom_encrypted_model.ipynb`).
 
 ```python
 import numpy as np
@@ -218,11 +219,12 @@ be skipped.
 
 ### 0. Install
 
-You need:
+You need the following.
 - Linux, an NVIDIA GPU of compute capability 12.0 (Blackwell; the kernels are built for `sm_120`)
   and CUDA 13.2 (`CUDA_HOME`, default `/usr/local/cuda-13.2`).
-- A GPU with the memory of the run: decoding peaks at 47.9 GiB with GPT-2 and 46.0 GiB with Llama-3-8B,
-  and the prefills, BERT and ViT need more (the first table lists every peak, measured on a 96 GB GPU).
+- A GPU with enough memory for the run. Decoding peaks at 47.9 GiB with GPT-2 and 46.0 GiB with
+  Llama-3-8B, and the prefills, BERT and ViT need more (the first table lists every peak, measured on a
+  96 GB GPU).
 - The Rust toolchain (`rustup`; `rust-toolchain.toml` pins the version) and Python 3.12.
 
 ```bash
@@ -233,7 +235,7 @@ uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e ".[hf
 ```
 
 The planner, the weight export and the approximation fitting run without the extension.
-`scripts/local_env.sh` sets where the data lives, and a variable you export yourself always wins:
+`scripts/local_env.sh` sets where the data lives, and a variable you export yourself always wins.
 
 | variable | what it points at | default |
 |---|---|---|
@@ -260,10 +262,10 @@ The export packs the weights for the runtime. The calibration fits a polynomial 
 to every nonlinear function (LayerNorm, softmax, GELU and the encrypted argmax) on the value
 ranges it sees on OpenWebText; the shipped `gpt2_base_n32/configs.json` is the one the results
 use. The last command runs the plaintext model on a fixed piece of text and saves its inputs
-and output logits: these reference outputs are what encrypted runs are compared against.
+and output logits, the reference outputs that encrypted runs are compared against.
 
 A model fine-tuned for encryption, such as the HEAT GPT-2, is exported on top of its base model
-with `--checkpoint` (a `model.pt` file or a HuggingFace repository id):
+with `--checkpoint` (a `model.pt` file or a HuggingFace repository id).
 
 ```bash
 .venv/bin/perseus-export --model openai-community/gpt2 \
@@ -275,10 +277,10 @@ with `--checkpoint` (a `model.pt` file or a HuggingFace repository id):
 
 ### 2. Record a forward pass
 
-The planner reads a record of one encrypted forward pass: every encrypted value, how its data
+The planner reads a record of one encrypted forward pass, with every encrypted value, how its data
 is laid out and the largest magnitude it reaches. The first token runs without a plan on the
 CPU twin (the numpy model of the runtime, values included) and is recorded block by block, the
-encrypted argmax included:
+encrypted argmax included.
 
 ```bash
 source scripts/local_env.sh
@@ -286,13 +288,13 @@ source scripts/local_env.sh
     --capture graphs/gpt2_decode_python_n32
 ```
 
-A recording belongs to one approximation config and one set of runtime switches: change either
-and record again.
+A recording belongs to one approximation config and one set of runtime switches, and changing either
+means recording again.
 
 ### 3. Plan
 
 The planner runs on the CPU, in seconds per plan (the comparison tools take minutes). Each plan
-directory's `PLAN_CMD.txt` holds its recipe, and `make_plans.sh` replays them:
+directory's `PLAN_CMD.txt` holds its recipe, and `make_plans.sh` replays them.
 
 ```bash
 bash scripts/make_plans.sh gpt2_decode_python_n32     # the 32-bit plan
@@ -309,7 +311,7 @@ the 64-bit plans from a formula.
 
 The comparison plans of the placement study come from the released
 tools. DaCapo needs its compiler, `hecate-opt`, built once (LLVM/MLIR 18); Orion's solver is
-downloaded and patched on first use:
+downloaded and patched on first use.
 
 ```bash
 bash scripts/utils/dacapo_upstream/build_hecate.sh
@@ -326,30 +328,30 @@ $DECODE --plan bootstrap_placements/gpt2_decode_python_n32     # the min-cut pla
 bash scripts/repro/gpt2_decode_ctx512.sh                       # up to a 512-token context (its reference: the script)
 ```
 
-Generation feeds each token back without decrypting it: the encrypted argmax picks the token, its
+Generation feeds each token back without decrypting it. The encrypted argmax picks the token, its
 embedding is computed from the ciphertext, and the next position starts from there
-(`run_generate`, which checks the tokens against greedy decoding of the plaintext model):
+(`run_generate`, which checks the tokens against greedy decoding of the plaintext model).
 
 ```bash
 .venv/bin/python -m perseus.examples.gpt2.run_generate --prompt 3 --tokens 4
 ```
 
-The runtime runs planned only: every block is a program compiled from its recording and its
+The runtime runs planned only. Every block is a program compiled from its recording and its
 plan, and a plan that does not bind fails at compile time. The decode runs are teacher-forced
 (each position's input is the reference token's embedding); the encrypted argmax runs on every
 position. A plan that binds at every cache length (`SM_PERIODIC=2` in its `runtime=` line, the
 512-context plan) records every position at setup and compiles one program per structure class.
 
-A run passes when it prints `[decode] PASS`: at every position the reference token stays among
-the top few of the encrypted output, and the divergence from the plaintext output stays small
-(a broken run shows a KL above 50). Matching the plaintext top token is reported but not
-required. Time a run on an otherwise idle machine, with the process pinned to the GPU's NUMA
-node (`numactl --cpunodebind=<node> --membind=<node>`).
+A run passes when it prints `[decode] PASS`, which means that at every position the reference token
+stays among the top few of the encrypted output, and the divergence from the plaintext output stays
+small (a broken run shows a KL above 50). Matching the plaintext top token is reported but not
+required. Time a run on an otherwise idle machine, with the process pinned to the GPU's NUMA node
+(`numactl --cpunodebind=<node> --membind=<node>`).
 
 ## Citation
 
 If you use Perseus, please cite the paper (GitHub's *Cite this repository* button reads
-[`CITATION.cff`](CITATION.cff)):
+[`CITATION.cff`](CITATION.cff)).
 
 ```bibtex
 @misc{zirilli2026perseus,
@@ -362,7 +364,7 @@ If you use Perseus, please cite the paper (GitHub's *Cite this repository* butto
 
 ## License
 
-Perseus is released under the [Business Source License 1.1](LICENSE): free for any
+Perseus is released under the [Business Source License 1.1](LICENSE), free for any
 non-commercial use (research, academic, evaluation); commercial use requires prior written
 permission from the authors. On the Change Date (2030-08-18) the license converts to GPLv2.
 
