@@ -348,6 +348,12 @@ small (a broken run shows a KL above 50). Matching the plaintext top token is re
 required. Time a run on an otherwise idle machine, with the process pinned to the GPU's NUMA node
 (`numactl --cpunodebind=<node> --membind=<node>`).
 
+## Encrypted GPT-2 Speedrun
+
+A public leaderboard for encrypted GPT-2 small on one GPU, in two tracks, Prefill-128 and Decode-8, at 128-bit
+security and a fixed accuracy. It lives on the [`speedrun` branch](https://github.com/gladia-research-group/perseus/tree/speedrun):
+the rules, the harness that times entries and the records. Every entry is a pull request against that branch.
+
 ## Citation
 
 If you use Perseus, please cite the paper (GitHub's *Cite this repository* button reads
