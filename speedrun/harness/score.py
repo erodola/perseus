@@ -9,7 +9,8 @@ agree with the logits' own on at least 95 % of the scored positions (a near tie 
 runs are paired in order (record and entry interleaved on one GPU, a pair on the same prompts, which is checked); with
 r_i = ln(t_record,i / t_entry,i), the entry is a new record when mean(r) >= ln(1 + delta), delta = max(1 %, 3 standard
 errors), and a one-sided paired t-test gives p < 0.01. A run's time is the mean score of its scored requests.
---official refuses any run not on the hidden test set (the hash in prompts/test.sha256).
+--official refuses any run not on the hidden test set (the hash in prompts/test.sha256). Exit 0 = a new record
+that passes; 1 = it does not; 2 = the runs were refused (void, unpaired, or not official).
 """
 from __future__ import annotations
 
@@ -125,11 +126,15 @@ def main():
     a = a.parse_args()
     load = lambda ps: [r for r in (json.load(open(p, encoding="utf-8")) for p in ps) if r.get("track") == a.track]
     entry = load(a.entry)
-    if a.official:
-        official(entry + load(a.record))
-    out = {"track": a.track, "quality": quality(a.track, entry)}
-    if a.record:
-        out["speed"] = speed(entry, load(a.record))
+    try:
+        if a.official:
+            official(entry + load(a.record))
+        out = {"track": a.track, "quality": quality(a.track, entry)}
+        if a.record:
+            out["speed"] = speed(entry, load(a.record))
+    except ValueError as e:
+        print(f"refused: {e}")
+        return 2
     q = out["quality"]
     print(f"quality: {q['requests']} requests, mean KL {q['kl_mean']:.3g} (bar {q['kl_bar']:g}, p {q['p']:.2g}), "
           f"argmax agreement {q['argmax_agreement']:.1%}: {'PASS' if q['pass'] else 'FAIL'}")
