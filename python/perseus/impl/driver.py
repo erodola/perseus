@@ -451,8 +451,15 @@ class Recorder:
         fhe.magnitude_suppressed = True
         self.blocks = {}
         rec = self
+        # wrap the model's own core and naming hooks, never an earlier Recorder's: its Core class and hooks close
+        # over that Recorder, which would keep every block it recorded alive (BERT: ~22 GB per token count)
+        base = getattr(model.core, "_rec_base", type(model.core))
+        if not hasattr(fhe, "_rec_orig"):
+            fhe._rec_orig = (fhe.pt_var, fhe.var)
 
-        class Core(type(model.core)):
+        class Core(base):
+            _rec_base = base
+
             def begin_subgraph_capture(self, inf, b):
                 f = inf.fhe
                 f.gen += 1
@@ -465,7 +472,7 @@ class Recorder:
                 rec.blocks[b] = BlockRec(f.nodes, f._rec_pts, f._rec_objs, f._rec_metas)
                 f.nodes = None
         model.core = Core()
-        pt_var, var = fhe.pt_var, fhe.var
+        pt_var, var = fhe._rec_orig
 
         def rec_pt_var(pt):
             new = not (pt.gen == fhe.gen and pt.name)
