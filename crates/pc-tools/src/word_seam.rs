@@ -431,6 +431,7 @@ pub fn run<W: DevWord, M: DevStrategy<W>>(chain: Chain, o: &RigOpts) -> Res<RigO
                 &*c
             );
             time!("rotate (KS, Cached)", rotate::rotate(&ctx, &mut ex, kc(), &sh, &one[0], &*a, STEPS[0], c)?, &*c);
+            time!("rotate (KS, Regen)", rotate::rotate(&ctx, &mut ex, KsCfg { plans: &plans, source: KskSource::Regen }, &sh, &one[0], &*a, STEPS[0], c)?, &*c);
             time!("mult+relin (Regen)", ops.mult(&ctx, &mut ex, KsCfg { plans: &plans, source: KskSource::Regen }, &sh, &relin, c, &*a, &*b)?, &*c);
         }
         // mult_pt alone includes no rescale; subtract it from "rescale" for the rescale-only figure
