@@ -14,7 +14,11 @@ The machine provides what this folder cannot:
 
 ## Once
 
-- Repository settings: protect `speedrun`, require a code owner's review, allow the Speedrun PR check workflow.
+- Repository settings: protect `speedrun` and require a code owner's review. The check's workflow,
+  `.github/workflows/speedrun-pr-check.yml`, runs from `main`: GitHub takes `pull_request_target` workflows from the
+  default branch, so keep it on `main` (and the same file here). A repository Actions policy (Settings > Actions >
+  Policies) allows `pull_request_target` for that file only; without one, GitHub blocks the event in public
+  repositories.
 - Build the commit the record's client pins (`PERSEUS` in [`harness/perseus_core_client.py`](harness/perseus_core_client.py)),
   with GPT-2's weights, and the current record if it is another commit:
   `EXPORT=1 bash speedrun/runner/build.sh https://github.com/gladia-research-group/perseus <commit> <client build>`.
@@ -44,3 +48,7 @@ The machine provides what this folder cannot:
    record" if the record's commit or its client's pin changed (rebuild the record, step "Once").
 
 Keep the `run.json` files of official runs; post only `report.md`.
+
+`speedrun` is the current record's code plus the speedrun's own files. Bring a change from `main` only when the record
+should have it, as a cherry-pick or a merge whose result you have run: `main` moves on its own (its plans, its
+README), and a merge brings all of it.
