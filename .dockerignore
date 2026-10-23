@@ -1,0 +1,23 @@
+# docker/Dockerfile.fherma copies the repository root: keep build trees, checkouts and run products out of the context
+.git
+**/target
+build/
+build-*/
+build_*/
+deps/
+deps_n*/
+.venv/
+logs/
+weights*/
+docs/
+paper-org/
+paper-workshop/
+notebooks/
+assets/
+figures/
+# run data of the model drivers, not of the runtime (~320 MB)
+graphs/
+bootstrap_placements/
+scripts/
+speedrun/
+tests/

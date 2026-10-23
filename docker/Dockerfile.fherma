@@ -1,0 +1,51 @@
+# perseus-core for FHERMA: the Rust + CUDA CKKS runtime of Perseus, built and installed under /opt/perseus
+# (docker/build-fherma.sh says what goes where). A Rust answer path-depends on /opt/perseus/crates/* and builds
+# offline from the warmed registry in /opt/cargo; a Python answer imports perseus from /opt/perseus/venv, first on
+# PATH. The toolkit stays in the image because answers are compiled in it. Build from the repository root:
+#
+#   docker build -f docker/Dockerfile.fherma -t perseus-core .
+
+# nvidia/cuda:13.0.3-devel-ubuntu24.04: CUDA 13.0.3, gcc 13, Python 3.12. 13.0 and not the 13.2 Perseus is
+# developed on: FHERMA's GPU runners advertise cuda 13.0, and the base image's NVIDIA_REQUIRE_CUDA would refuse a
+# 13.2 container on their driver.
+FROM nvidia/cuda:13.0.3-devel-ubuntu24.04@sha256:b7ae301dea2c162444795462ce17a05f6a516e5a75944b57af5b88540a1a2266
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       build-essential ca-certificates curl git python3 python3-venv \
+    && rm -rf /var/lib/apt/lists/*
+
+# Rust: the toolchain rust-toolchain.toml names, from a pinned and checksummed rustup-init.
+ARG RUSTUP=1.29.1
+ARG RUSTUP_SHA256=dda7234360b7f578ca8b0ddcb80145646fa61a67c1720a5abc7051b35c9fcb71
+ARG RUST=1.99.1
+ENV RUSTUP_HOME=/opt/rustup CARGO_HOME=/opt/cargo \
+    PATH=/opt/perseus/venv/bin:/opt/perseus/bin:/opt/cargo/bin:$PATH
+RUN curl -sSfo /tmp/rustup-init \
+        "https://static.rust-lang.org/rustup/archive/$RUSTUP/x86_64-unknown-linux-gnu/rustup-init" \
+    && echo "$RUSTUP_SHA256  /tmp/rustup-init" | sha256sum -c - \
+    && chmod +x /tmp/rustup-init \
+    && /tmp/rustup-init -y --no-modify-path --profile minimal --default-toolchain "$RUST" \
+    && rm /tmp/rustup-init
+
+ARG PERSEUS_CORE_ARCH="89;120"
+ARG REVISION=""
+
+COPY . /src/perseus
+RUN PERSEUS_CORE_ARCH="$PERSEUS_CORE_ARCH" CUDA_HOME=/usr/local/cuda PERSEUS_REVISION="${REVISION:-unknown}" \
+        /src/perseus/docker/build-fherma.sh /opt/perseus \
+    && rm -rf /src/perseus \
+    && chmod -R a+rwX /opt/cargo /opt/rustup
+
+# What an answer's own cargo build of the crates reads: the toolkit, the two cards, and no network.
+ENV CUDA_HOME=/usr/local/cuda \
+    PERSEUS_CORE_ARCH=$PERSEUS_CORE_ARCH \
+    CARGO_NET_OFFLINE=true
+
+LABEL org.opencontainers.image.title="perseus-core" \
+      org.opencontainers.image.description="perseus-core (CKKS on NVIDIA GPUs, Rust + CUDA, the runtime of Perseus) with its Python package, CUDA 13.0, sm_89 and sm_120" \
+      org.opencontainers.image.source="https://github.com/gladia-research-group/perseus" \
+      org.opencontainers.image.revision="$REVISION" \
+      org.opencontainers.image.licenses="BUSL-1.1"
+
+WORKDIR /workspace
