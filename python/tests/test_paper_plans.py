@@ -106,6 +106,8 @@ GATE: dict[str, tuple | None] = {
     "vit_b16_224_m18s3": ("graphs/vit_b16_224_stcf_m16", "PLAN_DELIB_DEG=captured " + _M18S, GPT2_TOOL, ("blocks",)),
     # the main recipe (recipe= line) on the ILP placer (objective: total refresh count)
     "gpt2_decode_python_n32_m16i": (None, "PLAN_PLACER=ilp PLAN_ILP_TIME_LIMIT=600", GPT2_TOOL, None),
+    # m16i with the shipped order's CF where that order runs (its recipe= line has the whole recipe)
+    "gpt2_decode_python_n32_m16i_fcf": None,
 }
 # the 10-19 table plans: `python python/tests/test_paper_plans.py table` replans these five
 TABLE = ("llama31_8b_prefill128", "gpt2_prefill128", "gpt2_decode_python_n32", "bert_base_sst2_128", "vit_b16_224")

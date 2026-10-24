@@ -128,6 +128,30 @@ fn gpt2_decode() {
     println!("[m7a] gpt2 decode block_0 batch_report: {}", serde_json::to_string(&p.batch_report).unwrap());
 }
 
+/// The decode plan the speedrun serves (perseus/examples/defaults.py).
+///   * the sites PLAN_FALLBACK_CF prices for the shipped order: each input still sits past the StC-first entry, so the
+///     route runs the shipped order (pc-gpu `StcFirstRoute::runs_stc_first`) and lands at its fallback. An input
+///     realized under the entry would run StC-first at that CF, where the slots overflow its band with no error raised.
+#[test]
+fn gpt2_decode_speedrun() {
+    let Some(progs) = gate("gpt2_decode_python_n32_m16i_fcf", "gpt2_decode_python_n32_gcheb") else { return };
+    let bts = pc_shadow::BtsConfig::n32_shipped();
+    let (entry, fallback) = (bts.stc_first_entry.unwrap(), bts.stc_first_fallback.unwrap());
+    let unit = pc_shadow::ChainShape::N32.unit;
+    // block, var, CF (the five down-projection hints at 2; the argmax's v_2 keeps its 5)
+    let sites = [("block_1", "v_1017", 2), ("block_2", "v_1483", 2), ("block_4", "v_1113", 2), ("block_10", "v_1075", 2),
+                 ("block_11", "v_1394", 2), ("block_13", "v_2", 5)];
+    for (block, var, cf) in sites {
+        let p = &progs.iter().find(|(l, _)| l == block).unwrap().1;
+        let s = p.bts_sites.iter().find(|s| s.var == var).unwrap_or_else(|| panic!("{block} {var}: no refresh site"));
+        assert!(s.route.slots == 0 && s.route.stc_first, "{block} {var}: route {:?}", s.route);
+        assert!(s.input.effective_level(unit) > entry, "{block} {var}: input {:?} not past the StC-first entry {entry}", s.input);
+        let eff = |l: pc_shadow::Landing| pc_shadow::meta::effective_level(l.level, l.deg, unit);
+        assert_eq!(eff(s.landing), eff(fallback), "{block} {var}: landing {:?}", s.landing);
+        assert_eq!(s.route.cf, Some(cf), "{block} {var}: CF");
+    }
+}
+
 #[test]
 fn gpt2_prefill() {
     gate("gpt2_prefill_python_n32_pcmmstcf", "gpt2_prefill_python_n32_pcmmstcf");
