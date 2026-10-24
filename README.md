@@ -68,6 +68,12 @@ unencrypted on the same GPU (at the bottom, not to scale).
 | 2 | 15.11 | PackedPrefill: GELU as one polynomial, the last block on the last position, packed attention, fewer bootstraps | 2026‑10‑24 | [`6f0ba44`](https://github.com/gladia-research-group/perseus/tree/6f0ba4452f73d44ab139b1348c89223d6689e7e4) · [log](speedrun/records/2026-10-24_PackedPrefill) | [@erodola](https://github.com/erodola) |
 |  | $`\color{gray}\textsf{0.00077}`$ | $`\color{gray}\textsf{Unencrypted GPT-2}`$ | $`\color{gray}\textsf{2026-10-24}`$ | [code](speedrun/records/plaintext.py) · [log](speedrun/records/plaintext.json) |  |
 
+- **Record 2, PackedPrefill**: the GELU is one Chebyshev series in ten blocks instead of two polynomials with a
+  bootstrap between them, the last block computes the last position alone, attention takes a third fewer rotations,
+  and the plan has 13 % fewer bootstraps.
+- **Record 1**: Perseus on its own Rust + CUDA runtime instead of FIDESlib.
+- **Record 0**: the baseline, Perseus on FIDESlib.
+
 ### Track 2: Decode-8
 
 | # | s/token | Description | Date | Code | Contributors |
@@ -77,13 +83,8 @@ unencrypted on the same GPU (at the bottom, not to scale).
 | 2 | 3.031 | FusedUnits: fused key switching, batched rotations, more precise bootstraps | 2026‑10‑24 | [`4d2e72b`](https://github.com/gladia-research-group/perseus/tree/4d2e72be136426f84f3ed402e468693ba00630db) · [log](speedrun/records/2026-10-24_FusedUnits) | [@erodola](https://github.com/erodola) |
 |  | $`\color{gray}\textsf{0.00065}`$ | $`\color{gray}\textsf{Unencrypted GPT-2}`$ | $`\color{gray}\textsf{2026-10-24}`$ | [code](speedrun/records/plaintext.py) · [log](speedrun/records/plaintext.json) |  |
 
-### What the records changed
-
-- **Record 2, PackedPrefill** (Prefill-128): the GELU is one Chebyshev series in ten blocks instead of two
-  polynomials with a bootstrap between them, the last block computes the last position alone, attention takes a
-  third fewer rotations, and the plan has 13 % fewer bootstraps.
-- **Record 2, FusedUnits** (Decode-8): key switching makes fewer passes over GPU memory, rotations of one ciphertext
-  share their first step, and five bootstraps run more precisely (a third of the error).
+- **Record 2, FusedUnits**: key switching makes fewer passes over GPU memory, rotations of one ciphertext share their
+  first step, and five bootstraps run more precisely (a third of the error).
 - **Record 1**: Perseus on its own Rust + CUDA runtime instead of FIDESlib.
 - **Record 0**: the baseline, Perseus on FIDESlib.
 
@@ -106,21 +107,22 @@ parameters). The weights are fixed. The approximations are part of the challenge
 or replace the polynomials for LayerNorm, softmax, GELU and the argmax, as long as the outputs stay
 within the KL bound above.
 
-The current record opens the session (CKKS parameters on the 32-bit chain, keys) with
-[`env.py`](python/perseus/examples/gpt2/env.py).
-Its approximations are fitted per layer in
+Our setup, record 1's, opens the session (CKKS parameters on the 32-bit chain, keys) with
+[`env.py`](python/perseus/examples/gpt2/env.py). Its approximations are fitted per layer in
 [`gpt2_base_n32`](python/perseus/configs/model/approximation/gpt2_base_n32) (Decode-8) and
 [`gpt2_base_n32_thor`](python/perseus/configs/model/approximation/gpt2_base_n32_thor) (Prefill-128, with
 polynomials from THOR [1]): GELU, LayerNorm and softmax in every block, and CutMax [2] for the argmax.
 
+Records that change it:
+
+- **Record 2, PackedPrefill** (Prefill-128): the GELU of `gpt2_base_n32` in ten blocks, THOR's in blocks 2 and 11
+  ([`gpt2_base_n32_pf`](python/perseus/configs/model/approximation/gpt2_base_n32_pf)).
+
 ### Track 1: Prefill-128
 
-The current record's server runs the planned prefill
-([`PlannedPrefill`](python/perseus/impl/prefill.py)) with the plan
-[`bootstrap_placements/gpt2_prefill128_pf`](bootstrap_placements/gpt2_prefill128_pf).
-[`scripts/repro/gpt2_prefill128.sh`](scripts/repro/gpt2_prefill128.sh) times the same prefill in one process,
-through [`run_prefill.py`](python/perseus/examples/gpt2/run_prefill.py).
-
+- Server: the planned prefill, [`PlannedPrefill`](python/perseus/impl/prefill.py)
+- Plan: [`bootstrap_placements/gpt2_prefill128_pf`](bootstrap_placements/gpt2_prefill128_pf), made by
+  [`speedrun/make_prefill_plan.sh`](speedrun/make_prefill_plan.sh)
 - [`prefill.py`](python/perseus/examples/gpt2/prefill.py) runs the 128 positions through the 12 blocks, packed as complex chunk
   pairs, and keeps every block's K and V on the GPU.
 - The timed pass follows one untimed warm-up on another prompt.
@@ -131,12 +133,10 @@ through [`run_prefill.py`](python/perseus/examples/gpt2/run_prefill.py).
 
 ### Track 2: Decode-8
 
-The current record's server drives Perseus's served decode,
-[`perseus.serve.gpt2_decode`](python/perseus/serve/gpt2_decode.py), with the plan
-[`bootstrap_placements/gpt2_decode_python_n32_m16i_fcf`](bootstrap_placements/gpt2_decode_python_n32_m16i_fcf).
-[`scripts/repro/gpt2_decode.sh`](scripts/repro/gpt2_decode.sh) times the same decode in one process, through
-[`run_decode.py`](python/perseus/examples/gpt2/run_decode.py), with per-token times.
-
+- Server: Perseus's served decode, [`perseus.serve.gpt2_decode`](python/perseus/serve/gpt2_decode.py)
+- Plan: [`bootstrap_placements/gpt2_decode_python_n32_m16i_fcf`](bootstrap_placements/gpt2_decode_python_n32_m16i_fcf)
+- In one process, with per-token times: [`scripts/repro/gpt2_decode.sh`](scripts/repro/gpt2_decode.sh), through
+  [`run_decode.py`](python/perseus/examples/gpt2/run_decode.py)
 - [`model.py`](python/perseus/examples/gpt2/model.py) holds the per-block K/V caches and the decode step: the 12 blocks of
   [`block.py`](python/perseus/examples/gpt2/block.py) on the new position, then the final LayerNorm, the LM head and the CutMax
   encrypted argmax in [`head.py`](python/perseus/examples/gpt2/head.py).
