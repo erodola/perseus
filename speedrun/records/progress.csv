@@ -1,6 +1,7 @@
 track,record,date,value,label,contributors
 prefill,0,2026-10-22,35.78,Perseus (FIDESlib),alexzilligmm Davide-F5-Marincione
 prefill,1,2026-10-22,22.22,Perseus on perseus-core,alexzilligmm Davide-F5-Marincione
+prefill,2,2026-10-24,15.11,PackedPrefill,erodola
 decode,0,2026-10-22,3.993,Perseus (FIDESlib),alexzilligmm Davide-F5-Marincione
 decode,1,2026-10-22,3.384,Perseus on perseus-core,alexzilligmm Davide-F5-Marincione
 decode,2,2026-10-24,3.031,FusedUnits,erodola

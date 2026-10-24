@@ -26,7 +26,7 @@ To learn how to submit an entry, see [Submitting](#submitting).
 
 ## Running the current record
 
-This branch is Decode-8's record; Prefill-128's is the commit the client pins, the client of every run.
+This branch is both tracks' record; the client of every run is the commit the client pins.
 
 ```bash
 git clone -b speedrun https://github.com/gladia-research-group/perseus && cd perseus
@@ -36,7 +36,7 @@ for d in . ../perseus-client; do (cd $d && uv venv --python 3.12 .venv &&
 (cd ../perseus-client && .venv/bin/perseus-export --model openai-community/gpt2 --out .cache/models/openai-community/gpt2)
 
 CLIENT=../perseus-client bash speedrun/runner/entry.sh perseus-core . decode 0    # Decode-8, on GPU 0
-bash speedrun/runner/entry.sh perseus-core ../perseus-client prefill 0           # Prefill-128
+CLIENT=../perseus-client bash speedrun/runner/entry.sh perseus-core . prefill 0   # Prefill-128
 ```
 
 You need Linux, `bwrap`, a systemd user session, a GPU with 48 GB or more, and `HF_HOME` holding
@@ -52,7 +52,7 @@ You need Linux, `bwrap`, a systemd user session, a GPU with 48 GB or more, and `
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="speedrun/records/progress-dark.svg">
-    <img src="speedrun/records/progress-light.svg" width="100%" alt="Record progression of both GPT-2 tracks. Prefill-128: 35.78 s (record 0), 22.22 s (record 1). Decode-8: 3.993 s/token (record 0), 3.384 s/token (record 1), 3.031 s/token (record 2). Dotted lines: 1 token/s, and GPT-2 unencrypted on the same GPU, 0.77 ms and 0.65 ms/token.">
+    <img src="speedrun/records/progress-light.svg" width="100%" alt="Record progression of both GPT-2 tracks. Prefill-128: 35.78 s (record 0), 22.22 s (record 1), 15.11 s (record 2). Decode-8: 3.993 s/token (record 0), 3.384 s/token (record 1), 3.031 s/token (record 2). Dotted lines: 1 token/s, and GPT-2 unencrypted on the same GPU, 0.77 ms and 0.65 ms/token.">
   </picture>
 </p>
 
@@ -65,6 +65,7 @@ unencrypted on the same GPU (at the bottom, not to scale).
 |---|---|---|---|---|---|
 | 0 | 35.78 | Baseline: Perseus on [FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits) | 2026‑10‑22 | [`39493d5`](https://github.com/gladia-research-group/perseus/tree/39493d5a98122c1fb595c99070bf4e435df752f0) · [log](speedrun/records/2026-10-22_Perseus) | [@alexzilligmm](https://github.com/alexzilligmm)<br>[@Davide‑F5‑Marincione](https://github.com/Davide-F5-Marincione) |
 | 1 | 22.22 | Perseus on [perseus‑core](crates), its Rust + CUDA runtime, with its own client | 2026‑10‑22 | [`89bc830`](https://github.com/gladia-research-group/perseus/tree/89bc830017fe12ab967ddb10c24feae65d8af6df) · [log](speedrun/records/2026-10-22_PerseusCore) | [@alexzilligmm](https://github.com/alexzilligmm)<br>[@Davide‑F5‑Marincione](https://github.com/Davide-F5-Marincione) |
+| 2 | 15.11 | PackedPrefill: GELU as one polynomial, the last block on the last position, packed attention, fewer bootstraps | 2026‑10‑24 | [`6f0ba44`](https://github.com/gladia-research-group/perseus/tree/6f0ba4452f73d44ab139b1348c89223d6689e7e4) · [log](speedrun/records/2026-10-24_PackedPrefill) | [@erodola](https://github.com/erodola) |
 |  | $`\color{gray}\textsf{0.00077}`$ | $`\color{gray}\textsf{Unencrypted GPT-2}`$ | $`\color{gray}\textsf{2026-10-24}`$ | [code](speedrun/records/plaintext.py) · [log](speedrun/records/plaintext.json) |  |
 
 ### Track 2: Decode-8
@@ -78,6 +79,9 @@ unencrypted on the same GPU (at the bottom, not to scale).
 
 ### What the records changed
 
+- **Record 2, PackedPrefill** (Prefill-128): the GELU is one Chebyshev series in ten blocks instead of two
+  polynomials with a bootstrap between them, the last block computes the last position alone, attention takes a
+  third fewer rotations, and the plan has 13 % fewer bootstraps.
 - **Record 2, FusedUnits** (Decode-8): key switching makes fewer passes over GPU memory, rotations of one ciphertext
   share their first step, and five bootstraps run more precisely (a third of the error).
 - **Record 1**: Perseus on its own Rust + CUDA runtime instead of FIDESlib.
@@ -113,7 +117,7 @@ polynomials from THOR [1]): GELU, LayerNorm and softmax in every block, and CutM
 
 The current record's server runs the planned prefill
 ([`PlannedPrefill`](python/perseus/impl/prefill.py)) with the plan
-[`bootstrap_placements/gpt2_prefill128_m16s0_tail`](bootstrap_placements/gpt2_prefill128_m16s0_tail).
+[`bootstrap_placements/gpt2_prefill128_pf`](bootstrap_placements/gpt2_prefill128_pf).
 [`scripts/repro/gpt2_prefill128.sh`](scripts/repro/gpt2_prefill128.sh) times the same prefill in one process,
 through [`run_prefill.py`](python/perseus/examples/gpt2/run_prefill.py).
 
