@@ -6,8 +6,8 @@ from __future__ import annotations
 
 # model -> {T or None (any): plan dir, resolved by perseus._paths.resolve}
 PLANS: dict[str, dict[int | None, str]] = {
-    # ILP placer on the shipped decode capture: 146 refreshes / token
-    "gpt2_decode": {None: "bootstrap_placements/gpt2_decode_python_n32_m16i"},
+    # ILP placer on the shipped decode capture: 146 refreshes / token; those that run the shipped order at its CF
+    "gpt2_decode": {None: "bootstrap_placements/gpt2_decode_python_n32_m16i_fcf"},
     # StC-first dense refreshes + the runtime's measured landings
     "gpt2_prefill": {128: "bootstrap_placements/gpt2_prefill128_m16s0"},
     "bert": {128: "bootstrap_placements/bert_base_sst2_128_m16s0"},

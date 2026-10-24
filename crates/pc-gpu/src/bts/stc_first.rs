@@ -7,7 +7,7 @@
 //! scale, raise variant) and is re-levelled on the device per key into a bounded LRU `StageCache` (FIDESlib
 //! `relevelPlaintext`). Inputs deeper than the entry take the shipped order. Modes, the reference CF and the cache:
 //! docs/ARCHITECTURE.md "pc-gpu StC-first route".
-use super::cts::{diag_coeffs, stage_width, LtEnd, LtGeom, LtPts, LtStage, PtSource};
+use super::cts::{diag_coeffs, stage_width, KeyTails, LtEnd, LtGeom, LtPts, LtStage, PtSource};
 use super::dense::{DensePlan, LtHost};
 use super::evalmod::{EmMode, EvalModPlan};
 use super::finish::{pow2_exp, Pow2};
@@ -248,6 +248,11 @@ impl<'a, W: DevWord> StageCache<'a, W> {
         self.state.borrow().stats
     }
 
+    /// Entries the cache holds.
+    pub fn slots(&self) -> usize {
+        self.state.borrow().slots.len()
+    }
+
     /// Keys held, most recently used first.
     pub fn keys(&self) -> Vec<CacheKey> {
         let st = self.state.borrow();
@@ -481,15 +486,22 @@ impl StcFirstPlan {
         let setup = &self.dense.setup;
         let n = ctx.lay.n;
         let k_max = setup.k_max;
+        // resident `a` tails of the CtS baby keys (sized in `DensePlan::mem`)
+        let tails = KeyTails::new(arena, s, ctx, keys, &self.dense.tail_steps(), setup.lt_regen_digits)?;
+        let ring = tails.ring(keys, n)?;
         let lt = |h: &LtHost| -> Result<LtStage<'a, W>> {
             let pts = LtPts::new(arena, s, ctx, h.top, PtSource::Coeffs(&h.coeffs))?;
-            let mut st = LtStage::new(arena, s, ctx, h.geom, h.top, h.end, h.nf, pts, keys, stage_ptrs, k_max)?;
+            let mut st = LtStage::new(arena, s, ctx, h.geom, h.top, h.end, h.nf, pts, &ring, stage_ptrs, k_max)?;
             st.group = setup.lt_group;
             Ok(st)
         };
         let mut variants = Vec::new();
         for v in &self.dense.variants {
-            let em_k = |mode| EvalModPlan::new(arena, s, ctx, mode, v.em_in, &self.dense.ps, setup.evalmod_da_its, keys.conj()?, keys.relin()?, stage_ptrs, k_max, setup.em_relin);
+            let em_k = |mode| {
+                let mut em = EvalModPlan::new(arena, s, ctx, mode, v.em_in, &self.dense.ps, setup.evalmod_da_its, keys.conj()?, keys.relin()?, stage_ptrs, k_max, setup.em_relin)?;
+                em.fuse_rescale = setup.em_fuse_rescale;
+                Ok::<_, crate::error::Error>(em)
+            };
             variants.push(BtsPrecomp {
                 slots: (n / 2) as u32,
                 raise_drop: v.drop,
@@ -718,8 +730,7 @@ impl<'a, W: DevWord, M: DevStrategy<W>> StcFirstRoute<'a, W, M> {
                 ks::stage_key(ctx, &ex.compute, cx.ks, &mut ex.ks, conj, 0, ndig, true)?;
             }
             ks::dot(ctx, &ex.compute, cx.ks, &ex.ks, conj, 0, 1, k, top, DotRows::All, io, staged)?;
-            ks::moddown_inplace(ctx, &ex.compute, cx.ks, &mut ex.ks.ext, &mut ex.ks.conv, k, top)?;
-            ks::ew(ctx, &ex.compute, ks::Ew::Add, v, v, Some(View::of(&ex.ks.ext, 0)), lay.rs_q(top), k, 2)?;
+            ks::moddown_to(ctx, &ex.compute, cx.ks, &mut ex.ks.ext, &mut ex.ks.conv, v, ks::MdOut::Add, k, top)?;
         }
         Ok(())
     }
@@ -758,8 +769,7 @@ impl<'a, W: DevWord, M: DevStrategy<W>> StcFirstRoute<'a, W, M> {
                 }
                 info.pre_factor_log2 = e;
             }
-            let target_sf = ctx.scale.sf(self.variants[st.variant].raise.top as i32)?;
-            let factor = stc_first_mode2_factor(cf_stage as i32, target_sf, ctx.scale.sf((d - 1) as i32)?, ctx.scale.sf(self.entry_top as i32)?, nf_in);
+            let factor = self.mode2_factor(ctx, st, cf_stage, nf_in)?;
             let key = CacheKey([st.variant as i64, cf_stage as i64, (nf_in.log2() * 1e6).round() as i64]);
             for s in &self.input {
                 run_lt(cx, s, cts, src)?;
@@ -790,13 +800,22 @@ impl<'a, W: DevWord, M: DevStrategy<W>> StcFirstRoute<'a, W, M> {
     /// state and an input scale `nf_in` at the entry.
     pub fn warm(&self, ctx: &Context<'_, W, M>, s: &Stream<Compute>, st: &BtsState, nf_in: f64, own_cf: bool) -> Result<CacheKey> {
         let last = self.last.as_ref().ok_or_else(|| no_stage("stc_first", "warm (mode-2 cache not built)"))?;
-        let d = ctx.chain.level_unit;
         let cf_stage = if own_cf { st.cf } else { st.cf.max(self.sf.cf_ref) };
-        let target_sf = ctx.scale.sf(self.variants[st.variant].raise.top as i32)?;
-        let factor = stc_first_mode2_factor(cf_stage as i32, target_sf, ctx.scale.sf((d - 1) as i32)?, ctx.scale.sf(self.entry_top as i32)?, nf_in);
+        let factor = self.mode2_factor(ctx, st, cf_stage, nf_in)?;
         let key = CacheKey([st.variant as i64, cf_stage as i64, (nf_in.log2() * 1e6).round() as i64]);
         last.get(ctx, s, &self.srcs, key, factor)?;
         Ok(key)
+    }
+
+    /// The mode-2 last stage's factor for a call: the raise adjust to the variant's top times its `fdrop` =
+    /// sf(chain top) / sf(raise top) (the StC plaintexts' decoding constant is q0 / sf(chain top), as the shipped order's
+    /// last StC stage compensates in `DensePlan`): 1 at drops 0 and 1, a 4-8 % output gain error at drops 2-5 without
+    /// it. The product no longer depends on the variant, so a PCMM split serves a finish under any drop.
+    fn mode2_factor(&self, ctx: &Context<'_, W, M>, st: &BtsState, cf_stage: u32, nf_in: f64) -> Result<f64> {
+        let d = ctx.chain.level_unit;
+        let target_sf = ctx.scale.sf(self.variants[st.variant].raise.top as i32)?;
+        let fdrop = ctx.scale.sf((ctx.lay.nq - 1) as i32)? / target_sf;
+        Ok(stc_first_mode2_factor(cf_stage as i32, target_sf, ctx.scale.sf((d - 1) as i32)?, ctx.scale.sf(self.entry_top as i32)?, nf_in) * fdrop)
     }
 
     /// A state for the same input under another raise variant (the PCMM finish: input state at the route's drop, the

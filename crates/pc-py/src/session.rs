@@ -430,6 +430,72 @@ fn lt_steps(geoms: &[pc_gpu::bts::cts::LtGeom], n: usize) -> BTreeSet<i64> {
     steps
 }
 
+/// Constant-ring slots of a planned session: 8192, or with CUDA graphs room for every constant the captured
+/// programs push at once (a scalar op or a scalar prelude one row table, a refresh or an external finish a few;
+/// counted twice over).
+fn const_slots(ps: &PlanSpec) -> usize {
+    if !ps.use_graphs {
+        return 8192;
+    }
+    let mut n = 0;
+    for p in &ps.programs {
+        for m in p.ops.iter().flat_map(|o| o.members()) {
+            n += match &m.kind {
+                Kind::AddConst(_) | Kind::MultConst(_) => 2,
+                Kind::Bootstrap(_) => 16,
+                Kind::Finish { .. } => 16 * m.outs.len(),
+                _ => 0,
+            };
+            n += m.pre.iter().filter(|x| matches!(x, pc_shadow::Prelude::ScalarAdjust(..))).count();
+        }
+    }
+    (2 * n).max(8192)
+}
+
+/// The mode-2 last-stage keys (`stc_first` `CacheKey`: raise variant, the stage's CF, the input scale) the programs'
+/// StC-first refreshes can ask for, counted by what sets the input scale: a planned refresh's by its input level and
+/// degree (at the reference CF), a PCMM finish's also by the linear's output shift (at its own CF). Inputs past the
+/// entry level run the shipped order. A count, not the keys: equal scales reached two ways count twice.
+fn stc_first_keys(progs: &[Program], n: usize, entry_level: u32, cf_default: u32, cf_ref: u32) -> usize {
+    let mut keys: BTreeSet<(u32, u32, u32, u8, u32)> = BTreeSet::new();
+    for p in progs {
+        for m in p.ops.iter().flat_map(|o| o.members()) {
+            match &m.kind {
+                Kind::Bootstrap(s) => {
+                    let r = &p.bts_sites[*s as usize].route;
+                    let x = p.vars[m.ins[0] as usize].meta;
+                    if RouteKind::of(r, n) == RouteKind::StcFirst && x.level <= entry_level {
+                        keys.insert((r.raise_drop, r.cf.unwrap_or(cf_default).max(cf_ref), x.level, x.deg, 0));
+                    }
+                }
+                Kind::Finish { desc: Some(d), .. } => {
+                    // a PCMM finish refreshes every output under its own drop, from its inputs' scale
+                    if let Some(d) = crate::pcmm::Desc::parse(d) {
+                        for drop in d.drops() {
+                            for &v in &m.ins {
+                                let x = p.vars[v as usize].meta;
+                                keys.insert((drop, 0, x.level, x.deg, d.shift + 1));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    keys.len()
+}
+
+/// Words of the held rotation chains' ModUp workspace (`ks::KsWork` digits at the session's `k_max`) when some
+/// program has a held chain, else 0 (`Slab::new`).
+fn held_words(ps: &PlanSpec, lay: &pc_gpu::Layout, dnum: usize, k_max: usize) -> usize {
+    if ps.programs.iter().any(|p| p.rotation_chains().iter().any(|c| c.held)) {
+        KsWork::<W>::words(lay, k_max, dnum)[0]
+    } else {
+        0
+    }
+}
+
 /// The refresh routes a set of programs uses (`replay_g0::run`'s recipe, over every block).
 struct RouteNeeds {
     dense_drops: BTreeSet<u32>,
@@ -442,12 +508,14 @@ struct RouteNeeds {
     /// classic sparse routes (`Route::sparse_b` off): slots -> raise drops
     classic: BTreeMap<u32, BTreeSet<u32>>,
     spru_h: Option<u32>,
+    /// raise drops of the SPRU sites (`SpruCfg::drops` bit set)
+    spru_drops: u32,
     /// (level, deg, raise drop) of the left operands of the programs' CCMM finishes (SinCBoot's stc_high shapes)
     ccmm_levels: BTreeSet<(u32, u8, u32)>,
 }
 
 fn route_needs(progs: &[Program], n: usize) -> RouteNeeds {
-    let mut r = RouteNeeds { dense_drops: BTreeSet::new(), real: false, n_dense: 0, plain_drops: BTreeSet::new(), plain_real: false, sparse: BTreeMap::new(), classic: BTreeMap::new(), spru_h: None, ccmm_levels: BTreeSet::new() };
+    let mut r = RouteNeeds { dense_drops: BTreeSet::new(), real: false, n_dense: 0, plain_drops: BTreeSet::new(), plain_real: false, sparse: BTreeMap::new(), classic: BTreeMap::new(), spru_h: None, spru_drops: 0, ccmm_levels: BTreeSet::new() };
     for p in progs {
         // a PCMM finish refreshes its outputs on the StC-first dense route (its raise drop's variant)
         for op in &p.ops {
@@ -472,7 +540,10 @@ fn route_needs(progs: &[Program], n: usize) -> RouteNeeds {
         }
         for s in &p.bts_sites {
             match RouteKind::of(&s.route, n) {
-                RouteKind::Spru { h, .. } => r.spru_h = Some(h),
+                RouteKind::Spru { h, .. } => {
+                    r.spru_h = Some(h);
+                    r.spru_drops |= 1 << s.route.raise_drop.min(31);
+                }
                 RouteKind::Sparse(sl) if !s.route.sparse_b => {
                     r.classic.entry(sl).or_default().insert(s.route.raise_drop);
                 }
@@ -568,6 +639,8 @@ fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Op
         let rn = route_needs(&ps.programs, n);
         // FIDESLIB_CTS_ALT_BUDGET: the dense routes' raise variants of drop >= 1 on a CtS one stage longer
         let cts_alt = knob(cfg.bts.cts_alt_budget, 0, "bts.cts_alt_budget")? as u32;
+        // PC_LT_TAILS (default on) / PC_EM_FUSE_RESCALE (default off): pc-gpu BtsSetup::lt_tails / em_fuse_rescale
+        let (lt_tails, em_fuse) = (cfg.bts.lt_tails.unwrap_or(true), cfg.bts.em_fuse_rescale.unwrap_or(false));
         for p in &ps.programs {
             steps.extend(prog_steps(p, half));
         }
@@ -579,6 +652,7 @@ fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Op
             // batched PCMM finishes run K-member refreshes on this route (its work buffers)
             setup.k_max = pcmm.as_ref().map_or(1, |p| p.batch.max(1));
             setup.cts_alt_budget = cts_alt;
+            (setup.lt_tails, setup.em_fuse_rescale) = (lt_tails, em_fuse);
             let mut sfs = StcFirstSetup::n32_shipped();
             sfs.cache_slots = ps.stc_cache.max(1);
             if ccmm.is_some() {
@@ -591,7 +665,10 @@ fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Op
                 let shapes = crate::matmul::high_shapes(shc.chain, sfs.cf_default.unwrap_or(13), &levels)?;
                 sfs.high = Some(pc_gpu::bts::stc_high::StcHighSetup { shapes, slots: ps.stc_cache.max(4) });
             }
-            let sp = StcFirstPlan::new(chain, &setup, &sfs).map_err(e)?;
+            let mut sp = StcFirstPlan::new(chain, &setup, &sfs).map_err(e)?;
+            // a captured graph reads the entries its refreshes used: the cache holds every key the programs ask for
+            let keys = stc_first_keys(&ps.programs, n, (chain.q.len() - 1 - sp.entry_top) as u32, sp.sf.cf_default.unwrap_or(13), sp.sf.cf_ref);
+            sp.sf.cache_slots = sp.sf.cache_slots.max(keys);
             let mut geoms: Vec<_> = sp.dense.variants.iter().flat_map(|v| v.cts.iter().chain(&v.stc)).chain(&sp.input).map(|h| h.geom).collect();
             geoms.extend(sp.sources.iter().flatten().map(|s| s.geom));
             full.extend(lt_steps(&geoms, n));
@@ -602,6 +679,7 @@ fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Op
             setup.raise_drops = rn.plain_drops.iter().copied().collect();
             setup.real = rn.plain_real;
             setup.cts_alt_budget = cts_alt;
+            (setup.lt_tails, setup.em_fuse_rescale) = (lt_tails, em_fuse);
             setup.k_max = 1;
             let dp = pc_gpu::bts::dense::DensePlan::new(chain, &setup).map_err(e)?;
             let geoms: Vec<_> = dp.variants.iter().flat_map(|v| v.cts.iter().chain(&v.stc).chain(v.stc_real0.iter())).map(|h| h.geom).collect();
@@ -612,6 +690,7 @@ fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Op
             for &d in drops {
                 let mut c = SparseBCfg::n32(sl, d);
                 c.k_max = 1;
+                (c.lt_tails, c.em_fuse_rescale) = (lt_tails, em_fuse);
                 full.extend(pc_gpu::bts::sparse_b::rot_steps(n, &c).map_err(e)?.into_iter().map(|k| k.rem_euclid(half)));
                 sb_cfgs.push(c);
             }
@@ -627,7 +706,7 @@ fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Op
             }
         }
         if let Some(h) = rn.spru_h {
-            let c = SpruCfg::new(h as usize);
+            let c = SpruCfg { drops: rn.spru_drops, ..SpruCfg::new(h as usize) };
             full.extend(c.rot_steps(n).into_iter().map(|k| k.rem_euclid(half)));
             spru_cfg = Some(c);
         }
@@ -892,7 +971,10 @@ fn setup(cfg: &pc_config::Config, ks: &PyKeySource, origin: &Origin, sizes: Size
     mp.reserve("ks.regen_a", KsWork::<W>::regen_bytes(&lay, chain.dnum()));
     // planned blocks push every per-call constant through the ring (scalar rows, raise adjusts) and a captured
     // graph keeps the slots it leased: room for every block's
-    let ocfg = if plan.is_some() { OpsCfg { const_slots: 8192, ..OpsCfg::default() } } else { OpsCfg::default() };
+    let ocfg = match &plan {
+        Some(ps) => OpsCfg { const_slots: const_slots(ps), ..OpsCfg::default() },
+        None => OpsCfg::default(),
+    };
     Ops::<W>::reserve(mp, &ocfg);
     let pcfg = PtStoreCfg {
         slots: sizes.pt_slots,
@@ -952,7 +1034,7 @@ fn setup(cfg: &pc_config::Config, ks: &PyKeySource, origin: &Origin, sizes: Size
         wshape = Some(w);
         mp.reserve("bts.work", BtsWork::<W>::bytes(&lay, w));
         let n_slab = ps.programs.iter().map(|p| p.mem.slot_bytes.len()).max().unwrap_or(0);
-        mp.reserve("replay.slab", Slab::<W>::bytes(&lay, n_slab));
+        mp.reserve("replay.slab", Slab::<W>::bytes(&lay, n_slab, held_words(ps, &lay, chain.dnum(), k_max)));
         let reg_bytes: usize = reg_layouts(lay, ps)?.iter().map(|l| Arena::bytes_for::<W>(pc_gpu::CtBuf::<pc_cuda::Compute, W>::words(l, 1))).sum();
         mp.reserve("replay.regs", reg_bytes);
         group_bytes = ps.programs.iter().map(|p| PBound::<W>::group_bytes(p, ps.dyn_rot.len())).sum();
@@ -1124,7 +1206,7 @@ fn setup(cfg: &pc_config::Config, ks: &PyKeySource, origin: &Origin, sizes: Size
             };
             let work = BtsWork::<W>::new(a, lay, wshape.unwrap_or(BtsWorkShape { k_max: 1, g_max: 1, em_slots: 0, em_kk: 1, spare: 0 })).map_err(e)?;
             let n_slab = ps.programs.iter().map(|p| p.mem.slot_bytes.len()).max().unwrap_or(0);
-            let slab = Slab::<W>::new(a, lay, n_slab).map_err(|x| PyRuntimeError::new_err(x.to_string()))?;
+            let slab = Slab::<W>::new(a, lay, n_slab, held_words(&ps, &lay, chain.dnum(), k_max)).map_err(|x| PyRuntimeError::new_err(x.to_string()))?;
             let mut regs = vec![];
             for rl in reg_layouts(lay, &ps)? {
                 let mut c = Ct::new(pc_shadow::CtMeta::new(0, 1), pc_gpu::CtBuf::new(a, "replay.regs", rl, 1).map_err(e)?);
@@ -1679,6 +1761,10 @@ impl PySession {
         d.set_item("capture_ms", pl.replayer.stats.capture_ms)?;
         d.set_item("invalidations", pl.replayer.stats.invalidations)?;
         d.set_item("stc_evictions", pl.locks().iter().map(|l| l.evictions()).sum::<u64>())?;
+        let stc = pl.dense.as_ref().and_then(|r| r.last.as_ref());
+        d.set_item("stc_misses", stc.map_or(0, |c| c.stats().misses))?;
+        d.set_item("stc_slots", stc.map_or(0, |c| c.slots()))?;
+        d.set_item("stc_keys", stc.map_or(vec![], |c| c.keys().into_iter().map(|k| k.0.to_vec()).collect::<Vec<_>>()))?;
         d.set_item("bound", pl.bounds.len())?;
         d.set_item("group_bytes", pl.group_bytes)?;
         d.set_item("slab", pl.slab.slots.len().max(pl.bounds.iter().map(|b| b.n_slots).max().unwrap_or(0)))?;
