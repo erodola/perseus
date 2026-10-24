@@ -21,18 +21,18 @@ To learn how to submit an entry, see [Submitting](#submitting).
 
 ## Running the current record
 
-The current record is record 1, at the commit its client pins (`PERSEUS` in
-[`speedrun/harness/perseus_core_client.py`](speedrun/harness/perseus_core_client.py)). Clone this branch and build
-that commit next to it; the commands here run from the clone's root:
+Each track has its record: Prefill-128's is record 1, at the commit the client pins (`PERSEUS` in
+[`speedrun/harness/perseus_core_client.py`](speedrun/harness/perseus_core_client.py)), and Decode-8's is record 2,
+FusedUnits. Clone this branch and build both commits next to it; the commands here run from the clone's root:
 
 ```bash
 git clone -b speedrun https://github.com/gladia-research-group/perseus && cd perseus
-git worktree add ../perseus-client 89bc830017fe12ab967ddb10c24feae65d8af6df   # record 1, the client's commit
-cd ../perseus-client
-uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e ".[hf,examples,dev]"
-.venv/bin/maturin develop --release           # the Rust + CUDA runtime (rustup, CUDA 13.2)
-.venv/bin/perseus-export --model openai-community/gpt2 --out .cache/models/openai-community/gpt2
-cd ../perseus
+git worktree add ../perseus-client 89bc830017fe12ab967ddb10c24feae65d8af6df   # the client's commit, Prefill-128's record
+git worktree add ../perseus-record 4d2e72be136426f84f3ed402e468693ba00630db   # Decode-8's record
+for d in . ../perseus-client ../perseus-record; do (cd $d &&
+  uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e ".[hf,examples,dev]" &&
+  .venv/bin/maturin develop --release); done    # the Rust + CUDA runtime (rustup, CUDA 13.2)
+(cd ../perseus-client && .venv/bin/perseus-export --model openai-community/gpt2 --out .cache/models/openai-community/gpt2)
 ```
 
 Then time it as entries are timed, with the harness in `speedrun/`: the client (keys, encryption,
@@ -40,8 +40,8 @@ the checks) and the server (the entry) run in separate sandboxes, on the dev pro
 ([`speedrun/prompts/dev.json`](speedrun/prompts/dev.json), from C4).
 
 ```bash
-bash speedrun/runner/entry.sh perseus-core ../perseus-client decode 0    # Decode-8 on GPU 0
-bash speedrun/runner/entry.sh perseus-core ../perseus-client prefill 0   # Prefill-128
+CLIENT=../perseus-client bash speedrun/runner/entry.sh perseus-core ../perseus-record decode 0   # Decode-8, on GPU 0
+bash speedrun/runner/entry.sh perseus-core ../perseus-client prefill 0                          # Prefill-128
 python3 speedrun/harness/score.py --track decode --entry speedrun/runs/*/run.json
 ```
 
@@ -62,7 +62,7 @@ nodes, `NUMA=NODE[:MEMS]` pins the server to the GPU's node (with `numactl`). Pe
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="speedrun/records/progress-dark.svg">
-    <img src="speedrun/records/progress-light.svg" width="100%" alt="Record progression of both GPT-2 tracks. Prefill-128: 35.78 s (record 0), 22.22 s (record 1). Decode-8: 3.993 s/token (record 0), 3.384 s/token (record 1).">
+    <img src="speedrun/records/progress-light.svg" width="100%" alt="Record progression of both GPT-2 tracks. Prefill-128: 35.78 s (record 0), 22.22 s (record 1). Decode-8: 3.993 s/token (record 0), 3.384 s/token (record 1), 3.031 s/token (record 2).">
   </picture>
 </p>
 
@@ -81,6 +81,7 @@ The chart fills in as records are accepted.
 |---|---|---|---|---|---|---|
 | 0 | 3.993 | 74.5 GiB | Baseline: Perseus on [FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits) | 2026-10-22 | [log](speedrun/records/2026-10-22_Perseus) | [@alexzilligmm](https://github.com/alexzilligmm), [@Davide-F5-Marincione](https://github.com/Davide-F5-Marincione) |
 | 1 | 3.384 | 47.8 GiB | Perseus on [perseus-core](crates), its Rust + CUDA runtime, with its own client | 2026-10-22 | [log](speedrun/records/2026-10-22_PerseusCore) | [@alexzilligmm](https://github.com/alexzilligmm), [@Davide-F5-Marincione](https://github.com/Davide-F5-Marincione) |
+| 2 | 3.031 | 52.8 GiB | FusedUnits: fused key switching, the runtime's batches as units, each position's patch built at setup, and the shipped order's CF at five refreshes | 2026-10-24 | [log](speedrun/records/2026-10-24_FusedUnits) | [@erodola](https://github.com/erodola) |
 
 ## Rules
 
@@ -128,7 +129,7 @@ through [`run_prefill.py`](python/perseus/examples/gpt2/run_prefill.py).
 
 The current record's server drives Perseus's served decode,
 [`perseus.serve.gpt2_decode`](python/perseus/serve/gpt2_decode.py), with the plan
-[`bootstrap_placements/gpt2_decode_python_n32_m16i`](bootstrap_placements/gpt2_decode_python_n32_m16i).
+[`bootstrap_placements/gpt2_decode_python_n32_m16i_fcf`](bootstrap_placements/gpt2_decode_python_n32_m16i_fcf).
 [`scripts/repro/gpt2_decode.sh`](scripts/repro/gpt2_decode.sh) times the same decode in one process, through
 [`run_decode.py`](python/perseus/examples/gpt2/run_decode.py), with per-token times.
 

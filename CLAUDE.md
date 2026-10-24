@@ -7,21 +7,23 @@ disagree, the README wins. Paths below are from the root of the Perseus checkout
 ## Setup
 
 Perseus's `speedrun` branch (the code being changed, and this harness, in `speedrun/`), on a branch of the entrant's
-own, and next to it a build of the commit `speedrun/harness/perseus_core_client.py` pins (`PERSEUS`), as a worktree.
+own, and next to it two builds, as worktrees: the commit `speedrun/harness/perseus_core_client.py` pins (`PERSEUS`), the
+client of every run and Prefill-128's record, and the commit of Decode-8's record (README, "Running the current
+record").
 
 ```bash
 git clone -b speedrun https://github.com/gladia-research-group/perseus && cd perseus
 git remote add fork https://github.com/<handle>/perseus           # the entrant's fork, for the PR
 git switch -c <entry-name>
 git worktree add ../perseus-client <the PERSEUS sha>
-for d in . ../perseus-client; do (cd $d &&
+git worktree add ../perseus-record <Decode-8's record sha>
+for d in . ../perseus-client ../perseus-record; do (cd $d &&
   uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e ".[hf,examples,dev]" &&
-  .venv/bin/maturin develop --release &&                        # the Rust + CUDA runtime
-  .venv/bin/perseus-export --model openai-community/gpt2 --out .cache/models/openai-community/gpt2); done
+  .venv/bin/maturin develop --release); done                    # the Rust + CUDA runtime
+(cd ../perseus-client && .venv/bin/perseus-export --model openai-community/gpt2 --out .cache/models/openai-community/gpt2)
 ```
 
-`../perseus-client` is the client of every run (the client holds the secret key, so the harness runs it only at its
-pinned commit, never on the code you are changing) and, today, also the current record.
+The client holds the secret key, so the harness runs it only at its pinned commit, never on the code you are changing.
 
 You need Linux, `bwrap`, a systemd user session, a GPU with 48 GB or more, and `HF_HOME` holding the
 `openai-community/gpt2` weights.
@@ -29,8 +31,8 @@ You need Linux, `bwrap`, a systemd user session, a GPU with 48 GB or more, and `
 ## The loop
 
 1. Time the current record first, on the GPU you will use:
-   `CLIENT=../perseus-client bash speedrun/runner/entry.sh perseus-core <the record's checkout> decode 0` (and
-   `prefill`); the record's checkout is `../perseus-client` while record 1 holds. Each run writes
+   `CLIENT=../perseus-client bash speedrun/runner/entry.sh perseus-core ../perseus-record decode 0`, and for
+   Prefill-128 `bash speedrun/runner/entry.sh perseus-core ../perseus-client prefill 0`. Each run writes
    `speedrun/runs/<run>/run.json`. Time the entry the same way, with `.` as the checkout.
 2. Make one change at a time: kernels in `crates/`, Python in `python/perseus/`, plans in `bootstrap_placements/`,
    approximations, CKKS parameters. The server is `speedrun/server.py`. It must keep speaking the harness protocol
