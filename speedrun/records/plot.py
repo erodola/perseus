@@ -39,6 +39,7 @@ def load(path):
             r["record"] = int(r["record"])
             r["date"] = dt.date.fromisoformat(r["date"])
             r["value"] = float(r["value"])
+            r["by"] = ", ".join("@" + h for h in r.get("contributors", "").split())
             rows.append(r)
     return rows
 
@@ -117,19 +118,17 @@ def panel(oy, track, title, quantity, unit, rows, bars, d0, d1, a):
     out.append(f'<path {a["ln"]} d="{path}"/>')
     out.append(f'<path {a["hold"]} d="M{x(pts[-1]["date"]):.1f},{y(pts[-1]["value"]):.1f}H{x1}"/>')
 
-    prev, below = None, False
-    for r in pts:
-        cx, cy = x(r["date"]), y(r["value"])
-        below = prev is not None and abs(cy - prev) < 16 and not below      # crowded: alternate below and above
-        ly = cy + 18 if below else cy - 9
-        prev = cy
+    for r in pts:                           # only the current record is labelled; the tables hold the rest
+        cx, cy, last = x(r["date"]), y(r["value"]), r is pts[-1]
         tip = {"title": f"#{r['record']} {r['label']}", "value": f"{fmt(r['value'])} {unit}",
-               "date": r["date"].isoformat()}
-        out.append(f'<circle {a["pt"]} cx="{cx:.1f}" cy="{cy:.1f}" r="5" tabindex="0" '
-                   f'data-tip="{html.escape(json.dumps(tip))}"><title>{html.escape(tip["title"])}, '
-                   f'{tip["value"]}, {tip["date"]}</title></circle>')
-        out.append(f'<text {a["t"]} x="{cx + 10:.1f}" y="{ly:.1f}" font-size="12">'
-                   f'#{r["record"]} · {fmt(r["value"])} {unit}</text>')
+               "date": r["date"].isoformat(), "by": r["by"]}
+        out.append(f'<circle {a["pt"]} cx="{cx:.1f}" cy="{cy:.1f}" r="{5 if last else 3.5}"'
+                   f'{"" if last else " opacity=\"0.5\""} tabindex="0" data-tip="{html.escape(json.dumps(tip))}">'
+                   f'<title>{html.escape(tip["title"])}, {tip["value"]}, {tip["date"]}'
+                   f'{", by " + html.escape(r["by"]) if r["by"] else ""}</title></circle>')
+        if last:
+            out.append(f'<text {a["t"]} x="{cx + 10:.1f}" y="{cy - 9:.1f}" font-size="12">'
+                       f'#{r["record"]} · {fmt(r["value"])} {unit}</text>')
     return out
 
 
@@ -187,9 +186,10 @@ font-size:12.5px;line-height:1.4;max-width:280px}}
 const tip = document.getElementById("tip");
 function show(e) {{
   const d = JSON.parse(e.target.dataset.tip), r = e.target.getBoundingClientRect();
-  tip.innerHTML = "<b></b><br><span></span>";
+  tip.innerHTML = "<b></b><br><span></span><br><i></i>";
   tip.querySelector("b").textContent = d.title;
   tip.querySelector("span").textContent = d.value + " \\u00b7 " + d.date;
+  tip.querySelector("i").textContent = d.by ? "by " + d.by : "";
   tip.hidden = false;
   tip.style.left = Math.min(r.right + 10, innerWidth - tip.offsetWidth - 8) + "px";
   tip.style.top = (r.top - tip.offsetHeight - 6) + "px";
