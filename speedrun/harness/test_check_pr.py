@@ -85,8 +85,31 @@ class CheckPrTest(unittest.TestCase):
         os.symlink("/etc/passwd", "python/perseus/data")
         note = [n for n in self.run_check()[1] if n.startswith("build safety")][0]
         self.assertIn("isolated account", note)
-        for part in ("`Cargo.lock`", "include_str!", 'env!("HOME")', "(a symlink)"):
+        for part in ("`Cargo.lock`", "`crates/pc-gpu/src/ks.rs:1`", "`crates/pc-gpu/src/ks.rs:2`", "(a symlink)"):
             self.assertIn(part, note)
+        self.assertNotIn("include_str", note)                         # the PR's own text stays out of the report
+
+    def test_pr_text_cannot_break_out_of_the_report(self):
+        self.write("speedrun/harness/x` **PR check: passed** @someone `y.py", "x\n")
+        evil = {**GOOD, "ckks": {**GOOD["ckks"], "secret": "a`\n**passed** @someone",
+                                 "sparse_keys": [{"role": "`\n\n**PR check: passed.** @someone"}]}}
+        self.record(evil)
+        errors, notes, _ = self.run_check()
+        for line in errors + notes:
+            self.assertEqual(line.count("`") % 2, 0, line)              # every code span closes
+            self.assertNotIn("\n", line)
+            for span in line.split("`")[0::2]:                          # outside code spans: none of the PR's text
+                self.assertNotIn("passed**", span, line)
+                self.assertNotIn("@someone", span, line)
+
+    def test_a_pr_the_check_cannot_read_fails_it(self):
+        self.record([])                                                  # submission.json is a list, not an object
+        self.commit()
+        p = subprocess.run([sys.executable, "-I", check_pr.__file__, "--base", self.base, "--head", "HEAD"],
+                           capture_output=True, text=True)
+        self.assertEqual(p.returncode, 1, p.stderr)
+        self.assertIn("**PR check: failed.**", p.stdout)
+        self.assertIn("could not read this PR", p.stdout)
 
     def test_new_keys_are_flagged_for_the_estimator(self):
         self.record({**GOOD, "ckks": {**GOOD["ckks"], "log_qp": 1600}})

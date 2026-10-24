@@ -1,15 +1,4 @@
-# The speedrun's harness, rules and records, and the repository's automation: a maintainer reviews every change
-# (speedrun/harness/check_pr.py fails a PR from anyone else that touches them).
-/speedrun/harness/ @alexzilligmm
-/speedrun/runner/ @alexzilligmm
-/speedrun/prompts/ @alexzilligmm
-/speedrun/records/ @alexzilligmm
-/README.md @alexzilligmm
-/CLAUDE.md @alexzilligmm
-/speedrun/MAINTAINING.md @alexzilligmm
-/speedrun/RULINGS.md @alexzilligmm
-/speedrun/LICENSE @alexzilligmm
-/speedrun/.gitignore @alexzilligmm
-/.github/ @alexzilligmm
-/LICENSE @alexzilligmm
-/CLA.md @alexzilligmm
+# Every change to the speedrun branch, the record's code as much as the harness, the rules and the records: a
+# maintainer reviews it (speedrun/harness/check_pr.py also fails a PR from anyone else that touches the protected
+# paths).
+* @alexzilligmm

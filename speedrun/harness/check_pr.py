@@ -13,8 +13,9 @@ time. submission.json must have the template's fields, and its CKKS parameters m
 standard's table (ternary secret, classic estimates): log QP within the bound of the ring dimension. The report says
 whether its keys are an existing record's or need the maintainers' Lattice Estimator run, and whether building the
 entry runs or reads anything of its own beyond the compiler's input (`build_safety`). An entry's description
-(`--body`) accepts the CLA (CLA.md). Prints a Markdown report (nothing for a clean PR that is not an entry); exit
-0 = pass. Standard library only.
+(`--body`) accepts the CLA (CLA.md). Prints a Markdown report (nothing for a clean PR that is not an entry), in which
+text from the PR appears only as inline code (`code`); exit 0 = pass, and a PR the check cannot read fails it.
+Standard library only.
 """
 from __future__ import annotations
 
@@ -45,6 +46,12 @@ CLIENT_CODE = ("crates/pc-client/", "python/perseus/client/")   # keygen, encryp
 FRAMING = ("speedrun/record1.py",)                              # record 1's output framing, next to its plan constants
 
 
+def code(text) -> str:
+    """Text from the PR as one inline code span: no backtick or line break can end it, so nothing in it renders as
+    Markdown or mentions anyone."""
+    return "`" + " ".join(str(text).replace("`", "'").split())[:200] + "`"
+
+
 def git(*args) -> str:
     return subprocess.run(["git", *args], check=True, capture_output=True, text=True).stdout
 
@@ -72,9 +79,9 @@ def check(base: str, head: str, author: str = "", body: str | None = None) -> tu
         if not path.startswith(PROTECTED) or path in clients or (m and m.group(1) in folders and status == "A"):
             continue
         if author in MAINTAINERS:
-            notes.append(f"`{path}` ({status}): protected, changed by a maintainer")
+            notes.append(f"{code(path)} ({status}): protected, changed by a maintainer")
         else:
-            errors.append(f"`{path}` ({status}): the speedrun's harness, rules and records and the repository's "
+            errors.append(f"{code(path)} ({status}): the speedrun's harness, rules and records and the repository's "
                           "automation are the maintainers'")
     if not folders or (len(folders) > 1 and author in MAINTAINERS):     # a maintainer's records, not an entry
         return errors, notes, False
@@ -120,26 +127,30 @@ def build_safety(base: str, head: str) -> str:
     for line in git("diff", "--no-renames", "--raw", f"{base}...{head}").splitlines():
         meta, path = line.split("\t", 1)
         if BUILD_FILES.search(path):
-            found.append(f"`{path}`")
+            found.append(code(path))
         if meta.split()[1] == "120000":
-            found.append(f"`{path}` (a symlink)")
+            found.append(f"{code(path)} (a symlink)")
     for line in git("diff", "--no-renames", "--numstat", f"{base}...{head}").splitlines():
         added, _deleted, path = line.split("\t", 2)
         if added == "-":
-            found.append(f"`{path}` (binary)")
+            found.append(f"{code(path)} (binary)")
     changed = git("diff", "--no-renames", "--name-only", f"{base}...{head}").splitlines()
     for crate in sorted({p.split("/")[1] for p in changed if p.startswith("crates/") and p.count("/") > 1}):
         try:
             if re.search(r"proc-macro\s*=\s*true", git("show", f"{head}:crates/{crate}/Cargo.toml")):
-                found.append(f"`crates/{crate}` (a proc-macro crate)")
+                found.append(f"{code('crates/' + crate)} (a proc-macro crate)")
         except subprocess.CalledProcessError:
             pass
-    path = None
+    path, number = None, 0
     for line in git("diff", "--no-renames", "-U0", f"{base}...{head}").splitlines():
         if line.startswith("+++ "):
             path = line[6:] if line.startswith("+++ b/") else None
-        elif line.startswith("+") and path and path.endswith(SOURCES) and COMPILE_TIME.search(line):
-            found.append(f"`{path}`: `{line[1:].strip()[:80]}`")
+        elif line.startswith("@@"):
+            number = int(re.search(r"\+(\d+)", line).group(1))
+        elif line.startswith("+"):
+            if path and path.endswith(SOURCES) and COMPILE_TIME.search(line):
+                found.append(f"{code(f'{path}:{number}')} (compile-time inclusion, environment or absolute path)")
+            number += 1
     if not found:
         return ("build safety: building it runs no code of the PR (no build or dependency file, symlink, binary, "
                 "proc-macro crate or compile-time inclusion changed)")
@@ -159,7 +170,7 @@ def client_code(base, head, clients, folder) -> tuple[list[str], list[str], str]
     """The PR's changes to the client's code, which need the entry's own client, and the commit the maintainers time:
     the head, or the commit the client pins, from which the head differs only by the record folder and the client."""
     errors, notes, timed = [], [], git("rev-parse", head).strip()
-    code = git("diff", "--name-only", f"{base}...{head}", "--", *CLIENT_CODE, *FRAMING).splitlines()
+    changed = git("diff", "--name-only", f"{base}...{head}", "--", *CLIENT_CODE, *FRAMING).splitlines()
     for c in clients:
         own = PIN.search(git("show", f"{head}:{c}"))
         if not own:
@@ -172,11 +183,11 @@ def client_code(base, head, clients, folder) -> tuple[list[str], list[str], str]
                           "and the client")
         else:
             timed = own.group(1)
-    if any(f.startswith(CLIENT_CODE) for f in code) and not clients:
-        errors.append(f"the PR changes the client's code ({', '.join(f'`{f}`' for f in code)}), which the client runs "
-                      "at its pinned commit: bring your own client, `speedrun/harness/<name>_client.py`")
-    if code:
-        notes.append(f"client-side changes, for the client's review: {', '.join(f'`{f}`' for f in code)}")
+    if any(f.startswith(CLIENT_CODE) for f in changed) and not clients:
+        errors.append(f"the PR changes the client's code ({', '.join(code(f) for f in changed)}), which the client "
+                      "runs at its pinned commit: bring your own client, `speedrun/harness/<name>_client.py`")
+    if changed:
+        notes.append(f"client-side changes, for the client's review: {', '.join(code(f) for f in changed)}")
     return errors, notes, timed
 
 
@@ -204,16 +215,16 @@ def security(ckks: dict) -> tuple[list[str], list[str]]:
         return ["`ckks` must declare `log_n`, `log_qp` and `secret`"], []
     errors, notes = [], []
     if secret not in ("uniform-ternary", "ternary"):
-        errors.append(f"main secret `{secret}`: the automatic check covers ternary secrets only")
+        errors.append(f"main secret {code(secret)}: the automatic check covers ternary secrets only")
     bound = HE_STD_128.get(n)
     if bound is None:
-        errors.append(f"ring dimension 2^{ckks['log_n']} is not in the HE standard's table")
+        errors.append(f"ring dimension 2^{n.bit_length() - 1} is not in the HE standard's table")
     elif log_qp > bound:
-        errors.append(f"log QP {log_qp} > {bound}, the 128-bit bound at N = 2^{ckks['log_n']}")
+        errors.append(f"log QP {log_qp} > {bound}, the 128-bit bound at N = 2^{n.bit_length() - 1}")
     else:
-        notes.append(f"main key: N = 2^{ckks['log_n']}, log QP {log_qp} <= {bound} (HE standard, 128-bit classic)")
+        notes.append(f"main key: N = 2^{n.bit_length() - 1}, log QP {log_qp} <= {bound} (HE standard, 128-bit classic)")
     for k in ckks.get("sparse_keys", []):
-        notes.append(f"sparse key for the Lattice Estimator: {json.dumps(k)}")
+        notes.append(f"sparse key for the Lattice Estimator: {code(json.dumps(k))}")
     return errors, notes
 
 
@@ -228,7 +239,10 @@ def main():
     if a.body:
         with open(a.body, encoding="utf-8", errors="replace") as f:
             body = f.read()
-    errors, notes, entry = check(a.base, a.head, a.author, body)
+    try:
+        errors, notes, entry = check(a.base, a.head, a.author, body)
+    except Exception as e:  # noqa: BLE001 (a PR the check cannot read fails it, never passes)
+        errors, notes, entry = [f"the check could not read this PR: {code(type(e).__name__ + ': ' + str(e))}"], [], True
     if not entry and not errors:
         return 0
     print("<!-- speedrun-pr-check -->")
