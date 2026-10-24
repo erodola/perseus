@@ -70,8 +70,9 @@ for f in glob.glob(f"{sys.argv[1]}/**/capture_config.json", recursive=True):    
     open(f, "w").write(json.dumps(c, indent=2))
 PY
 PLANNER="$(git log -1 --format=%h -- python/perseus/plan) (python/perseus/plan's last commit; PLAN_PLACER=ilp)"
+SOLVER="scipy $("$PYTHON" -c 'import scipy; print(scipy.__version__)') milp (HiGHS)"
 printf '%s\n' "graph=$GR" \
     "tool=speedrun/make_prefill_plan.sh (make_plan.sh blocks + argmax, the tail as make_tail_plan.sh)" \
-    "planner=$PLANNER" "recipe=$RECIPE" "runtime=$RUNTIME" "configs=$CONFIGS" \
+    "planner=$PLANNER" "recipe=$RECIPE" "runtime=$RUNTIME" "configs=$CONFIGS" "solver=$SOLVER" \
     "pcmm_calib=$BASE's (the PCMM band shifts)" > "bootstrap_placements/$OUT/PLAN_CMD.txt"
 ls "bootstrap_placements/$OUT"
