@@ -26,41 +26,21 @@ To learn how to submit an entry, see [Submitting](#submitting).
 
 ## Running the current record
 
-Each track has its record: Prefill-128's is record 1, at the commit the client pins (`PERSEUS` in
-[`speedrun/harness/perseus_core_client.py`](speedrun/harness/perseus_core_client.py)), and Decode-8's is record 2,
-FusedUnits. Clone this branch and build both commits next to it; the commands here run from the clone's root:
+This branch is Decode-8's record; Prefill-128's is the commit the client pins, the client of every run.
 
 ```bash
 git clone -b speedrun https://github.com/gladia-research-group/perseus && cd perseus
-git worktree add ../perseus-client 89bc830017fe12ab967ddb10c24feae65d8af6df   # the client's commit, Prefill-128's record
-git worktree add ../perseus-record 4d2e72be136426f84f3ed402e468693ba00630db   # Decode-8's record
-for d in . ../perseus-client ../perseus-record; do (cd $d &&
-  uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e ".[hf,examples,dev]" &&
-  .venv/bin/maturin develop --release); done    # the Rust + CUDA runtime (rustup, CUDA 13.2)
+git worktree add ../perseus-client 89bc830017fe12ab967ddb10c24feae65d8af6df
+for d in . ../perseus-client; do (cd $d && uv venv --python 3.12 .venv &&
+  uv pip install --python .venv/bin/python -e ".[hf,examples,dev]" && .venv/bin/maturin develop --release); done
 (cd ../perseus-client && .venv/bin/perseus-export --model openai-community/gpt2 --out .cache/models/openai-community/gpt2)
+
+CLIENT=../perseus-client bash speedrun/runner/entry.sh perseus-core . decode 0    # Decode-8, on GPU 0
+bash speedrun/runner/entry.sh perseus-core ../perseus-client prefill 0           # Prefill-128
 ```
 
-Then time it as entries are timed, with the harness in `speedrun/`: the client (keys, encryption,
-the checks) and the server (the entry) run in separate sandboxes, on the dev prompts
-([`speedrun/prompts/dev.json`](speedrun/prompts/dev.json), from C4).
-
-```bash
-CLIENT=../perseus-client bash speedrun/runner/entry.sh perseus-core ../perseus-record decode 0   # Decode-8, on GPU 0
-bash speedrun/runner/entry.sh perseus-core ../perseus-client prefill 0                          # Prefill-128
-python3 speedrun/harness/score.py --track decode --entry speedrun/runs/*/run.json
-```
-
-An entry runs the same way, from its own checkout built the same way, with that build as the client:
-`CLIENT=../perseus-client bash speedrun/runner/entry.sh perseus-core . decode 0`. The client holds the secret key
-and the prompts, so it only runs the Perseus commit its client file pins, built by you; `runner/run.py`
-refuses any other checkout. The server reads GPT-2's weights from the client checkout's export, read-only at
-`$WEIGHTS_PATH`. Its checkout may link outside itself (top-level symlinks, its venv's interpreter) only where the
-client's checkout links, or into the directories of `ALLOW=DIR[:DIR...]`.
-
-You need Linux, `bwrap`, a systemd user session and a GPU with 48 GB or more, and `HF_HOME` must hold
-the `openai-community/gpt2` weights, which the float64 reference reads. On a machine with several NUMA
-nodes, `NUMA=NODE[:MEMS]` pins the server to the GPU's node (with `numactl`). Perseus's own scripts
-(`scripts/repro/gpt2_decode.sh`, `scripts/repro/gpt2_prefill128.sh`) time the same models in one process.
+You need Linux, `bwrap`, a systemd user session, a GPU with 48 GB or more, and `HF_HOME` holding
+`openai-community/gpt2`. An entry runs the same way, from its own checkout.
 
 ## Records
 
@@ -93,8 +73,15 @@ unencrypted on the same GPU (at the bottom, not to scale).
 |---|---|---|---|---|---|
 | 0 | 3.993 | Baseline: Perseus on [FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits) | 2026‑10‑22 | [`39493d5`](https://github.com/gladia-research-group/perseus/tree/39493d5a98122c1fb595c99070bf4e435df752f0) · [log](speedrun/records/2026-10-22_Perseus) | [@alexzilligmm](https://github.com/alexzilligmm)<br>[@Davide‑F5‑Marincione](https://github.com/Davide-F5-Marincione) |
 | 1 | 3.384 | Perseus on [perseus‑core](crates), its Rust + CUDA runtime, with its own client | 2026‑10‑22 | [`89bc830`](https://github.com/gladia-research-group/perseus/tree/89bc830017fe12ab967ddb10c24feae65d8af6df) · [log](speedrun/records/2026-10-22_PerseusCore) | [@alexzilligmm](https://github.com/alexzilligmm)<br>[@Davide‑F5‑Marincione](https://github.com/Davide-F5-Marincione) |
-| 2 | 3.031 | FusedUnits: fused key switching, the runtime's batches as units, each position's patch built at setup, and the shipped order's CF at five refreshes | 2026‑10‑24 | [`4d2e72b`](https://github.com/gladia-research-group/perseus/tree/4d2e72be136426f84f3ed402e468693ba00630db) · [log](speedrun/records/2026-10-24_FusedUnits) | [@erodola](https://github.com/erodola) |
+| 2 | 3.031 | FusedUnits: fused key switching, batched rotations, more precise bootstraps | 2026‑10‑24 | [`4d2e72b`](https://github.com/gladia-research-group/perseus/tree/4d2e72be136426f84f3ed402e468693ba00630db) · [log](speedrun/records/2026-10-24_FusedUnits) | [@erodola](https://github.com/erodola) |
 |  | $`\color{gray}\textsf{0.00065}`$ | $`\color{gray}\textsf{Unencrypted GPT-2}`$ | $`\color{gray}\textsf{2026-10-24}`$ | [code](speedrun/records/plaintext.py) · [log](speedrun/records/plaintext.json) |  |
+
+### What the records changed
+
+- **Record 2, FusedUnits** (Decode-8): key switching makes fewer passes over GPU memory, rotations of one ciphertext
+  share their first step, and five bootstraps run more precisely (a third of the error).
+- **Record 1**: Perseus on its own Rust + CUDA runtime instead of FIDESlib.
+- **Record 0**: the baseline, Perseus on FIDESlib.
 
 ## Rules
 
