@@ -1,6 +1,6 @@
 """Perseus on its Rust runtime (perseus-core) as an Encrypted GPT-2 Speedrun server: the harness protocol. Decode-8
 drives perseus.serve.gpt2_decode's handler (the served planned decode) instead of its socket; Prefill-128 runs
-PlannedPrefill with GPT-2's encrypted tail (14 stages, the plan speedrun/make_tail_plan.sh writes).
+PlannedPrefill with GPT-2's encrypted tail (14 stages, the plan speedrun/make_prefill_plan.sh writes).
 
     bash speedrun/serve.sh --track {prefill,decode} --inbox IN --outbox OUT [--device N]
 
@@ -24,10 +24,11 @@ import sys
 import time
 import types
 
-from speedrun.record1 import PREFILL_PLAN, PROMPT, pack, unpack
+from speedrun.record1 import PROMPT, pack, unpack
 
 HEADER = struct.Struct("<Q")
 STEPS = 16
+PREFILL_PLAN = "bootstrap_placements/gpt2_prefill128_pf"     # speedrun/make_prefill_plan.sh
 
 
 def write(root, rel, payload):

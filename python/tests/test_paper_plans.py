@@ -104,7 +104,9 @@ GATE: dict[str, tuple | None] = {
     "bert_base_sst2_128_m16s0": ("graphs/bert_sst2_128_stcf_m16", "PLAN_DELIB_DEG=captured " + _M16S, GPT2_TOOL,
                                  ("blocks",)),
     "vit_b16_224_m18s3": ("graphs/vit_b16_224_stcf_m16", "PLAN_DELIB_DEG=captured " + _M18S, GPT2_TOOL, ("blocks",)),
-    # the main recipe (recipe= line) on the ILP placer (objective: total refresh count)
+    # the main recipe (recipe= line) on the ILP placer (objective: total refresh count). m16i and m16i_fcf were made by
+    # the planner before the ILP model change of c064188, which solves their ILP where that planner fell back to the
+    # min-cut: they regenerate with that planner (f19831a), not with this one
     "gpt2_decode_python_n32_m16i": (None, "PLAN_PLACER=ilp PLAN_ILP_TIME_LIMIT=600", GPT2_TOOL, None),
     # m16i with the shipped order's CF where that order runs (its recipe= line has the whole recipe)
     "gpt2_decode_python_n32_m16i_fcf": None,

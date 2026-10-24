@@ -359,7 +359,7 @@ section! {
 }
 
 section! {
-    /// `model.prefill` (90 legacy env names).
+    /// `model.prefill` (92 legacy env names).
     PrefillSection "model.prefill" {
         #[doc = "`PF_ACT_FOLD`. Default '0'. Read at impl/activation.py::<module>."]
         #[doc = "Shipped plans: runtime= 7."]
@@ -460,6 +460,9 @@ section! {
         #[doc = "`PF_LANE_HOIST`. Default '0'. Read at impl/prefill.py::<module>."]
         #[doc = "Shipped plans: none."]
         lane_hoist: Int = "PF_LANE_HOIST", "'0'";
+        #[doc = "`PF_LAST_QUERY`. Default '0'. Read at examples/gpt2/prefill.py::<module>."]
+        #[doc = "Shipped plans: runtime= 1."]
+        last_query: Flag = "PF_LAST_QUERY", "'0'";
         #[doc = "`PF_LAYOUT`. Default ''. Read at examples/gpt2/prefill.py::_layout_blocked; examples/gpt2/run_prefill.py::main; examples/llama/prefill.py::_layout_blocked; examples/llama/run_prefill.py::main; examples/llama/run_prefill.py::main.on_block."]
         #[doc = "Shipped plans: runtime= 5."]
         layout: Str = "PF_LAYOUT", "''";
@@ -568,6 +571,9 @@ section! {
         #[doc = "`PF_ROT_PRUNE`. Default '1'. Read at examples/gpt2/run_prefill.py::main; examples/llama/run_prefill.py::main."]
         #[doc = "Shipped plans: none."]
         rot_prune: Flag = "PF_ROT_PRUNE", "'1'";
+        #[doc = "`PF_QKV_PACK`. Default '0'. Read at examples/gpt2/prefill.py::<module>."]
+        #[doc = "Shipped plans: runtime= 1."]
+        qkv_pack: Flag = "PF_QKV_PACK", "'0'";
         #[doc = "`PF_SILU_SINGLE`. Default '0'. Read at impl/prefill.py::<module>."]
         #[doc = "Shipped plans: none."]
         silu_single: Flag = "PF_SILU_SINGLE", "'0'";

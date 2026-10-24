@@ -39,8 +39,8 @@ fn field_table() {
     let pf = PlanConfig::fields();
     println!("[config] Config {} fields, PlanConfig {} fields", cf.len(), pf.len());
     // inventory sections 1-2, 5a/5b, 6a/6b + exec.use_graphs, exec.trace_alloc, host.n_in_flight, bts.em_fuse_rescale,
-    // bts.lt_tails
-    assert_eq!(cf.len(), 252);
+    // bts.lt_tails, model.prefill.{last_query,qkv_pack}
+    assert_eq!(cf.len(), 254);
     // + section 7a: plan.kv_entry_level, plan.kv_entry_deg, plan.keep_placements; 8a: plan.stc_first_reroute, plan.site_cf;
     // plan.fallback_cf
     assert_eq!(pf.len(), 90);
@@ -54,8 +54,8 @@ fn field_table() {
         }
     }
     // 337 inventory names - 4 without a field (GPU guard, dropped _client, two upstream-driver inputs) + the two
-    // perseus-core runtime switches (PC_EM_FUSE_RESCALE, PC_LT_TAILS) + PLAN_FALLBACK_CF
-    assert_eq!(envs.len(), 336);
+    // perseus-core runtime switches (PC_EM_FUSE_RESCALE, PC_LT_TAILS) + PF_LAST_QUERY, PF_QKV_PACK, PLAN_FALLBACK_CF
+    assert_eq!(envs.len(), 338);
 }
 
 #[test]
