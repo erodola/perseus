@@ -1,4 +1,4 @@
 # Every change to the speedrun branch, the record's code as much as the harness, the rules and the records: a
 # maintainer reviews it (speedrun/harness/check_pr.py also fails a PR from anyone else that touches the protected
 # paths).
-* @alexzilligmm
+* @alexzilligmm @Davide-F5-Marincione

@@ -30,7 +30,7 @@ HE_STD_128 = {1024: 27, 2048: 54, 4096: 109, 8192: 218, 16384: 438, 32768: 881, 
 FOLDER = re.compile(r"^speedrun/records/(\d{4}-\d{2}-\d{2}_[A-Za-z0-9][A-Za-z0-9-]*)/")
 CLIENT = re.compile(r"^speedrun/harness/[a-z0-9_]+_client\.py$")
 PIN = re.compile(r'^PERSEUS = "([0-9a-f]{40})"', re.M)
-MAINTAINERS = ("alexzilligmm",)
+MAINTAINERS = ("alexzilligmm", "Davide-F5-Marincione")
 CLA = "i have read the perseus cla and agree to it"
 PROTECTED = ("speedrun/harness/", "speedrun/runner/", "speedrun/prompts/", "speedrun/records/", "speedrun/MAINTAINING.md",
              "speedrun/RULINGS.md", "speedrun/LICENSE", "speedrun/.gitignore", "README.md", "CLAUDE.md", ".github/",

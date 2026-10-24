@@ -131,9 +131,11 @@ class CheckPrTest(unittest.TestCase):
 
     def test_a_maintainer_may_touch_the_harness(self):
         self.write("speedrun/runner/run.py", "better\n")
-        errors, notes, _ = self.run_check(author=check_pr.MAINTAINERS[0])
-        self.assertEqual(errors, [])
-        self.assertTrue(any("maintainer" in n for n in notes))
+        self.commit()
+        for login in check_pr.MAINTAINERS:
+            errors, notes, _ = check_pr.check(self.base, "HEAD", login)
+            self.assertEqual(errors, [], login)
+            self.assertTrue(any("maintainer" in n for n in notes), login)
 
     def test_adding_to_an_existing_record_fails(self):
         self.record()
