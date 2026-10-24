@@ -157,6 +157,12 @@ fn gpt2_prefill() {
     gate("gpt2_prefill_python_n32_pcmmstcf", "gpt2_prefill_python_n32_pcmmstcf");
 }
 
+/// The Prefill-128 plan the speedrun serves (speedrun/server.py), blocks and tail.
+#[test]
+fn gpt2_prefill_speedrun() {
+    gate("gpt2_prefill128_pf", "gpt2_prefill128_pf");
+}
+
 #[test]
 fn llama_prefill() {
     gate("llama31_8b_prefill_python_n32_pcmmstcf", "llama31_8b_prefill_python_n32_pcmmstcf");
