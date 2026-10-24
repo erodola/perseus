@@ -123,6 +123,8 @@ Records that change it:
 - Server: the planned prefill, [`PlannedPrefill`](python/perseus/impl/prefill.py)
 - Plan: [`bootstrap_placements/gpt2_prefill128_pf`](bootstrap_placements/gpt2_prefill128_pf), made by
   [`speedrun/make_prefill_plan.sh`](speedrun/make_prefill_plan.sh)
+- In one process: [`scripts/repro/gpt2_prefill128.sh`](scripts/repro/gpt2_prefill128.sh), through
+  [`run_prefill.py`](python/perseus/examples/gpt2/run_prefill.py)
 - [`prefill.py`](python/perseus/examples/gpt2/prefill.py) runs the 128 positions through the 12 blocks, packed as complex chunk
   pairs, and keeps every block's K and V on the GPU.
 - The timed pass follows one untimed warm-up on another prompt.
