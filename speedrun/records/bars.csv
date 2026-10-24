@@ -1,0 +1,4 @@
+track,value,label
+decode,1,1 token/s
+decode,0.000651,"GPT-2 unencrypted: 0.65 ms/token (1,536 tokens/s)"
+prefill,0.000772,"GPT-2 unencrypted: 0.77 ms"

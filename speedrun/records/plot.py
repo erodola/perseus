@@ -4,7 +4,9 @@
     python3 records/plot.py
 
 Writes progress-light.svg and progress-dark.svg (the README's <picture>) and progress.html (the same
-chart with hover details) next to this script. Standard library only.
+chart with hover details) next to this script. The bars in records/bars.csv are drawn as dotted lines: a bar
+within a decade of the records' range on the scale, one further below in a strip under it, not to scale.
+Standard library only.
 """
 from __future__ import annotations
 
@@ -23,9 +25,10 @@ THEMES = {
     "light": dict(text="#24292f", muted="#59636e", grid="#d1d9e0", line="#3d5a80", bg="#ffffff"),
     "dark": dict(text="#e6edf3", muted="#9198a1", grid="#3d444d", line="#98c1d9", bg="#0d1117"),
 }
-W, PH, GAP = 900, 250, 16      # one full-width panel per track, stacked
+W, PH, GAP = 900, 290, 16      # one full-width panel per track, stacked
 H = 2 * PH + GAP
 LEFT, RIGHT, TOP, BOTTOM = 52, 20, 52, 36
+STRIP = 40                     # under the scale, for bars far below the records
 FONT = "-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif"
 
 
@@ -38,6 +41,13 @@ def load(path):
             r["value"] = float(r["value"])
             rows.append(r)
     return rows
+
+
+def load_bars(path):
+    if not os.path.exists(path):
+        return []
+    with open(path, newline="", encoding="utf-8") as f:
+        return [dict(r, value=float(r["value"])) for r in csv.DictReader(f)]
 
 
 def log_span(values):
@@ -66,7 +76,7 @@ def fmt(v):
     return f"{v:g}"
 
 
-def panel(oy, track, title, quantity, unit, rows, d0, d1, a):
+def panel(oy, track, title, quantity, unit, rows, bars, d0, d1, a):
     pts = sorted((r for r in rows if r["track"] == track), key=lambda r: (r["date"], r["record"]))
     x0, x1, y0, y1 = LEFT, W - RIGHT, oy + TOP, oy + PH - BOTTOM
     out = [f'<text {a["t"]} x="{x0}" y="{oy + 22}" font-size="15" font-weight="600">{title}</text>',
@@ -77,12 +87,17 @@ def panel(oy, track, title, quantity, unit, rows, d0, d1, a):
                    f'text-anchor="middle">No records yet</text>')
         return out
     lo, hi = log_span([r["value"] for r in pts])
+    bars = [b for b in bars if b["track"] == track]
+    near = [b for b in bars if b["value"] >= lo / 10]
+    far = [b for b in bars if b["value"] < lo / 10]
+    lo, hi = log_span([r["value"] for r in pts] + [b["value"] for b in near])
+    ym = y1 - STRIP if far else y1          # the bottom of the log scale
 
     def x(d):
         return x0 + (d - d0).days / max(1, (d1 - d0).days) * (x1 - x0)
 
     def y(v):
-        return y0 + (math.log10(hi) - math.log10(v)) / (math.log10(hi) - math.log10(lo)) * (y1 - y0)
+        return y0 + (math.log10(hi) - math.log10(v)) / (math.log10(hi) - math.log10(lo)) * (ym - y0)
 
     for v in log_ticks(lo, hi):
         out.append(f'<line {a["g"]} x1="{x0}" x2="{x1}" y1="{y(v):.1f}" y2="{y(v):.1f}"/>')
@@ -91,6 +106,10 @@ def panel(oy, track, title, quantity, unit, rows, d0, d1, a):
         label = m.strftime("%b %Y" if i == 0 or m.month == 1 else "%b")
         out.append(f'<text {a["m"]} x="{x(m):.1f}" y="{y1 + 20}" font-size="11" text-anchor="middle">{label}</text>')
     out.append(f'<line {a["g"]} x1="{x0}" x2="{x1}" y1="{y1}" y2="{y1}"/>')
+    for b, by in [(b, y(b["value"])) for b in near] + [(b, y1 - 7) for b in far]:
+        out.append(f'<line {a["bar"]} x1="{x0}" x2="{x1}" y1="{by:.1f}" y2="{by:.1f}"/>')
+        out.append(f'<text {a["m"]} x="{x1}" y="{by - 5:.1f}" font-size="11" text-anchor="end">'
+                   f'{html.escape(b["label"])}</text>')
 
     path = f"M{x(pts[0]['date']):.1f},{y(pts[0]['value']):.1f}"
     for r in pts[1:]:
@@ -98,19 +117,23 @@ def panel(oy, track, title, quantity, unit, rows, d0, d1, a):
     out.append(f'<path {a["ln"]} d="{path}"/>')
     out.append(f'<path {a["hold"]} d="M{x(pts[-1]["date"]):.1f},{y(pts[-1]["value"]):.1f}H{x1}"/>')
 
+    prev, below = None, False
     for r in pts:
         cx, cy = x(r["date"]), y(r["value"])
+        below = prev is not None and abs(cy - prev) < 16 and not below      # crowded: alternate below and above
+        ly = cy + 18 if below else cy - 9
+        prev = cy
         tip = {"title": f"#{r['record']} {r['label']}", "value": f"{fmt(r['value'])} {unit}",
                "date": r["date"].isoformat()}
         out.append(f'<circle {a["pt"]} cx="{cx:.1f}" cy="{cy:.1f}" r="5" tabindex="0" '
                    f'data-tip="{html.escape(json.dumps(tip))}"><title>{html.escape(tip["title"])}, '
                    f'{tip["value"]}, {tip["date"]}</title></circle>')
-        out.append(f'<text {a["t"]} x="{cx + 10:.1f}" y="{cy - 9:.1f}" font-size="12">'
+        out.append(f'<text {a["t"]} x="{cx + 10:.1f}" y="{ly:.1f}" font-size="12">'
                    f'#{r["record"]} · {fmt(r["value"])} {unit}</text>')
     return out
 
 
-def svg(rows, a):
+def svg(rows, bars, a):
     dates = [r["date"] for r in rows]
     d0 = d1 = None
     if dates:
@@ -118,7 +141,7 @@ def svg(rows, a):
         d1 = max(max(dates) + dt.timedelta(days=30), d0 + dt.timedelta(days=60))
     body = []
     for i, (track, title, quantity, unit) in enumerate(TRACKS):
-        body += panel(i * (PH + GAP), track, title, quantity, unit, rows, d0, d1, a)
+        body += panel(i * (PH + GAP), track, title, quantity, unit, rows, bars, d0, d1, a)
     return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {W} {H}" width="{W}" height="{H}" '
             f'font-family="{FONT}" role="img" aria-label="Record progression of both tracks">'
             + "".join(body) + "</svg>")
@@ -130,11 +153,12 @@ def paint(c):
     return {"t": f'fill="{c["text"]}"', "m": f'fill="{c["muted"]}"', "g": f'stroke="{c["grid"]}" stroke-width="1"',
             "ln": f'fill="none" {line}',
             "hold": f'fill="none" stroke="{c["line"]}" stroke-width="2" stroke-dasharray="4 4" opacity="0.55"',
-            "pt": f'fill="{c["line"]}" {line}'}
+            "pt": f'fill="{c["line"]}" {line}',
+            "bar": f'stroke="{c["muted"]}" stroke-width="1.5" stroke-dasharray="1.5 3"'}
 
 
 CLASSES = {k: f'class="{v}"' for k, v in
-           {"t": "t", "m": "m", "g": "g", "ln": "ln", "hold": "hold", "pt": "pt"}.items()}
+           {"t": "t", "m": "m", "g": "g", "ln": "ln", "hold": "hold", "pt": "pt", "bar": "bar"}.items()}
 
 
 PAGE = """<!doctype html>
@@ -150,6 +174,7 @@ svg{{width:100%;max-width:{w}px;height:auto;overflow:visible}}
 .ln{{fill:none;stroke:var(--line);stroke-width:2.5}}
 .hold{{fill:none;stroke:var(--line);stroke-width:2;stroke-dasharray:4 4;opacity:.55}}
 .pt{{fill:var(--line);stroke:var(--line);stroke-width:2.5;cursor:pointer}}
+.bar{{stroke:var(--muted);stroke-width:1.5;stroke-dasharray:1.5 3}}
 .pt:hover,.pt:focus{{stroke-width:4;outline:none}}
 #tip{{position:fixed;pointer-events:none;background:var(--text);color:var(--bg);padding:6px 9px;border-radius:6px;
 font-size:12.5px;line-height:1.4;max-width:280px}}
@@ -179,13 +204,13 @@ for (const p of document.querySelectorAll(".pt")) {{
 
 
 def main():
-    rows = load(os.path.join(HERE, "progress.csv"))
+    rows, bars = load(os.path.join(HERE, "progress.csv")), load_bars(os.path.join(HERE, "bars.csv"))
     for name, colors in THEMES.items():
         with open(os.path.join(HERE, f"progress-{name}.svg"), "w", encoding="utf-8") as f:
-            f.write(svg(rows, paint(colors)) + "\n")
+            f.write(svg(rows, bars, paint(colors)) + "\n")
     tokens = {k: ";".join(f"--{n}:{v}" for n, v in c.items()) for k, c in THEMES.items()}
     with open(os.path.join(HERE, "progress.html"), "w", encoding="utf-8") as f:
-        f.write(PAGE.format(light=tokens["light"], dark=tokens["dark"], font=FONT, w=W, svg=svg(rows, CLASSES)))
+        f.write(PAGE.format(light=tokens["light"], dark=tokens["dark"], font=FONT, w=W, svg=svg(rows, bars, CLASSES)))
 
 
 if __name__ == "__main__":

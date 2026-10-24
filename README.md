@@ -1,10 +1,15 @@
 # Encrypted GPT-2 Speedrun
 
+> **Can we run encrypted transformer inference as fast as plaintext inference?**
+
+Under fully homomorphic encryption (FHE), a model (GPT-2 in this case) can process an encrypted prompt without ever exposing its content to the provider, while computing roughly the same answer. However, the current state of the art suffers from extreme latency (what causes it is described in [Background](#background)).
+
 This branch of [Perseus](https://github.com/gladia-research-group/perseus) defines the Encrypted GPT-2 Speedrun, in which we optimize (collaboratively and
 competitively) encrypted transformer inference under FHE for GPT-2 (124M) on a single RTX PRO 6000.
-The client encrypts the request locally under CKKS at 128-bit security; the server receives the encrypted prompt and computes on ciphertexts only. It first populates the caches and then decodes the answer, as in an inference-as-a-service scenario.
 
-Under this framing, the task naturally includes two tracks:
+The client encrypts the request locally under CKKS at 128-bit security; the server receives the encrypted prompt and computes on ciphertexts only.
+
+Under this framing, the task naturally includes two tracks, which resemble the full inference-as-a-service paradigm:
 
 - **Prefill-128.** The user's encrypted prompt (128 tokens) populates the KV caches.
 - **Decode-8.** From a fixed, given cache state, the model decodes 8 tokens, at positions 8 to 15, under teacher forcing on unknown test sequences.
@@ -59,39 +64,47 @@ nodes, `NUMA=NODE[:MEMS]` pins the server to the GPU's node (with `numactl`). Pe
 
 ## Records
 
+> [!IMPORTANT]
+> **Records are ranked by time (lower is better).** A new record runs faster than the current one
+> by at least 1 %, with the KL of the encrypted logits from the plaintext ones below 10⁻² in
+> Prefill-128 and 10⁻³ in Decode-8, at 128-bit security ([Rules](#rules)).
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="speedrun/records/progress-dark.svg">
-    <img src="speedrun/records/progress-light.svg" width="100%" alt="Record progression of both GPT-2 tracks. Prefill-128: 35.78 s (record 0), 22.22 s (record 1). Decode-8: 3.993 s/token (record 0), 3.384 s/token (record 1), 3.031 s/token (record 2).">
+    <img src="speedrun/records/progress-light.svg" width="100%" alt="Record progression of both GPT-2 tracks. Prefill-128: 35.78 s (record 0), 22.22 s (record 1). Decode-8: 3.993 s/token (record 0), 3.384 s/token (record 1), 3.031 s/token (record 2). Dotted lines: 1 token/s, and GPT-2 unencrypted on the same GPU, 0.77 ms and 0.65 ms/token.">
   </picture>
 </p>
 
-The chart fills in as records are accepted.
+The chart fills in as records are accepted. The dotted lines are the bars to beat: 1 token/s, and GPT-2
+unencrypted on the same GPU (at the bottom, not to scale).
 
 ### Track 1: Prefill-128
 
-| # | Time to first token (s) | Peak GPU memory | Description | Date | Log | Contributors |
-|---|---|---|---|---|---|---|
-| 0 | 35.78 | 90.9 GiB | Baseline: Perseus on [FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits) | 2026-10-22 | [log](speedrun/records/2026-10-22_Perseus) | [@alexzilligmm](https://github.com/alexzilligmm), [@Davide-F5-Marincione](https://github.com/Davide-F5-Marincione) |
-| 1 | 22.22 | 57.4 GiB | Perseus on [perseus-core](crates), its Rust + CUDA runtime, with its own client | 2026-10-22 | [log](speedrun/records/2026-10-22_PerseusCore) | [@alexzilligmm](https://github.com/alexzilligmm), [@Davide-F5-Marincione](https://github.com/Davide-F5-Marincione) |
+| # | Time (s) | Description | Date | Code | Contributors |
+|---|---|---|---|---|---|
+| 0 | 35.78 | Baseline: Perseus on [FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits) | 2026‑10‑22 | [`39493d5`](https://github.com/gladia-research-group/perseus/tree/39493d5a98122c1fb595c99070bf4e435df752f0) · [log](speedrun/records/2026-10-22_Perseus) | [@alexzilligmm](https://github.com/alexzilligmm)<br>[@Davide‑F5‑Marincione](https://github.com/Davide-F5-Marincione) |
+| 1 | 22.22 | Perseus on [perseus‑core](crates), its Rust + CUDA runtime, with its own client | 2026‑10‑22 | [`89bc830`](https://github.com/gladia-research-group/perseus/tree/89bc830017fe12ab967ddb10c24feae65d8af6df) · [log](speedrun/records/2026-10-22_PerseusCore) | [@alexzilligmm](https://github.com/alexzilligmm)<br>[@Davide‑F5‑Marincione](https://github.com/Davide-F5-Marincione) |
+|  | $`\color{gray}\textsf{0.00077}`$ | $`\color{gray}\textsf{Unencrypted GPT-2}`$ | $`\color{gray}\textsf{2026-10-24}`$ | [code](speedrun/records/plaintext.py) · [log](speedrun/records/plaintext.json) |  |
 
 ### Track 2: Decode-8
 
-| # | s/token | Peak GPU memory | Description | Date | Log | Contributors |
-|---|---|---|---|---|---|---|
-| 0 | 3.993 | 74.5 GiB | Baseline: Perseus on [FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits) | 2026-10-22 | [log](speedrun/records/2026-10-22_Perseus) | [@alexzilligmm](https://github.com/alexzilligmm), [@Davide-F5-Marincione](https://github.com/Davide-F5-Marincione) |
-| 1 | 3.384 | 47.8 GiB | Perseus on [perseus-core](crates), its Rust + CUDA runtime, with its own client | 2026-10-22 | [log](speedrun/records/2026-10-22_PerseusCore) | [@alexzilligmm](https://github.com/alexzilligmm), [@Davide-F5-Marincione](https://github.com/Davide-F5-Marincione) |
-| 2 | 3.031 | 52.8 GiB | FusedUnits: fused key switching, the runtime's batches as units, each position's patch built at setup, and the shipped order's CF at five refreshes | 2026-10-24 | [log](speedrun/records/2026-10-24_FusedUnits) | [@erodola](https://github.com/erodola) |
+| # | s/token | Description | Date | Code | Contributors |
+|---|---|---|---|---|---|
+| 0 | 3.993 | Baseline: Perseus on [FIDESlib32bits](https://github.com/gladia-research-group/FIDESlib32bits) | 2026‑10‑22 | [`39493d5`](https://github.com/gladia-research-group/perseus/tree/39493d5a98122c1fb595c99070bf4e435df752f0) · [log](speedrun/records/2026-10-22_Perseus) | [@alexzilligmm](https://github.com/alexzilligmm)<br>[@Davide‑F5‑Marincione](https://github.com/Davide-F5-Marincione) |
+| 1 | 3.384 | Perseus on [perseus‑core](crates), its Rust + CUDA runtime, with its own client | 2026‑10‑22 | [`89bc830`](https://github.com/gladia-research-group/perseus/tree/89bc830017fe12ab967ddb10c24feae65d8af6df) · [log](speedrun/records/2026-10-22_PerseusCore) | [@alexzilligmm](https://github.com/alexzilligmm)<br>[@Davide‑F5‑Marincione](https://github.com/Davide-F5-Marincione) |
+| 2 | 3.031 | FusedUnits: fused key switching, the runtime's batches as units, each position's patch built at setup, and the shipped order's CF at five refreshes | 2026‑10‑24 | [`4d2e72b`](https://github.com/gladia-research-group/perseus/tree/4d2e72be136426f84f3ed402e468693ba00630db) · [log](speedrun/records/2026-10-24_FusedUnits) | [@erodola](https://github.com/erodola) |
+|  | $`\color{gray}\textsf{0.00065}`$ | $`\color{gray}\textsf{Unencrypted GPT-2}`$ | $`\color{gray}\textsf{2026-10-24}`$ | [code](speedrun/records/plaintext.py) · [log](speedrun/records/plaintext.json) |  |
 
 ## Rules
 
 The only rules are that new records must:
 
-1. Change only the framework and its backend. The weights, the test prompts and the harness (the checks and the clock) are fixed. Key generation, encryption and decryption belong to the backend's client: an entry that changes the key or ciphertext formats adds its own, which the maintainers review and pin.
+1. Change only the framework and its backend. The weights, the test prompts and the harness (the checks and the clock) are fixed. Key generation, encryption and decryption belong to the backend's client; an entry that changes the key or ciphertext formats adds its own, which the maintainers review and pin.
 2. Keep 128-bit security, with the server computing on ciphertexts only. Every secret and switching key must reach 128 bits on the Lattice Estimator, at the modulus where it is used, and the server gets only the public and evaluation keys.
 3. Attain a KL divergence from float64 GPT-2 below 10⁻² for Prefill-128 and 10⁻³ for Decode-8, at p < 0.01 over the official runs.
 4. Keep all input-dependent work inside the clock. Loading keys, encoding weights and loading plans are untimed setup and must not depend on the prompt.
-5. Run faster than the current record on the reference GPU, by at least 1 % (or three standard errors, if larger) at p < 0.01 over paired runs ([`speedrun/harness/score.py`](speedrun/harness/score.py)).
+5. Run faster than the current record on the reference GPU, by at least 1 %  ([`speedrun/harness/score.py`](speedrun/harness/score.py)).
 
 The maintainers review every PR and may decline a record that moves work into the unscored decode positions, or that makes the framework much harder to read for a small gain. Other than that, anything and everything is fair game (e.g. the backend, kernels, CKKS parameters, packing, the approximations, bootstrap placement...).
 
@@ -106,8 +119,8 @@ The current record opens the session (CKKS parameters on the 32-bit chain, keys)
 [`env.py`](python/perseus/examples/gpt2/env.py).
 Its approximations are fitted per layer in
 [`gpt2_base_n32`](python/perseus/configs/model/approximation/gpt2_base_n32) (Decode-8) and
-[`gpt2_base_n32_thor`](python/perseus/configs/model/approximation/gpt2_base_n32_thor) (Prefill-128):
-GELU, LayerNorm and softmax in every block, and CutMax for the argmax.
+[`gpt2_base_n32_thor`](python/perseus/configs/model/approximation/gpt2_base_n32_thor) (Prefill-128, with
+polynomials from THOR [1]): GELU, LayerNorm and softmax in every block, and CutMax [2] for the argmax.
 
 ### Track 1: Prefill-128
 
@@ -148,12 +161,12 @@ talk only through files: the client writes `in/`, the server writes `out/`
 with `--track {prefill,decode} --inbox IN --outbox OUT`. It must:
 
 1. write `out/keyspec`, its key request: the keys its plan needs, in its backend's terms. The client generates
-   only the keys its backend declares: record 1's refuses, for example, a SPRU block key of other than 64 blocks
+   only the keys its backend declares; record 1's refuses, for example, a SPRU block key of other than 64 blocks
    or a sparse secret above the bottom level;
 2. wait for `in/keys.done`, then load the client's key bundle from `in/keys/` (it holds no secret key);
 3. set up, untimed (the weights from `$WEIGHTS_PATH`, plans, a warm-up on a public prompt), then write
    `out/ready` with what the client needs to encrypt, such as the input level;
-4. answer every request k: Prefill-128 reads the encrypted prompt `in/k/0` and writes `out/k/0`, the last
+4. answer every request k. Prefill-128 reads the encrypted prompt `in/k/0` and writes `out/k/0`, the last
    position's logits and argmax; Decode-8 reads the tokens `in/k/0` to `in/k/15` one at a time, from an
    empty cache, and writes `out/k/j` before token j + 1 is released;
 5. exit at `in/quit`.
@@ -163,13 +176,13 @@ record's server is [`speedrun/server.py`](speedrun/server.py).
 
 ## Submitting
 
-1. **Develop on any GPU** with 48 GB or more. Run the current record on the same GPU to compare (see
+1. **Develop on any GPU** (the current record requires at least 48 GB of VRAM). Run the current record on the same GPU to compare (see
    [Running the current record](#running-the-current-record)).
 2. **Push** every submodule repository your change pins.
 3. **Open a PR against this branch** with your change and a new folder `speedrun/records/<YYYY-MM-DD>_<Name>/`,
    copied from [`speedrun/records/_template`](speedrun/records/_template):
-   - `README.md`: a short write-up, an ablation table and a Disclosures section;
-   - `submission.json`: the authors, a one-line summary, the CKKS parameters (`ckks`: log N, log QP,
+   - `README.md`, with a short write-up, an ablation table and a Disclosures section;
+   - `submission.json`, with the authors, a one-line summary, the CKKS parameters (`ckks`: log N, log QP,
      the secret, every sparse key) and your numbers next to the record's on the same GPU;
    - your run logs;
    - if your backend has its own key or ciphertext formats, its client, `speedrun/harness/<name>_client.py`,
@@ -182,11 +195,11 @@ record's server is [`speedrun/server.py`](speedrun/server.py).
    In the PR's description, accept Perseus's [CLA](CLA.md): "I have read the Perseus CLA and agree to it for my
    contributions." Leave the rest of `speedrun/` (`harness/`, `runner/`, `prompts/`, the other records), this
    README, `CLAUDE.md`, `.github/`, the licence and the CLA as they are.
-4. **A check runs on the PR**: that it leaves those alone, the record folder, the fields, the main key at
+4. **A check runs on the PR**, checking that it leaves those alone, the record folder, the fields, the main key at
    128-bit security on the HE standard, and the client's code: a PR that changes `crates/pc-client/` or
    `python/perseus/client/` must bring its own client. When the check passes, a maintainer is asked to
    review.
-5. **The maintainers time it** ([`speedrun/MAINTAINING.md`](speedrun/MAINTAINING.md)) within 72 hours of the check passing,
+5. **The maintainers commit to time it** ([`speedrun/MAINTAINING.md`](speedrun/MAINTAINING.md)) within 72 hours of the check passing,
    at the commit the check names (a new push starts the review again), with this branch's harness,
    against the current record on the reference GPU and the hidden test prompts, run the Lattice Estimator on
    new sparse keys, check the [rules](#rules) and post the results on the PR. An accepted record is merged into
@@ -194,8 +207,7 @@ record's server is [`speedrun/server.py`](speedrun/server.py).
 
 ## Background
 
-**The NanoGPT speedrun.** This challenge is inspired by the NanoGPT speedrun
-([Jordan et al., 2024](https://github.com/KellerJordan/modded-nanogpt)), in which contributors
+**The NanoGPT speedrun.** This challenge is inspired by the NanoGPT speedrun [3], in which contributors
 search, collaboratively and competitively, for the fastest way to train a language model to 3.28
 cross-entropy loss on the FineWeb validation set with 8 NVIDIA H100 GPUs. Its record went from the
 45 minutes of the llm.c GPT-2 replication to under 40 seconds. We borrow its format: fixed hardware,
@@ -210,8 +222,7 @@ learn about the prompt from what it computes. Its computation must be oblivious,
 its control flow nor its memory accesses depend on the prompt. Hardware side channels and metadata
 such as the sequence length are out of scope.
 
-**Homomorphic arithmetic.** CKKS
-([Cheon et al., ASIACRYPT 2017](https://doi.org/10.1007/978-3-319-70694-8_15)) is an FHE scheme for
+**Homomorphic arithmetic.** CKKS [4] is an FHE scheme for
 approximate arithmetic on real and complex vectors. If $`c_1 \leftarrow \mathrm{Enc}_{pk}(\mathbf{p}_1)`$
 and $`c_2 \leftarrow \mathrm{Enc}_{pk}(\mathbf{p}_2)`$, then
 
@@ -239,9 +250,7 @@ ciphertexts holds its message at scale $`\Delta^2`$, and *rescaling* divides it 
 removes a factor $`\Delta`$ from the modulus. With $`Q_\ell = q_0 \Delta^\ell`$, a fresh ciphertext has
 level $`L`$ and each multiplication spends one level, so a circuit deeper than $`L`$ needs a refresh.
 
-**Bootstrapping.** Bootstrapping
-([Gentry, 2009](https://crypto.stanford.edu/craig/craig-thesis.pdf); for CKKS,
-[Cheon et al., EUROCRYPT 2018](https://doi.org/10.1007/978-3-319-78381-9_14)) refreshes a ciphertext
+**Bootstrapping.** Bootstrapping [5] (for CKKS, [6]) refreshes a ciphertext
 whose levels are spent. At level 0, $`b + a s = m + q_0 t`$ for an integer polynomial $`t`$ that depends
 on $`s`$. Bootstrapping raises the modulus, moves the coefficients into the slots with a homomorphic
 DFT (CoeffToSlot), removes the multiple of $`q_0`$ with a polynomial approximation of a sine (EvalMod)
@@ -257,7 +266,7 @@ latency.
 **Why approximations.** Only additions, multiplications and rotations run under encryption, so every
 nonlinear operation is approximated. In GPT-2 these are the $`1/\sqrt{x}`$ of LayerNorm, the
 exponential and the division of softmax, GELU and the argmax. Common choices are Goldschmidt
-iterations for division, Newton–Raphson iterations for $`1/\sqrt{x}`$, and Chebyshev or Remez
+iterations for division, Newton–Raphson iterations for $`1/\sqrt{x}`$ [7], and Chebyshev [8] or Remez
 polynomials. An iterative method refines a seed $`F_0(x)`$ into estimates
 $`F_1(x), \ldots, F_n(x) \to f(x)`$, and for quadratically convergent methods
 
@@ -271,6 +280,17 @@ depth grows linearly. Every approximation trades accuracy for levels, and so for
 trade is open in the speedrun: an entry can refit any approximation while the KL stays below
 $`10^{-2}`$ in prefill and $`10^{-3}`$ in decode.
 
+**Where the latency comes from.** Everything described above adds extra, inefficient computation on very large numbers. The main latency bottlenecks are:
+
+- **Key switching.** Every rotation and every product of two ciphertexts ends with a key switch against an
+  evaluation key, and the matrix products need many rotations.
+- **Bootstrapping.** Each refresh costs two to three orders of magnitude more than any other operation, and the
+  depth of the approximations calls for many of them.
+- **Placement.** Where the bootstraps go, and the level each operation runs at, decide how many bootstraps a token
+  needs and what each operation costs.
+- **Data movement.** A ciphertext takes tens of megabytes, and an evaluation key more, so the GPU is bound by its
+  memory bandwidth rather than its arithmetic [9].
+
 **Reference hardware.** Scored attempts will be run on a server with:
 
 - **GPU:** one NVIDIA RTX PRO 6000 Blackwell Server Edition (96 GB).
@@ -280,8 +300,41 @@ $`10^{-2}`$ in prefill and $`10^{-3}`$ in decode.
 The server runs pinned to the GPU's NUMA node, with its CPU time capped at that node's CPUs and its memory at
 160 GB; the client's memory is capped at 64 GB.
 
+**Renting the GPU.** You can rent an RTX PRO 6000 by the hour, for instance on [RunPod](https://www.runpod.io),
+[Vast.ai](https://vast.ai) or [Lium](https://lium.io). We are not affiliated with these providers, and none of them
+sponsors the speedrun.
+
+# Authors
+
+- **Authors and maintainers:** Alessandro Zirilli ([@alexzilligmm](https://github.com/alexzilligmm)) and Davide
+  Marincione ([@Davide-F5-Marincione](https://github.com/Davide-F5-Marincione)).
+- **Scientific supervisors:** Evgenios M. Kornaropoulos, Giuseppe Ateniese and Emanuele Rodolà.
+
+# References
+
+[1] Jungho Moon, Dongwoo Yoo, Xiaoqian Jiang, Miran Kim: THOR: Secure Transformer Inference with Homomorphic Encryption. CCS 2025: 3765-3779
+
+[2] Matan Avitan, Moran Baruch, Nir Drucker, Itamar Zimerman, Yoav Goldberg: Efficient Decoding Methods for Language Models on Encrypted Data. IJCNLP-AACL (Findings) 2025: 1777-1794
+
+[3] Keller Jordan, Jeremy Bernstein, Brendan Rappazzo, et al.: modded-nanogpt: Speedrunning the NanoGPT baseline. https://github.com/KellerJordan/modded-nanogpt, 2024
+
+[4] Jung Hee Cheon, Andrey Kim, Miran Kim, Yong Soo Song: Homomorphic Encryption for Arithmetic of Approximate Numbers. ASIACRYPT (1) 2017: 409-437
+
+[5] Craig Gentry: A fully homomorphic encryption scheme. Stanford University, USA 2009
+
+[6] Jung Hee Cheon, Kyoohyung Han, Andrey Kim, Miran Kim, Yongsoo Song: Bootstrapping for Approximate Homomorphic Encryption. EUROCRYPT (1) 2018: 360-384
+
+[7] Hongyuan Qu, Guangwu Xu: Improvements of Homomorphic Secure Evaluation of Inverse Square Root. ICICS 2023: 110-127
+
+[8] Lloyd N. Trefethen: Approximation Theory and Approximation Practice. SIAM 2012, ISBN 978-1-611-97239-9, pp. I-VII, 1-305
+
+[9] Wonkyung Jung, Sangpyo Kim, Jung Ho Ahn, Jung Hee Cheon, Younho Lee: Over 100x Faster Bootstrapping in Fully Homomorphic Encryption through Memory-centric Optimization with GPUs. IACR Trans. Cryptogr. Hardw. Embed. Syst. 2021(4): 114-148 (2021)
+
 ## License
 
 In `speedrun/`, `harness/`, `runner/`, `prompts/` and `records/` are under [Apache-2.0](speedrun/LICENSE). The rest
 of this branch, Perseus with the server files in `speedrun/` (`server.py`, `serve.sh`, `record1.py`,
 `make_tail_plan.sh`), is under [BUSL-1.1](LICENSE): free for non-commercial use.
+
+*We will always be grateful to Alessandro Panconesi, whose mentorship, teaching, inspirational words and work led
+us here.*

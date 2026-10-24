@@ -1,0 +1,86 @@
+{
+  "env": {
+    "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+    "torch": "2.14.1+cu130",
+    "cuda": "13.0",
+    "date": "2026-10-24",
+    "prompts": "prompts/dev.json",
+    "repeats": 3
+  },
+  "bar": {
+    "prefill": {
+      "config": "graphs-fp16",
+      "value": 0.0007721972554766884
+    },
+    "decode": {
+      "config": "graphs-fp16",
+      "value": 0.0006511808339079531
+    }
+  },
+  "runs": {
+    "hf-eager-fp32": {
+      "prefill_s": {
+        "mean": 0.004127961767759795,
+        "median": 0.004163010511547327,
+        "n": 96
+      },
+      "decode_s_per_token": {
+        "mean": 0.003540124620485585,
+        "median": 0.0035503632389009,
+        "n": 768
+      },
+      "decode_tokens_per_s": 282.4759315571309,
+      "kl_prefill_mean": 7.307203829837432e-11,
+      "kl_decode_mean": 4.2267337324592045e-11,
+      "argmax_agreement": 1.0
+    },
+    "graphs-fp32": {
+      "prefill_s": {
+        "mean": 0.0014717679296154529,
+        "median": 0.0014710654504597187,
+        "n": 96
+      },
+      "decode_s_per_token": {
+        "mean": 0.0009495733805427639,
+        "median": 0.0009367703460156918,
+        "n": 768
+      },
+      "decode_tokens_per_s": 1053.1044998633101,
+      "kl_prefill_mean": 2.9663422647898187e-11,
+      "kl_decode_mean": 4.313383853892634e-11,
+      "argmax_agreement": 1.0
+    },
+    "graphs-fp16": {
+      "prefill_s": {
+        "mean": 0.0007721972554766884,
+        "median": 0.0007730745710432529,
+        "n": 96
+      },
+      "decode_s_per_token": {
+        "mean": 0.0006511808339079531,
+        "median": 0.0006429092027246952,
+        "n": 768
+      },
+      "decode_tokens_per_s": 1535.6717334548482,
+      "kl_prefill_mean": 0.00014575506710940174,
+      "kl_decode_mean": 0.00017317969153630256,
+      "argmax_agreement": 0.9895833333333334
+    },
+    "graphs-bf16": {
+      "prefill_s": {
+        "mean": 0.0007904431840870529,
+        "median": 0.0007895627059042454,
+        "n": 96
+      },
+      "decode_s_per_token": {
+        "mean": 0.000659150014447126,
+        "median": 0.0006518959999084473,
+        "n": 768
+      },
+      "decode_tokens_per_s": 1517.1053297158282,
+      "kl_prefill_mean": 0.015517501919915216,
+      "kl_decode_mean": 0.01660958627059521,
+      "argmax_agreement": 0.8854166666666666
+    }
+  }
+}
