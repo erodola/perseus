@@ -71,6 +71,23 @@ class CheckPrTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertTrue(any("CLA" in n for n in notes))
 
+    def test_a_plain_entry_is_safe_to_build(self):
+        self.record()
+        self.write("crates/pc-gpu/src/ks.rs", "fn faster() {}\n")
+        notes = self.run_check()[1]
+        self.assertTrue(any(n.startswith("build safety: building it runs no code") for n in notes))
+
+    def test_build_time_changes_need_the_isolated_account(self):
+        self.record()
+        self.write("Cargo.lock", "[[package]]\n")
+        self.write("crates/pc-gpu/src/ks.rs", 'const T: &str = include_str!("/data02/x/test.json");\n'
+                                             'const H: &str = env!("HOME");\n')
+        os.symlink("/etc/passwd", "python/perseus/data")
+        note = [n for n in self.run_check()[1] if n.startswith("build safety")][0]
+        self.assertIn("isolated account", note)
+        for part in ("`Cargo.lock`", "include_str!", 'env!("HOME")', "(a symlink)"):
+            self.assertIn(part, note)
+
     def test_new_keys_are_flagged_for_the_estimator(self):
         self.record({**GOOD, "ckks": {**GOOD["ckks"], "log_qp": 1600}})
         self.assertTrue(any(n.startswith("keys: new or changed") for n in self.run_check()[1]))

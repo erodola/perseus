@@ -11,7 +11,8 @@ that changes the client's code brings its own client, pinned to the commit befor
 and the client: the maintainers build that commit, as the server and the client. The report names the commit they
 time. submission.json must have the template's fields, and its CKKS parameters must reach 128-bit security on the HE
 standard's table (ternary secret, classic estimates): log QP within the bound of the ring dimension. The report says
-whether its keys are an existing record's or need the maintainers' Lattice Estimator run. An entry's description
+whether its keys are an existing record's or need the maintainers' Lattice Estimator run, and whether building the
+entry runs or reads anything of its own beyond the compiler's input (`build_safety`). An entry's description
 (`--body`) accepts the CLA (CLA.md). Prints a Markdown report (nothing for a clean PR that is not an entry); exit
 0 = pass. Standard library only.
 """
@@ -33,6 +34,13 @@ CLA = "i have read the perseus cla and agree to it"
 PROTECTED = ("speedrun/harness/", "speedrun/runner/", "speedrun/prompts/", "speedrun/records/", "speedrun/MAINTAINING.md",
              "speedrun/RULINGS.md", "speedrun/LICENSE", "speedrun/.gitignore", "README.md", "CLAUDE.md", ".github/",
              "LICENSE", "CLA.md")
+# What a build (runner/build.sh: uv pip install, maturin) runs or reads of the commit besides the compiler's input: a PR
+# that changes them is built only where an entry may run (speedrun/MAINTAINING.md)
+BUILD_FILES = re.compile(r"(^|/)(pyproject\.toml|setup\.(py|cfg)|requirements[^/]*\.txt|MANIFEST\.in|Cargo\.(toml|lock)|"
+                         r"build\.rs|rust-toolchain(\.toml)?|\.gitmodules|\.gitattributes)$|^\.cargo/")
+COMPILE_TIME = re.compile(r"include_(str|bytes)!|\binclude!\s*\(|\b(option_)?env!\s*\(\s*\"(?!CARGO_)|"
+                          r"#\s*include\s*[<\"]\s*(/|\.\./)|#\s*embed\b|[\"'](/(data\w*|home|root|mnt|srv)\b|~/)")
+SOURCES = (".rs", ".cu", ".cuh", ".h", ".hpp", ".c", ".cc", ".cpp", ".py", ".sh")
 CLIENT_CODE = ("crates/pc-client/", "python/perseus/client/")   # keygen, encryption, decryption: the client runs them
 FRAMING = ("speedrun/record1.py",)                              # record 1's output framing, next to its plan constants
 
@@ -98,9 +106,45 @@ def check(base: str, head: str, author: str = "", body: str | None = None) -> tu
     same = [r for r in sorted(records(base)) if declared(base, r) == sub.get("ckks")]
     n.append(f"keys: the CKKS parameters and sparse keys of record `{same[0]}`, no new estimate" if same else
              "keys: new or changed CKKS parameters or sparse keys, for the Lattice Estimator")
+    n.append(build_safety(base, head))
     notes.insert(0, f"checked: this PR at `{git('rev-parse', head).strip()}`; the maintainers time commit `{timed}`. "
                     "A new push runs the check again")
     return errors + e + e2, notes + n + n2, True
+
+
+def build_safety(base: str, head: str) -> str:
+    """Whether building the PR runs or reads anything of its own beyond the compiler's input: build and dependency files,
+    symlinks, binary files, changed proc-macro crates, compile-time file inclusion, compile-time environment reads
+    (other than Cargo's own) and absolute paths into home or data directories in its sources."""
+    found = []
+    for line in git("diff", "--no-renames", "--raw", f"{base}...{head}").splitlines():
+        meta, path = line.split("\t", 1)
+        if BUILD_FILES.search(path):
+            found.append(f"`{path}`")
+        if meta.split()[1] == "120000":
+            found.append(f"`{path}` (a symlink)")
+    for line in git("diff", "--no-renames", "--numstat", f"{base}...{head}").splitlines():
+        added, _deleted, path = line.split("\t", 2)
+        if added == "-":
+            found.append(f"`{path}` (binary)")
+    changed = git("diff", "--no-renames", "--name-only", f"{base}...{head}").splitlines()
+    for crate in sorted({p.split("/")[1] for p in changed if p.startswith("crates/") and p.count("/") > 1}):
+        try:
+            if re.search(r"proc-macro\s*=\s*true", git("show", f"{head}:crates/{crate}/Cargo.toml")):
+                found.append(f"`crates/{crate}` (a proc-macro crate)")
+        except subprocess.CalledProcessError:
+            pass
+    path = None
+    for line in git("diff", "--no-renames", "-U0", f"{base}...{head}").splitlines():
+        if line.startswith("+++ "):
+            path = line[6:] if line.startswith("+++ b/") else None
+        elif line.startswith("+") and path and path.endswith(SOURCES) and COMPILE_TIME.search(line):
+            found.append(f"`{path}`: `{line[1:].strip()[:80]}`")
+    if not found:
+        return ("build safety: building it runs no code of the PR (no build or dependency file, symlink, binary, "
+                "proc-macro crate or compile-time inclusion changed)")
+    more = f" and {len(found) - 12} more" if len(found) > 12 else ""
+    return f"build safety: build it only in the isolated account: {', '.join(found[:12])}{more}"
 
 
 def declared(rev: str, record: str):

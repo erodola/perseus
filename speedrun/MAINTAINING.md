@@ -27,13 +27,21 @@ The machine provides what this folder cannot:
 ## When a PR arrives
 
 1. **Read the check's report** on the PR. It names the commit to time, says whether the keys need the Lattice
-   Estimator, and lists client-side changes. A new push runs it again: review and time only the commit it names.
+   Estimator, lists client-side changes, and says whether building the PR runs any code of its own (build safety):
+   when it does, build only in the isolated place. A new push runs it again: review and time only the commit it names.
 2. **Review the diff** against the [rules](../README.md#rules): computation on ciphertexts only, oblivious execution,
    every input-dependent step inside the clock, no work moved into decode positions 0-7, the weights read from
    `$WEIGHTS_PATH`, Disclosures that match the diff. A new client file is security code: it holds the secret key.
+   A regenerated plan: `python3 -I speedrun/runner/plan_diff.py <base> <its source plan> <commit> <the new plan>`
+   lists the fields the runtime reads that changed (the rest is the planner's summary); read those, not the JSON.
 3. **Build the commit**, in the isolated place:
-   `bash speedrun/runner/build.sh https://github.com/gladia-research-group/perseus <commit> <entry build>`.
-4. **Time it**, for each track the entry claims:
+   `bash speedrun/runner/build.sh https://github.com/gladia-research-group/perseus <commit> <entry build>`. Then one
+   dev run per track, `CLIENT=<client build> bash speedrun/runner/entry.sh perseus-core <entry build> decode <GPU>`
+   (and `prefill`): it shows the build runs in the sandbox before hours of timing, and, for code both tracks share,
+   that the track the entry does not claim still works on the branch entrants fork.
+4. **Time it**, for each track the entry claims, from a checkout of upstream `speedrun` you do not edit while it runs
+   (official runs refuse a harness with local changes), with the GPU's NUMA node quiet: ask whoever else uses it to
+   hold heavy work:
    `PROMPTS=<hidden test set> CLIENT=<client build> NUMA=<the GPU's node> bash speedrun/runner/official.sh decode
    <GPU> <record build> <entry build>` (and `prefill`). An entry with its own client adds `CLIENT_FILE=<the client
    file of its PR>`. At record 1's speed a track takes about 1.7 h (Decode-8) or 1 h (Prefill-128): 6 pairs of 8
