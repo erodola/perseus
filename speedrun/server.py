@@ -10,9 +10,10 @@ twin, write the key request out/keyspec (pc_client::KeySpec JSON, docs/WIRE.md),
 (in/keys/keys.pckb, complete once in/keys.done exists), open the session on it (no secret), and write out/ready
 with the level block 0 takes its input at. Decode-8: request k is the 16 positions in/k/0..15 from an empty cache,
 each a ciphertext frame of the token row; position j answers out/k/j with [logits frame, CutMax z frame] in
-speedrun/record1.py's list framing. Prefill-128: setup also warms up on a public prompt (seeded token ids), and
-out/ready lists the (level, degree) of each blocked input; request k is in/k/0, the prompt's blocked ciphertext
-frames, answered with the last position's [logits frame, CutMax z frame]. The session ends at in/quit.
+speedrun/record1.py's list framing. Prefill-128: setup also warms up on a public prompt (seeded token ids), which
+captures the stages as CUDA graphs that every request replays, and out/ready lists the (level, degree) of each
+blocked input; request k is in/k/0, the prompt's blocked ciphertext frames, answered with the last position's
+[logits frame, CutMax z frame]. The session ends at in/quit.
 """
 from __future__ import annotations
 
@@ -132,7 +133,7 @@ def prefill(a):
             return _pc.Session.from_bundle(self.cfg, self.keys, self.bundle, **kw)
 
     cfg = pcfg.plan_runtime(plan, "n32", base=pcfg.preset("n32_gpt2_prefill"))
-    cfg["exec.use_graphs"] = False             # as run_prefill: a one-shot forward only pays a graph capture
+    cfg["exec.use_graphs"] = True              # the warm-up runs eagerly and captures the stages; requests replay them
     run = Served(model, plan, cfg, _pc.KeySource.generate([], conj=True, layout="packed"), pt_rows=28, stc_cache=16,
                  work_dir=os.path.join(os.environ.get("HOME", "/tmp"), "speedrun"), log=lambda m: print(m, flush=True))
     ids = np.random.default_rng(0).integers(0, store.shape(weights.WTE)[0], PROMPT)   # public placeholder prompt
