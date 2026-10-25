@@ -128,41 +128,70 @@ fn gpt2_decode() {
     println!("[m7a] gpt2 decode block_0 batch_report: {}", serde_json::to_string(&p.batch_report).unwrap());
 }
 
-/// The sites PLAN_FALLBACK_CF prices for the shipped order: each input still sits past the StC-first entry, so the
-/// route runs the shipped order (pc-gpu `StcFirstRoute::runs_stc_first`) and lands at its fallback. An input realized
-/// under the entry would run StC-first at that CF, where the slots overflow its band with no error raised.
-fn fallback_sites(progs: &[(String, Program)], sites: &[(&str, &str, u32)]) {
+/// The refreshes of a decode plan whose input sits past the StC-first entry, so the route runs the shipped order
+/// (pc-gpu `StcFirstRoute::runs_stc_first`) and lands at its fallback: exactly `sites` (block, var, CF), the ones
+/// PLAN_FALLBACK_CF prices for that order. An input realized under the entry would run StC-first at that CF, where the
+/// slots overflow its band with no error raised; one moved past it would run the shipped order at a CF priced for
+/// the slots.
+fn shipped_order_sites(plan: &str, progs: &[(String, Program)], sites: &[(&str, &str, u32)]) {
     let bts = pc_shadow::BtsConfig::n32_shipped();
     let (entry, fallback) = (bts.stc_first_entry.unwrap(), bts.stc_first_fallback.unwrap());
     let unit = pc_shadow::ChainShape::N32.unit;
-    for &(block, var, cf) in sites {
-        let p = &progs.iter().find(|(l, _)| l == block).unwrap().1;
-        let s = p.bts_sites.iter().find(|s| s.var == var).unwrap_or_else(|| panic!("{block} {var}: no refresh site"));
-        assert!(s.route.slots == 0 && s.route.stc_first, "{block} {var}: route {:?}", s.route);
-        assert!(s.input.effective_level(unit) > entry, "{block} {var}: input {:?} not past the StC-first entry {entry}", s.input);
-        let eff = |l: pc_shadow::Landing| pc_shadow::meta::effective_level(l.level, l.deg, unit);
-        assert_eq!(eff(s.landing), eff(fallback), "{block} {var}: landing {:?}", s.landing);
-        assert_eq!(s.route.cf, Some(cf), "{block} {var}: CF");
+    let eff = |l: pc_shadow::Landing| pc_shadow::meta::effective_level(l.level, l.deg, unit);
+    let mut past = vec![];
+    for (block, p) in progs {
+        for s in p.bts_sites.iter().filter(|s| s.route.slots == 0 && s.route.stc_first) {
+            if s.input.effective_level(unit) > entry {
+                assert_eq!(eff(s.landing), eff(fallback), "{plan} {block} {}: landing {:?}", s.var, s.landing);
+                past.push((block.as_str(), s.var.as_str(), s.route.cf.unwrap_or(0)));
+            }
+        }
     }
+    let mut want = sites.to_vec();
+    past.sort();
+    want.sort();
+    assert_eq!(past, want, "{plan}: the refreshes past the StC-first entry (block, var, CF)");
 }
 
-/// FusedUnits' decode plan: the five down-projection hints at 2; the argmax's v_2 keeps its 5.
+/// FusedUnits' decode plan (m16i with the shipped order's CF where that order runs): the five down-projection hints at
+/// 2; the argmax's v_2 keeps its 5.
 #[test]
 fn gpt2_decode_speedrun_fcf() {
     let Some(progs) = gate("gpt2_decode_python_n32_m16i_fcf", "gpt2_decode_python_n32_gcheb") else { return };
-    fallback_sites(&progs, &[("block_1", "v_1017", 2), ("block_2", "v_1483", 2), ("block_4", "v_1113", 2),
-                             ("block_10", "v_1075", 2), ("block_11", "v_1394", 2), ("block_13", "v_2", 5)]);
+    let sites = [("block_1", "v_1017", 2), ("block_2", "v_1483", 2), ("block_4", "v_1113", 2), ("block_10", "v_1075", 2),
+                 ("block_11", "v_1394", 2), ("block_13", "v_2", 5)];
+    shipped_order_sites("gpt2_decode_python_n32_m16i_fcf", &progs, &sites);
 }
 
-/// The decode plan the speedrun serves (perseus/examples/defaults.py): m16i_fcf's blocks, CutMax's scaled normalisers
-/// in block 13 (its entry, three vector refreshes and the last one past the StC-first entry).
+/// m16i_fcf's blocks with CutMax's scaled normalisers in block 13 (its entry, three vector refreshes and the last one
+/// past the StC-first entry).
 #[test]
-fn gpt2_decode_speedrun() {
+fn gpt2_decode_fcf_cm() {
     let Some(progs) = gate("gpt2_decode_python_n32_m16i_fcf_cm", "gpt2_decode_python_n32_cm") else { return };
-    fallback_sites(&progs, &[("block_1", "v_1017", 2), ("block_2", "v_1483", 2), ("block_4", "v_1113", 2),
-                             ("block_10", "v_1075", 2), ("block_11", "v_1394", 2), ("block_13", "v_16", 2),
-                             ("block_13", "v_135", 5), ("block_13", "v_212", 5), ("block_13", "v_289", 5),
-                             ("block_13", "v_366", 2)]);
+    let sites = [("block_1", "v_1017", 2), ("block_2", "v_1483", 2), ("block_4", "v_1113", 2), ("block_10", "v_1075", 2),
+                 ("block_11", "v_1394", 2), ("block_13", "v_16", 2), ("block_13", "v_135", 5), ("block_13", "v_212", 5),
+                 ("block_13", "v_289", 5), ("block_13", "v_366", 2)];
+    shipped_order_sites("gpt2_decode_python_n32_m16i_fcf_cm", &progs, &sites);
+}
+
+/// Decode-8's plan without CutMax's scaled normalisers: the ILP placer, one optimum on every machine
+/// (PLAN_ILP_TIEBREAK), on the merged capture of the softmax and GELU fitted to its 16 positions (gpt2_base_n32_kc16):
+/// two down-projection hints past the entry, the argmax's v_2 at its 7.
+#[test]
+fn gpt2_decode_kc16() {
+    let Some(progs) = gate("gpt2_decode_python_n32_kc16", "gpt2_decode_python_n32_kc16m") else { return };
+    let sites = [("block_2", "v_1136", 2), ("block_11", "v_1182", 2), ("block_13", "v_2", 7)];
+    shipped_order_sites("gpt2_decode_python_n32_kc16", &progs, &sites);
+}
+
+/// The plan speedrun/server.py serves Decode-8: kc16's blocks, CutMax's scaled normalisers in block 13 (planned at its
+/// block-12 exit): kc16's two hints and block 13's five past the entry.
+#[test]
+fn gpt2_decode_kc16_cm() {
+    let Some(progs) = gate("gpt2_decode_python_n32_kc16_cm", "gpt2_decode_python_n32_kc16_cm") else { return };
+    let sites = [("block_2", "v_1136", 2), ("block_11", "v_1182", 2), ("block_13", "v_16", 2), ("block_13", "v_135", 5),
+                 ("block_13", "v_212", 5), ("block_13", "v_289", 5), ("block_13", "v_366", 2)];
+    shipped_order_sites("gpt2_decode_python_n32_kc16_cm", &progs, &sites);
 }
 
 #[test]

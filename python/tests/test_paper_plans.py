@@ -104,13 +104,27 @@ GATE: dict[str, tuple | None] = {
     "bert_base_sst2_128_m16s0": ("graphs/bert_sst2_128_stcf_m16", "PLAN_DELIB_DEG=captured " + _M16S, GPT2_TOOL,
                                  ("blocks",)),
     "vit_b16_224_m18s3": ("graphs/vit_b16_224_stcf_m16", "PLAN_DELIB_DEG=captured " + _M18S, GPT2_TOOL, ("blocks",)),
-    # the main recipe (recipe= line) on the ILP placer (objective: total refresh count). m16i and m16i_fcf were made by
-    # the planner before the ILP model change of c064188, which solves their ILP where that planner fell back to the
-    # min-cut: they regenerate with that planner (f19831a), not with this one
+    # the main recipe (recipe= line) on the ILP placer (objective: total refresh count)
     "gpt2_decode_python_n32_m16i": (None, "PLAN_PLACER=ilp PLAN_ILP_TIME_LIMIT=600", GPT2_TOOL, None),
     # m16i with the shipped order's CF where that order runs (its recipe= line has the whole recipe)
     "gpt2_decode_python_n32_m16i_fcf": None,
+    # Decode-8: the ILP placer, one optimum on every machine (PLAN_ILP_TIEBREAK), every refresh raised below the chain
+    # top as far as its block allows, the shipped order's CF where it runs, the argmax on the min-cut, on the merged
+    # capture of the configs fitted to Decode-8's 16 positions (gpt2_base_n32_kc16; its recipe= and capture= lines); its
+    # CutMax variant gpt2_decode_python_n32_kc16_cm comes from speedrun/make_cutmax_plan.sh
+    "gpt2_decode_python_n32_kc16": None,
 }
+# plans this planner no longer regenerates, and why: the gate reports them instead of replanning them
+RETIRED = {
+    # made by the ILP transcription before its model became the sim's (c064188): 14 of their 15 block files are the
+    # min-cut's (fallback:model-mismatch), where the model now solves; they regenerate with that planner (f19831a)
+    "gpt2_decode_python_n32_m16i": "made by the ILP's earlier transcription (14/15 block files the min-cut's); it "
+                                   "regenerates at f19831a",
+    "gpt2_decode_python_n32_m16i_fcf": "made by the ILP's earlier transcription (14/15 block files the min-cut's); "
+                                       "it regenerates at f19831a",
+}
+# tools that capture and plan in one script (their own regeneration check): not replanned here
+SELF_CONTAINED = ("speedrun/make_prefill_plan.sh",)
 # the 10-19 table plans: `python python/tests/test_paper_plans.py table` replans these five
 TABLE = ("llama31_8b_prefill128", "gpt2_prefill128", "gpt2_decode_python_n32", "bert_base_sst2_128", "vit_b16_224")
 
@@ -120,6 +134,9 @@ TABLE = ("llama31_8b_prefill128", "gpt2_prefill128", "gpt2_decode_python_n32", "
 SUMMARY_DRIFT = {
     # placed_input_levels / _hist were redefined after this plan shipped (2026-10-07)
     "gpt2_decode_python_n32_ilp": ("bts_quality.placed_input_levels", "bts_quality.placed_input_level_hist"),
+    # a v1 capture's dense deliberate refresh is marked StC-first when the recipe has an StC-first entry (plan_block):
+    # blocks 2 and 9 count one more blind branch (380 -> 381)
+    "gpt2_prefill_python_n32_pcmmstcf": ("bts_quality.blind_branches",),
 }
 # summary lists the planner fills in set-iteration order (PYTHONHASHSEED): compared as sets, every plan
 UNORDERED = ("bts_quality.env_cap.placed_past_cap",)
@@ -239,6 +256,8 @@ def replan(name: str, log: Path) -> tuple[Path, float]:
         cmds = [["bash", str(PKG / "plan" / "run_bootstrap_all_blocks.sh")]]
     elif tool in UPSTREAM:
         pytest.skip(f"{tool}: the released-tool drivers are not ported")
+    elif tool in SELF_CONTAINED:
+        pytest.skip(f"{tool} captures and plans in one run: run it to regenerate {name}")
     else:
         if stages is None:
             stages = ("blocks",)
@@ -286,6 +305,8 @@ def _assert_identical(name: str, res: dict):
 
 
 def _run(name: str, tmp_path: Path):
+    if name in RETIRED:
+        pytest.skip(f"{name}: {RETIRED[name]}")
     try:
         regen, _ = replan(name, tmp_path / "plan.log")
         _assert_identical(name, compare(name, regen, tmp_path))
@@ -312,6 +333,9 @@ def main(names: list[str]) -> int:
     import tempfile
     failed = 0
     for name in names:
+        if name in RETIRED:
+            print(f"[gate] {name}: RETIRED ({RETIRED[name]})", flush=True)
+            continue
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             logdir = Path(os.environ.get("PLAN_GATE_LOGDIR", td))

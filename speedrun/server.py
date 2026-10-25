@@ -29,6 +29,9 @@ from speedrun.record1 import PROMPT, pack, unpack
 
 HEADER = struct.Struct("<Q")
 STEPS = 16
+# Decode-8 never holds more than STEPS keys: its plan's softmax and GELU are fitted to positions 0..STEPS-1 (the main
+# decode plan's to 1024-token windows)
+DECODE_PLAN = "bootstrap_placements/gpt2_decode_python_n32_kc16_cm"
 # speedrun/make_prefill_plan.sh's plan with CutMax's scaled normalisers (stage 13 replanned: its PLAN_CMD.txt)
 PREFILL_PLAN = "bootstrap_placements/gpt2_prefill128_pf_cm"
 
@@ -63,16 +66,15 @@ def main():
     p.add_argument("--inbox", required=True)
     p.add_argument("--outbox", required=True)
     p.add_argument("--device", type=int, default=0)
-    p.add_argument("--plan", help="Decode-8's plan (default: perseus.examples.defaults')")
+    p.add_argument("--plan", default=DECODE_PLAN, help="Decode-8's plan")
     a = p.parse_args()
     return decode(a) if a.track == "decode" else prefill(a)
 
 
 def decode(a):
-    from perseus.examples.defaults import default_plan
     from perseus.client import contract_hash
     from perseus.serve import gpt2_decode as served
-    args = types.SimpleNamespace(plan=a.plan or default_plan("gpt2_decode"), chain="n32", layers=None, packing="cachemir_complex",
+    args = types.SimpleNamespace(plan=a.plan, chain="n32", layers=None, packing="cachemir_complex",
                                  weights=os.environ["WEIGHTS_PATH"], key_layout="packed", pt_rows=28, stc_cache=8,
                                  work_dir=os.path.join(os.environ.get("HOME", "/tmp"), "speedrun"))
     h = served.Gpt2Handler(args)
