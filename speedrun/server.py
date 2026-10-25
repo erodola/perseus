@@ -29,7 +29,8 @@ from speedrun.record1 import PROMPT, pack, unpack
 
 HEADER = struct.Struct("<Q")
 STEPS = 16
-PREFILL_PLAN = "bootstrap_placements/gpt2_prefill128_pf"     # speedrun/make_prefill_plan.sh
+# speedrun/make_prefill_plan.sh's plan with CutMax's scaled normalisers (stage 13 replanned: its PLAN_CMD.txt)
+PREFILL_PLAN = "bootstrap_placements/gpt2_prefill128_pf_cm"
 
 
 def write(root, rel, payload):
