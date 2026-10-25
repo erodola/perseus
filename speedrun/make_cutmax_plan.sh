@@ -5,6 +5,7 @@
 # the min-cut placer, Prefill-128 (TRACK=prefill) with speedrun/make_prefill_plan.sh's argmax env. CONFIGS (default
 # gpt2_base_n32_cm / gpt2_base_n32_pf_cm) must be BASE's configs with that cutmax section, and the capture binds when
 # BASE's runtime shapes the op stream as the capture's did (stage 13's stamp equals stage 12's); both are checked.
+# CUTMAX_GRAPH: another Decode-8 capture whose stage 13 has those magnitudes, taken under BASE's runtime.
 #   bash speedrun/make_cutmax_plan.sh gpt2_decode_python_n32_m16i_fcf gpt2_decode_python_n32_m16i_fcf_cm
 #   TRACK=prefill bash speedrun/make_cutmax_plan.sh gpt2_prefill128_pf gpt2_prefill128_pf_cm
 set -euo pipefail
@@ -24,7 +25,7 @@ if [ "${TRACK:-decode}" = prefill ]; then
         PLAN_RAISE_LANDING_MAX=42 PLAN_STC_FIRST_ENTRY=46 PLAN_STC_FIRST_FALLBACK=34:1
     RECIPE="" HOW="make_prefill_plan.sh's argmax env"
 else
-    CM=configs/model/approximation/gpt2_base_n32_cm/configs.json GR=graphs/gpt2_decode_python_n32_cm
+    CM=configs/model/approximation/gpt2_base_n32_cm/configs.json GR=${CUTMAX_GRAPH:-graphs/gpt2_decode_python_n32_cm}
     RECIPE=$(sed -n 's/^recipe=//p' "bootstrap_placements/$BASE/PLAN_CMD.txt" \
         | sed 's/PLAN_PLACER=[^ ]*//; s/PLAN_ILP_TIME_LIMIT=[^ ]*//')
     HOW="the recipe above on the min-cut placer"
