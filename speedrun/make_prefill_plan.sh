@@ -18,7 +18,9 @@
 #   merged capture, the blocks already planned (PLAN_RESUME) and the CutMax capture are kept, each written whole
 #   PRESET=n32a4 bash speedrun/make_prefill_plan.sh   the plan for the lean chain (pc-core ChainSpec::n32a4, which the
 #   server runs on the plan's CHAIN_PRESET): the same captures, every value and refresh at level 48 or below (n32a4's
-#   deepest user level, the composite pair of its 2nd and 3rd bottom primes; n32's is 50)
+#   deepest user level, the composite pair of its 2nd and 3rd bottom primes; n32's is 50), and the inputs of every
+#   PCMM of band shift above 1 one level above the StC-first entry (PLAN_PCMM_PREDIV_CAP: the runtime divides the
+#   shift on that level, pc-gpu matmul::pcmm::prediv)
 #   -> bootstrap_placements/gpt2_prefill128_n32a4_pfbh{,_cm}, ..._pfbhrd{,_cm}
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -26,7 +28,8 @@ source scripts/local_env.sh
 export CUDA_VISIBLE_DEVICES="" PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}"
 case ${PRESET:=n32} in
     n32) TOP=50 TAG= CAP= ;;
-    n32a4) TOP=48 TAG=n32a4_ CAP=" MAX_LEVEL=48 PLAN_REFRESH_ENV_CAP=48" ;;
+    n32a4) TOP=48 TAG=n32a4_ CAP=" MAX_LEVEL=48 PLAN_REFRESH_ENV_CAP=48 PLAN_PCMM_PREDIV_CAP=42"
+        export PLAN_PCMM_PREDIV_CAP=42 ;;
     *) echo "PRESET=$PRESET: n32 or n32a4" >&2; exit 2 ;;
 esac
 BASE=gpt2_prefill128_m16s0 OUT=gpt2_prefill128_${TAG}pfbh GR=graphs/gpt2_prefill128_pfbh
