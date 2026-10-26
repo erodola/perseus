@@ -22,7 +22,7 @@ The machine provides what this folder cannot:
 - Build the commit the record's client pins (`PERSEUS` in [`harness/perseus_core_client.py`](harness/perseus_core_client.py)),
   with GPT-2's weights, and the current record if it is another commit:
   `EXPORT=1 bash speedrun/runner/build.sh https://github.com/gladia-research-group/perseus <commit> <client build>`.
-  Today Prefill-128's record is record 2, PackedPrefill, `6f0ba44`, and Decode-8's is record 2, FusedUnits, `4d2e72b`;
+  Today Prefill-128's record is record 3, BabyStepPrefill, `946694d`, and Decode-8's is record 3, FittedDecode, `9b7471a`;
   the client stays at `89bc830`. Rebuild a track's record arm whenever its record changes.
 
 ## When a PR arrives
