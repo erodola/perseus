@@ -1,0 +1,53 @@
+{
+  "name": "BabyStepPrefill",
+  "tracks": [
+    "prefill"
+  ],
+  "authors": [
+    {
+      "name": "Emanuele Rodolà",
+      "github": "erodola",
+      "affiliation": "Paradigma"
+    }
+  ],
+  "summary": "Prefill-128 with baby-step giant-step attention rotations and a shared softmax for half-empty head groups, a planner-made plan on captures merged over four oracle rows with per-step drift margins (460 refreshes, 88 raised below the chain top), refresh pairs, and SparseB on the dense route's EvalMod series.",
+  "ckks": {
+    "log_n": 16,
+    "log_qp": 1706,
+    "secret": "uniform-ternary",
+    "sparse_keys": [
+      {
+        "role": "encapsulation, dense to sparse",
+        "secret": "ternary, Hamming weight 32",
+        "modulus": "q_0 .. q_{d-1} and P"
+      },
+      {
+        "role": "SPRU block key",
+        "secret": "binary, one 1 in each of 64 blocks",
+        "modulus": "q_0 .. q_{d-1} and P"
+      },
+      {
+        "role": "PCMM ring switch (Prefill-128)",
+        "secret": "ternary on ring dimension 4096",
+        "modulus": "q_0 q_1 P"
+      }
+    ]
+  },
+  "systems_only": false,
+  "ai_assistance": {
+    "used": true,
+    "share_of_changed_lines": 1.0,
+    "tools": [
+      "Flywheel",
+      "Claude Code"
+    ]
+  },
+  "dev_result": {
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "prefill": {
+      "request_s": 17.64,
+      "record_request_s_same_gpu": 22.31,
+      "mean_kl": 1.16e-05
+    }
+  }
+}
