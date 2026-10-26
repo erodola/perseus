@@ -82,6 +82,10 @@ pub struct BtsConfig {
     pub raise_drops: Vec<u32>,
     /// Ciphertexts per batched bootstrap launch.
     pub k_max: u32,
+    /// The deepest effective level a refresh input may take with the raise's rescales still on the chain (the top of
+    /// the level above q0's); None = two composite levels above the bottom, `n_q - 2 unit`.
+    #[serde(default)]
+    pub input_room: Option<u32>,
 }
 
 impl BtsConfig {
@@ -101,6 +105,7 @@ impl BtsConfig {
             cf_window: (2, 20),
             raise_drops: vec![1, 3, 5],
             k_max: 8,
+            input_room: None,
         }
     }
 
