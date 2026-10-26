@@ -10,9 +10,10 @@ twin, write the key request out/keyspec (pc_client::KeySpec JSON, docs/WIRE.md),
 (in/keys/keys.pckb, complete once in/keys.done exists), open the session on it (no secret), and write out/ready
 with the level block 0 takes its input at. Decode-8: request k is the 16 positions in/k/0..15 from an empty cache,
 each a ciphertext frame of the token row; position j answers out/k/j with [logits frame, CutMax z frame] in
-speedrun/record1.py's list framing. Prefill-128: setup also warms up on a public prompt (seeded token ids), and
-out/ready lists the (level, degree) of each blocked input; request k is in/k/0, the prompt's blocked ciphertext
-frames, answered with the last position's [logits frame, CutMax z frame]. The session ends at in/quit.
+speedrun/record1.py's list framing. Prefill-128: setup also warms up on a public prompt (seeded token ids), which
+captures the stages as CUDA graphs that every request replays, and out/ready lists the (level, degree) of each
+blocked input; request k is in/k/0, the prompt's blocked ciphertext frames, answered with the last position's
+[logits frame, CutMax z frame]. The session ends at in/quit.
 """
 from __future__ import annotations
 
@@ -28,7 +29,11 @@ from speedrun.record1 import PROMPT, pack, unpack
 
 HEADER = struct.Struct("<Q")
 STEPS = 16
-PREFILL_PLAN = "bootstrap_placements/gpt2_prefill128_pf"     # speedrun/make_prefill_plan.sh
+# Decode-8 never holds more than STEPS keys: its plan's softmax and GELU are fitted to positions 0..STEPS-1 (the main
+# decode plan's to 1024-token windows)
+DECODE_PLAN = "bootstrap_placements/gpt2_decode_python_n32_kc16_cm"
+# speedrun/make_prefill_plan.sh's plan with CutMax's scaled normalisers (stage 13 replanned: its PLAN_CMD.txt)
+PREFILL_PLAN = "bootstrap_placements/gpt2_prefill128_pf_cm"
 
 
 def write(root, rel, payload):
@@ -61,16 +66,15 @@ def main():
     p.add_argument("--inbox", required=True)
     p.add_argument("--outbox", required=True)
     p.add_argument("--device", type=int, default=0)
-    p.add_argument("--plan", help="Decode-8's plan (default: perseus.examples.defaults')")
+    p.add_argument("--plan", default=DECODE_PLAN, help="Decode-8's plan")
     a = p.parse_args()
     return decode(a) if a.track == "decode" else prefill(a)
 
 
 def decode(a):
-    from perseus.examples.defaults import default_plan
     from perseus.client import contract_hash
     from perseus.serve import gpt2_decode as served
-    args = types.SimpleNamespace(plan=a.plan or default_plan("gpt2_decode"), chain="n32", layers=None, packing="cachemir_complex",
+    args = types.SimpleNamespace(plan=a.plan, chain="n32", layers=None, packing="cachemir_complex",
                                  weights=os.environ["WEIGHTS_PATH"], key_layout="packed", pt_rows=28, stc_cache=8,
                                  work_dir=os.path.join(os.environ.get("HOME", "/tmp"), "speedrun"))
     h = served.Gpt2Handler(args)
@@ -132,7 +136,7 @@ def prefill(a):
             return _pc.Session.from_bundle(self.cfg, self.keys, self.bundle, **kw)
 
     cfg = pcfg.plan_runtime(plan, "n32", base=pcfg.preset("n32_gpt2_prefill"))
-    cfg["exec.use_graphs"] = False             # as run_prefill: a one-shot forward only pays a graph capture
+    cfg["exec.use_graphs"] = True              # the warm-up runs eagerly and captures the stages; requests replay them
     run = Served(model, plan, cfg, _pc.KeySource.generate([], conj=True, layout="packed"), pt_rows=28, stc_cache=16,
                  work_dir=os.path.join(os.environ.get("HOME", "/tmp"), "speedrun"), log=lambda m: print(m, flush=True))
     ids = np.random.default_rng(0).integers(0, store.shape(weights.WTE)[0], PROMPT)   # public placeholder prompt

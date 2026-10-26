@@ -6,7 +6,7 @@ use std::ffi::c_void;
 /// `cudaStream_t`
 pub type CudaStream = *mut c_void;
 
-pub const ABI: u32 = 12;
+pub const ABI: u32 = 15;
 pub const LOG_N: u32 = 16;
 pub const N: usize = 1 << LOG_N;
 
@@ -280,6 +280,9 @@ pub struct TensorArgs {
     pub acc: i32,
     pub n: i32,
     pub k: i32,
+    /// ABI 13: 1 doubles the three outputs.
+    pub dbl: i32,
+    pub pad: i32,
 }
 
 #[repr(C)]
@@ -381,6 +384,14 @@ pub struct RescaleArgs {
     pub nrows: i32,
     pub k: i32,
     pub ndrop: i32,
+}
+
+/// ABI 14: `rescale_fwd` = rescale_coef and the forward NTT of its rows in one pipeline (args.cuh RescaleNttArgs).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct RescaleNttArgs {
+    pub rs: RescaleArgs,
+    pub ntt: NttArgs,
 }
 
 #[repr(C)]
@@ -740,7 +751,8 @@ pub struct CcmmArgs {
 zeroed_default!(
     SpruFftArgs, SpruScatterArgs, SpruExtractArgs, NttArgs, BconvArgs, EwArgs, PtDotArgs, KsArgs, EpiArgs, KsRegenArgs, KskExpandArgs, CtsArgs, TensorArgs, MdEpiArgs,
     WsumArgs, AddConstArgs, MulTableArgs, RescaleArgs, RescaleCombineArgs, AutomorphArgs, EncodeArgs, EncryptArgs, KskGenArgs, KskUnpackArgs, ModRaiseArgs, SmallIntTab, SmallIntArgs,
-    KeyTab, CtsRegenArgs, KsKeyArgs, PcmmArgs, CcmmArgs, WsumKArgs, RescaleCombineToArgs, MdEpiToArgs, SmallInt1Args, CoeffArgs, MulAddArgs
+    KeyTab, CtsRegenArgs, KsKeyArgs, PcmmArgs, CcmmArgs, WsumKArgs, RescaleCombineToArgs, MdEpiToArgs, SmallInt1Args, CoeffArgs, MulAddArgs,
+    RescaleNttArgs
 );
 
 /// A launcher: (args, stream) -> cudaError_t of the launch (0 ok; negative = argument outside the kernel's range).
@@ -792,6 +804,7 @@ pub struct KernelTable {
     pub small_int1: Launch<SmallInt1Args>,
     pub coeff_sum: Launch<CoeffArgs>,
     pub mul_add: Launch<MulAddArgs>,
+    pub rescale_fwd: Launch<RescaleNttArgs>,
 }
 
 // Sizes must equal the static_asserts in args.cuh.
@@ -810,13 +823,14 @@ const _: () = {
     assert!(size_of::<KsRegenArgs>() == 312);
     assert!(size_of::<KskExpandArgs>() == 48);
     assert!(size_of::<CtsArgs>() == 192);
-    assert!(size_of::<TensorArgs>() == 184);
+    assert!(size_of::<TensorArgs>() == 192);
     assert!(size_of::<MdEpiArgs>() == 120);
     assert!(size_of::<WsumArgs>() == 256);
     assert!(size_of::<WsumKArgs>() == 264);
     assert!(size_of::<AddConstArgs>() == 48);
     assert!(size_of::<MulTableArgs>() == 72);
     assert!(size_of::<RescaleArgs>() == 152);
+    assert!(size_of::<RescaleNttArgs>() == 328);
     assert!(size_of::<RescaleCombineArgs>() == 80);
     assert!(size_of::<AutomorphArgs>() == 112);
     assert!(size_of::<EncodeArgs>() == 80);
@@ -835,7 +849,7 @@ const _: () = {
     assert!(size_of::<PcmmArgs>() == 168);
     assert!(size_of::<CcmmArgs>() == 280);
     assert!(size_of::<SmallInt1Args>() == 56);
-    assert!(size_of::<KernelTable>() == 16 + 39 * 8);
+    assert!(size_of::<KernelTable>() == 16 + 40 * 8);
     assert!(size_of::<MulAddArgs>() == 104);
     assert!(size_of::<CoeffArgs>() == 80 + 16 * COEFF_MAXT);
     assert!(size_of::<MdEpiToArgs>() == 152);

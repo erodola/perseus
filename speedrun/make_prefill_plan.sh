@@ -16,6 +16,9 @@ BASE=gpt2_prefill128_m16s0 OUT=gpt2_prefill128_pf GR=graphs/gpt2_prefill128_pf
 CONFIGS=configs/model/approximation/gpt2_base_n32_pf/configs.json
 RUNTIME="$(grep "^runtime=" "bootstrap_placements/$BASE/PLAN_CMD.txt" | sed 's/^runtime=//') PF_LAST_QUERY=1 \
 FIDESLIB_BTS_RAISE_DROP=512:1 SM_CHEB_GS=1 PF_QKV_PACK=1 PF_ATTN_PACK=3"
+# the switch the server alone reads (pc-gpu; the CPU capture and the planner never see it): EvalMod's relinearization
+# and the rescale after it as one exact conversion
+SERVER_RUNTIME="PC_EM_FUSE_RESCALE=1"
 RECIPE="PLAN_PRUNE=1 PLAN_SPARSE_BTS_OUT=1:16,512:26 BTS_LEVEL=28 PLAN_RAISE_DROP_MAX=0 PLAN_RAISE_LANDING_MAX=42 \
 PLAN_RAISE_ROUTES=0 PLAN_REFRESH_ENV_CAP_ROUTES=0:46 PLAN_SLIM_CUBIC=1 PLAN_STC_FIRST_ENTRY=46 \
 PLAN_STC_FIRST_FALLBACK=34:1 PLAN_PLACER=ilp PLAN_ILP_TIME_LIMIT=600"
@@ -73,6 +76,6 @@ PLANNER="$(git log -1 --format=%h -- python/perseus/plan) (python/perseus/plan's
 SOLVER="scipy $("$PYTHON" -c 'import scipy; print(scipy.__version__)') milp (HiGHS)"
 printf '%s\n' "graph=$GR" \
     "tool=speedrun/make_prefill_plan.sh (make_plan.sh blocks + argmax, the tail as make_tail_plan.sh)" \
-    "planner=$PLANNER" "recipe=$RECIPE" "runtime=$RUNTIME" "configs=$CONFIGS" "solver=$SOLVER" \
+    "planner=$PLANNER" "recipe=$RECIPE" "runtime=$RUNTIME $SERVER_RUNTIME" "configs=$CONFIGS" "solver=$SOLVER" \
     "pcmm_calib=$BASE's (the PCMM band shifts)" > "bootstrap_placements/$OUT/PLAN_CMD.txt"
 ls "bootstrap_placements/$OUT"

@@ -13,6 +13,8 @@ reaches, plus a record of how it was produced under `meta`. The runtime reads th
 | directory | model | parameters | notes |
 |---|---|---|---|
 | `gpt2_base_n32` | GPT-2 | 32-bit (the default) | GELU as a Chebyshev series; its `cutmax` section drives the encrypted argmax |
+| `gpt2_base_n32_kc16` | GPT-2 | 32-bit | Decode-8 (at most 16 keys): softmax (Chebyshev-scaled Goldschmidt, `SM_CHEB_GS`) and GELU fitted to positions 0-15 by `scripts/utils/fit_gpt2_decode16.py`; LayerNorm and CutMax as `gpt2_base_n32` |
+| `gpt2_base_n32_kc16_cm` | GPT-2 | 32-bit | `gpt2_base_n32_kc16` with `gpt2_base_n32_cm`'s CutMax (scaled normalisers) |
 | `gpt2_base` | GPT-2 | 64-bit | the same fit, GELU as a plain polynomial |
 | `gpt2_heat`, `gpt2_heat_n32` | GPT-2 fine-tuned for encryption with HEAT | both | |
 | `gpt2_squeeze` | GPT-2 | 64-bit | fewer iterations per function |

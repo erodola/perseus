@@ -1,0 +1,53 @@
+{
+  "name": "FittedDecode",
+  "tracks": [
+    "decode"
+  ],
+  "authors": [
+    {
+      "name": "Emanuele Rodolà",
+      "github": "erodola",
+      "affiliation": "Paradigma"
+    }
+  ],
+  "summary": "Decode-8 with softmax and GELU fitted to its 16 positions, a planner-made plan on captures merged over four oracle rows and all positions (120 refreshes per token), CutMax in 12 refreshes, and fused EvalMod, rescale and constant-upload kernels.",
+  "ckks": {
+    "log_n": 16,
+    "log_qp": 1706,
+    "secret": "uniform-ternary",
+    "sparse_keys": [
+      {
+        "role": "encapsulation, dense to sparse",
+        "secret": "ternary, Hamming weight 32",
+        "modulus": "q_0 .. q_{d-1} and P"
+      },
+      {
+        "role": "SPRU block key",
+        "secret": "binary, one 1 in each of 64 blocks",
+        "modulus": "q_0 .. q_{d-1} and P"
+      },
+      {
+        "role": "PCMM ring switch (Prefill-128)",
+        "secret": "ternary on ring dimension 4096",
+        "modulus": "q_0 q_1 P"
+      }
+    ]
+  },
+  "systems_only": false,
+  "ai_assistance": {
+    "used": true,
+    "share_of_changed_lines": 1.0,
+    "tools": [
+      "Flywheel",
+      "Claude Code"
+    ]
+  },
+  "dev_result": {
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "decode": {
+      "s_per_token": 3.471,
+      "record_s_per_token_same_gpu": 4.542,
+      "mean_kl": 4.15e-06
+    }
+  }
+}

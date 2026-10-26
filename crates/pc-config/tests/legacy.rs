@@ -42,8 +42,9 @@ fn field_table() {
     // bts.lt_tails, model.prefill.{last_query,qkv_pack}
     assert_eq!(cf.len(), 254);
     // + section 7a: plan.kv_entry_level, plan.kv_entry_deg, plan.keep_placements; 8a: plan.stc_first_reroute, plan.site_cf;
-    // plan.fallback_cf
-    assert_eq!(pf.len(), 90);
+    // plan.fallback_cf, plan.argmax_mincut, plan.ilp_tiebreak, plan.raise_drop_base, plan.raise_drop_search, plan.pack_cf,
+    // plan.keep_placements_exact
+    assert_eq!(pf.len(), 96);
     let mut envs = BTreeSet::new();
     let mut dotted = BTreeSet::new();
     for f in cf.iter().chain(pf.iter()) {
@@ -54,8 +55,10 @@ fn field_table() {
         }
     }
     // 337 inventory names - 4 without a field (GPU guard, dropped _client, two upstream-driver inputs) + the two
-    // perseus-core runtime switches (PC_EM_FUSE_RESCALE, PC_LT_TAILS) + PF_LAST_QUERY, PF_QKV_PACK, PLAN_FALLBACK_CF
-    assert_eq!(envs.len(), 338);
+    // perseus-core runtime switches (PC_EM_FUSE_RESCALE, PC_LT_TAILS) + PF_LAST_QUERY, PF_QKV_PACK, PLAN_FALLBACK_CF,
+    // PLAN_ARGMAX_MINCUT, PLAN_ILP_TIEBREAK, PLAN_RAISE_DROP_BASE, PLAN_RAISE_SEARCH, PLAN_PACK_CF,
+    // PLAN_KEEP_PLACEMENTS_EXACT
+    assert_eq!(envs.len(), 344);
 }
 
 #[test]
@@ -105,6 +108,9 @@ fn dotted_access_and_errors() {
     assert_eq!(lb.mem.fhe_pt_coeff_encode, Some(false));
     assert_eq!(lb.host, Default::default());
     assert_eq!(lb.model, c.model);
+    // the perseus-core kernel switches bind nothing
+    let (k, _) = Config::from_legacy_env([("PC_EM_FUSE_RESCALE", Some("1")), ("PC_LT_TAILS", Some("0"))]).unwrap();
+    assert_eq!(k.load_bearing(), Config::default().load_bearing());
 }
 
 fn walk(p: &Path, out: &mut Vec<PathBuf>) {
