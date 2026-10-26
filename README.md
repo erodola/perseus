@@ -2,27 +2,18 @@
 
 > **Can we run encrypted transformer inference as fast as plaintext inference?**
 
-Under fully homomorphic encryption (FHE), a model (GPT-2 in this case) can process an encrypted prompt without ever exposing its content to the provider, while computing roughly the same answer. However, the current state of the art suffers from extreme latency (what causes it is described in [Background](#background)).
+The Encrypted GPT-2 Speedrun aims to speed up encrypted transformer language modelling under Fully Homomorphic Encryption (FHE).
 
-This branch of [Perseus](https://github.com/gladia-research-group/perseus) defines the Encrypted GPT-2 Speedrun, in which we optimize (collaboratively and
-competitively) encrypted transformer inference under FHE for GPT-2 (124M) on a single RTX PRO 6000.
+FHE lets a user encrypt a prompt, send it over, and get an answer back from an LLM without the provider ever seeing the prompt or the answer. The catch is latency: encrypted inference is still thousands of times slower than plaintext (see [Background](#background)).
 
-The client encrypts the request locally under CKKS at 128-bit security; the server receives the encrypted prompt and computes on ciphertexts only.
+In this challenge we model, and try to optimise collaboratively and competitively, the two stages a transformer goes through when it's deployed:
 
-Under this framing, the task naturally includes two tracks, which resemble the full inference-as-a-service paradigm:
+- **Prefill-128**: the encrypted 128-token prompt populates the KV caches.
+- **Decode-8**: starting from a fixed cache state, the model generates 8 tokens.
 
-- **Prefill-128.** The user's encrypted prompt (128 tokens) populates the KV caches.
-- **Decode-8.** From a fixed, given cache state, the model decodes 8 tokens, at positions 8 to 15, under teacher forcing on unknown test sequences.
+Each track is scored by end-to-end time on a single RTX PRO 6000, as long as the encrypted logits stay close to the plaintext ones (KL < 10⁻² for prefill, < 10⁻³ for decode). Setup: GPT-2 (124M), CKKS at 128-bit security.
 
-The result of each is an end-to-end time, and a KL divergence between the plaintext GPT-2 logits and the encrypted ones, which must stay below 10⁻² in prefill, where it is taken on the last position's logits, and below 10⁻³ in decode, where it is the average over the timed positions.
-
-Every entry is a pull request to this branch, `speedrun`: a change to Perseus's code, and a record folder in
-`speedrun/records/`. Perseus itself, its results and its documentation, is on its
-[`main` branch](https://github.com/gladia-research-group/perseus/tree/main). You can also
-change the cryptographic backend. The default is [perseus-core](crates),
-Perseus's Rust + CUDA runtime. Modify it, or include another backend as a submodule and wire it in.
-
-To learn how to submit an entry, see [Submitting](#submitting).
+Every entry is a pull request to this branch. See [Submitting](#submitting).
 
 ## Running the current record
 
