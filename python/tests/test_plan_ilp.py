@@ -194,6 +194,28 @@ class IlpTiebreak(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_SCIPY, "placer ilp needs scipy")
+class IlpExitCap(unittest.TestCase):
+    def test_final_block_exits_at_the_cap(self):
+        """PLAN_ILP_EXIT_CAP: the final block exits at the capped effective level or above it, at no lower cost than
+        without the cap; one level above the uncapped exit is reachable on some synthetic graph."""
+        from perseus.plan.placer.place import PlanInfeasible
+        eff = lambda s: s["exit_level"] + (SYNTH_CFG["level_unit"] if s.get("exit_deg") == 2 else 0)
+        reached = 0
+        for g in SYNTH:
+            free, p0 = _plan(g, SYNTH_CFG, dict(SYNTH_ENTRY, final_block=True))
+            cap = eff(free["summary"]) - 1
+            try:
+                capped, p1 = _plan(g, SYNTH_CFG, dict(SYNTH_ENTRY, final_block=True), ilp_exit_cap=cap)
+            except PlanInfeasible:
+                continue
+            with self.subTest(graph=g.parent.parent.name, cap=cap):
+                self.assertLessEqual(eff(capped["summary"]), cap)
+                self.assertGreaterEqual(p1.meta["objective"], p0.meta["objective"] - 1e-6)
+                reached += 1
+        self.assertGreater(reached, 0, "no synthetic graph exits one level higher under the cap")
+
+
+@unittest.skipUnless(HAVE_SCIPY, "placer ilp needs scipy")
 class IlpPlumbing(unittest.TestCase):
     def test_plan_is_labelled_and_carries_the_solver_status(self):
         if not REAL.is_file():

@@ -187,6 +187,9 @@ def main() -> None:
                    dest="ilp_cap_exit",
                    help="placer ilp: let the final block exit deeper than the min-cut's plan "
                         "(off by default: that exit feeds the unplanned encrypted argmax)")
+    p.add_argument("--ilp-exit-cap", type=float, dest="ilp_exit_cap",
+                   help="placer ilp: the final block exits at this effective level or above it (the entry headroom of "
+                        "a stage planned after it alone)")
     p.add_argument("--ilp-tiebreak", action="store_true", default=None, dest="ilp_tiebreak",
                    help="placer ilp: among equal-cost optima take the one fixed per-site weights rank first (the "
                         "model in whole cost units, then a second solve): one plan on every machine and solver build; "

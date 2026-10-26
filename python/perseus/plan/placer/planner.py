@@ -227,6 +227,9 @@ class PlanConfig:
     #: the model's final block may not exit deeper than the min-cut's plan (its exit feeds
     #: the unplanned encrypted argmax; see IlpPlacer.cap_exit)
     ilp_cap_exit: bool = True
+    #: placer "ilp": the final block may not exit deeper than this effective level either (PLAN_ILP_EXIT_CAP): the
+    #: headroom a stage planned after it, alone, needs at its entry (a lean chain's CutMax stage on n32a4)
+    ilp_exit_cap: float | None = None
     #: a dense refresh whose input is past the StC-first entry runs the shipped order at the plan's CF: give it that
     #: order's CF (PLAN_FALLBACK_CF; off: the StC-first choice, sized on slot magnitudes, as every shipped plan has)
     fallback_cf: bool = False
@@ -808,7 +811,8 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
         from .ilp import IlpPlacer
         PlacerCls = partial(IlpPlacer, time_limit=cfg.ilp_time_limit, mip_gap=cfg.ilp_gap,
                             objective=cfg.ilp_objective,
-                            cap_exit=bool(final_block and cfg.ilp_cap_exit), tiebreak=cfg.ilp_tiebreak)
+                            cap_exit=bool(final_block and cfg.ilp_cap_exit), tiebreak=cfg.ilp_tiebreak,
+                            exit_level_cap=cfg.ilp_exit_cap if final_block else None)
     if exact:
         # force_place: pre-seeded placements (the terminal-exit refresh retry in
         # plan_graph_dir, and the magnitude keep-anchors). The cut still adds
