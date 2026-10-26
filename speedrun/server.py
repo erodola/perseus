@@ -33,7 +33,7 @@ STEPS = 16
 # decode plan's to 1024-token windows)
 DECODE_PLAN = "bootstrap_placements/gpt2_decode_python_n32_kc16_cm"
 # speedrun/make_prefill_plan.sh's plan with CutMax's scaled normalisers (stage 13 replanned: its PLAN_CMD.txt)
-PREFILL_PLAN = "bootstrap_placements/gpt2_prefill128_pf_cm"
+PREFILL_PLAN = "bootstrap_placements/gpt2_prefill128_pfbhrd_cm"
 
 
 def write(root, rel, payload):
@@ -149,6 +149,8 @@ def prefill(a):
     assert not run.sess.has_secret and not run.fhe.has_secret_key
     run.run(vals=run.input_values(rows))       # warm-up on the public prompt
     run.fhe.device_sync()
+    st = run.sess.planned_stats()
+    run.log(f"[planned] warm-up: refresh pairs (as one, one by one) {st['pairs']}, fused product-adds {st['fused']}")
     write(a.outbox, "ready", json.dumps({"inputs": [list(m) for m in run.in_metas[0]]}).encode())
     tail, cutmax = run.reg[model.n_layers][0][1], run.reg[model.n_layers + 1][0][1]
     k = 0

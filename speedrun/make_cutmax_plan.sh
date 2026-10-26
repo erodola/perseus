@@ -8,13 +8,15 @@
 # CUTMAX_GRAPH: another Decode-8 capture whose stage 13 has those magnitudes, taken under BASE's runtime.
 #   bash speedrun/make_cutmax_plan.sh gpt2_decode_python_n32_m16i_fcf gpt2_decode_python_n32_m16i_fcf_cm
 #   TRACK=prefill bash speedrun/make_cutmax_plan.sh gpt2_prefill128_pf gpt2_prefill128_pf_cm
+#   TRACK=prefill GR=graphs/gpt2_prefill128_pfbh_cm bash speedrun/make_cutmax_plan.sh gpt2_prefill128_pfbh \
+#       gpt2_prefill128_pfbh_cm      (a capture of BASE's runtime: speedrun/make_prefill_plan.sh's cm step)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/local_env.sh
 export CUDA_VISIBLE_DEVICES="" PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}"
 BASE=${1:?base plan} OUT=${2:?out name}
 if [ "${TRACK:-decode}" = prefill ]; then
-    CM=configs/model/approximation/gpt2_base_n32_pf_cm/configs.json GR=graphs/gpt2_prefill128_pf_cm
+    CM=configs/model/approximation/gpt2_base_n32_pf_cm/configs.json GR=${GR:-graphs/gpt2_prefill128_pf_cm}
     # make_prefill_plan.sh's argmax env
     export MAX_LEVEL=50 BTS_LEVEL=28 SRC_LEVEL=36 CACHE_READ_LEVEL=36 PLAN_LEVEL_UNIT=2 PLAN_CF_MAX=20 \
         PLAN_NO_PRESCALE=1 PLAN_ACC_CHAIN=n32 PLAN_MAG_SAFETY=2 PLAN_SPARSE_SLOTS=512,1 \
