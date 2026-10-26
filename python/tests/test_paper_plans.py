@@ -113,6 +113,9 @@ GATE: dict[str, tuple | None] = {
     # capture of the configs fitted to Decode-8's 16 positions (gpt2_base_n32_kc16; its recipe= and capture= lines); its
     # CutMax variant gpt2_decode_python_n32_kc16_cm comes from speedrun/make_cutmax_plan.sh
     "gpt2_decode_python_n32_kc16": None,
+    # the same recipe on the merged capture of gpt2_base_n32_kc16r_cm (softmax centred on per-head reference keys);
+    # its CutMax variant gpt2_decode_python_n32_kc16r_cm comes from speedrun/make_cutmax_plan.sh
+    "gpt2_decode_python_n32_kc16r": None,
 }
 # plans this planner no longer regenerates, and why: the gate reports them instead of replanning them
 RETIRED = {

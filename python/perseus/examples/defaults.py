@@ -6,11 +6,11 @@ from __future__ import annotations
 
 # model -> {T or None (any): plan dir, resolved by perseus._paths.resolve}
 PLANS: dict[str, dict[int | None, str]] = {
-    # 16 tokens (Decode-8, speedrun/server.py's plan): softmax and GELU fitted to positions 0-15, planned on the capture
-    # merged over four oracle rows at every position, CutMax's scaled normalisers: 120 refreshes / token. Any other
-    # length: the shipped decode capture's plan, 133 refreshes / token (CutMax: 12 of them); those that run the shipped
-    # order at its CF
-    "gpt2_decode": {16: "bootstrap_placements/gpt2_decode_python_n32_kc16_cm",
+    # 16 tokens (Decode-8, speedrun/server.py's plan): softmax and GELU fitted to positions 0-15, the softmax of blocks
+    # 0-7, 9 and 10 centred on per-head reference keys, planned on the capture merged over four oracle rows at every
+    # position, CutMax's scaled normalisers: 112 refreshes / token. Any other length: the shipped decode capture's plan,
+    # 133 refreshes / token (CutMax: 12 of them); those that run the shipped order at its CF
+    "gpt2_decode": {16: "bootstrap_placements/gpt2_decode_python_n32_kc16r_cm",
                     None: "bootstrap_placements/gpt2_decode_python_n32_m16i_fcf_cm"},
     # StC-first dense refreshes + the runtime's measured landings
     "gpt2_prefill": {128: "bootstrap_placements/gpt2_prefill128_m16s0"},
