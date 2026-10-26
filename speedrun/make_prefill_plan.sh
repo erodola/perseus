@@ -16,17 +16,26 @@
 #   bash speedrun/make_prefill_plan.sh  -> bootstrap_placements/gpt2_prefill128_pfbh{,_cm}, ..._pfbhrd{,_cm}
 #   RESUME=1 bash speedrun/make_prefill_plan.sh   continues a run that stopped (a preempted job): the rows' oracles, the
 #   merged capture, the blocks already planned (PLAN_RESUME) and the CutMax capture are kept, each written whole
+#   PRESET=n32a4 bash speedrun/make_prefill_plan.sh   the plan for the lean chain (pc-core ChainSpec::n32a4, which the
+#   server runs on the plan's CHAIN_PRESET): the same captures, every value and refresh at level 48 or below (n32a4's
+#   deepest user level, the composite pair of its 2nd and 3rd bottom primes; n32's is 50)
+#   -> bootstrap_placements/gpt2_prefill128_n32a4_pfbh{,_cm}, ..._pfbhrd{,_cm}
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/local_env.sh
 export CUDA_VISIBLE_DEVICES="" PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}"
-BASE=gpt2_prefill128_m16s0 OUT=gpt2_prefill128_pfbh GR=graphs/gpt2_prefill128_pfbh
+case ${PRESET:=n32} in
+    n32) TOP=50 TAG= CAP= ;;
+    n32a4) TOP=48 TAG=n32a4_ CAP=" MAX_LEVEL=48 PLAN_REFRESH_ENV_CAP=48" ;;
+    *) echo "PRESET=$PRESET: n32 or n32a4" >&2; exit 2 ;;
+esac
+BASE=gpt2_prefill128_m16s0 OUT=gpt2_prefill128_${TAG}pfbh GR=graphs/gpt2_prefill128_pfbh
 CONFIGS=configs/model/approximation/gpt2_base_n32_pf/configs.json
 RUNTIME="$(grep "^runtime=" "bootstrap_placements/$BASE/PLAN_CMD.txt" | sed 's/^runtime=//') PF_LAST_QUERY=1 \
 FIDESLIB_BTS_RAISE_DROP=512:1 SM_CHEB_GS=1 PF_QKV_PACK=1 PF_ATTN_PACK=3 PF_ATTN_BSGS=1 PF_SM_HPACK=1"
 # the switch the server alone reads (pc-gpu; the CPU capture and the planner never see it): EvalMod's relinearization
 # and the rescale after it as one exact conversion
-SERVER_RUNTIME="PC_EM_FUSE_RESCALE=1"
+SERVER_RUNTIME="PC_EM_FUSE_RESCALE=1${TAG:+ CHAIN_PRESET=$PRESET}"
 # replay switches, set on the plan's runtime= line only (neither the capture nor the placements read them): refresh pairs,
 # the SparseB routes' EvalMod series
 REPLAY="PC_BTS_PAIR=1 FIDESLIB_BTS_SPARSE_B_K=16"
@@ -38,7 +47,7 @@ SM_KAPPA=${SM_KAPPA:-4}
 MAGS="PLAN_MAG_SAFETY_STEPS=blk11.attn:8,tail:8$(for b in $(seq 0 10); do printf ',blk%d.attn.softmax:%s' "$b" "$SM_KAPPA"; done)"
 RECIPE="PLAN_PRUNE=1 PLAN_SPARSE_BTS_OUT=1:16,512:26 BTS_LEVEL=28 PLAN_RAISE_DROP_MAX=0 PLAN_RAISE_LANDING_MAX=42 \
 PLAN_RAISE_ROUTES=0 PLAN_REFRESH_ENV_CAP_ROUTES=0:46 PLAN_SLIM_CUBIC=1 PLAN_STC_FIRST_ENTRY=46 \
-PLAN_STC_FIRST_FALLBACK=34:1 PLAN_PLACER=ilp PLAN_ILP_TIME_LIMIT=3600 PLAN_ILP_TIEBREAK=1 $MAGS"
+PLAN_STC_FIRST_FALLBACK=34:1 PLAN_PLACER=ilp PLAN_ILP_TIME_LIMIT=3600 PLAN_ILP_TIEBREAK=1 $MAGS$CAP"
 # The capture and the PCMM band shifts come from ROWS rows of the OpenWebText calibration pool (the rows of
 # speedrun/make_decode_capture.sh; each row's oracle by scripts/utils/gen_gpt2_oracle.py): a CPU-twin prefill of each
 # row records every linear's max |y| (PF_PCMM_CALIB; the shifts, impl/pcmm.py band_shift, from the largest over the
@@ -93,9 +102,9 @@ for b in $(seq 0 11); do ln -s "$PWD/$GR/block_$b" "$TMP/block_$b"; done
 cp "$GR/capture_env.json" "$TMP/"
 env $RECIPE PLAN_RESUME="${RESUME:-0}" bash python/perseus/examples/gpt2/make_plan.sh "$TMP" "$OUT" blocks
 rm -rf "$TMP"
-export MAX_LEVEL=50 BTS_LEVEL=28 SRC_LEVEL=36 CACHE_READ_LEVEL=36 PLAN_LEVEL_UNIT=2 PLAN_CF_MAX=20 PLAN_NO_PRESCALE=1 \
+export MAX_LEVEL=$TOP BTS_LEVEL=28 SRC_LEVEL=36 CACHE_READ_LEVEL=36 PLAN_LEVEL_UNIT=2 PLAN_CF_MAX=20 PLAN_NO_PRESCALE=1 \
     PLAN_ACC_CHAIN=n32 PLAN_MAG_SAFETY=2 PLAN_SPARSE_SLOTS=512,1 PLAN_SPARSE_BTS_OUT=1:16,512:24 PLAN_HINT_ENV_VETO=1 \
-    PLAN_PRUNE=1 PLAN_REAL_ROUTE=1 PLAN_RAISE_DROP_SET=1,3,5 PLAN_HINT_VETO_STEPS=tail PLAN_REFRESH_ENV_CAP=50 \
+    PLAN_PRUNE=1 PLAN_REAL_ROUTE=1 PLAN_RAISE_DROP_SET=1,3,5 PLAN_HINT_VETO_STEPS=tail PLAN_REFRESH_ENV_CAP=$TOP \
     PLAN_REFRESH_ENV_CAP_STEPS=cutmax:48,tail:46 PLAN_SHARED_REALIZE=1 PLAN_REFRESH_ENV_CAP_ROUTES=0:46 \
     PLAN_RAISE_DROP_MAX=0 PLAN_RAISE_ROUTES=0 PLAN_SLIM_CUBIC=1 PLAN_RAISE_LANDING_MAX=42 PLAN_STC_FIRST_ENTRY=46 \
     PLAN_STC_FIRST_FALLBACK=34:1 "$MAGS"
