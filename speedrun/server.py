@@ -30,9 +30,10 @@ from speedrun.record1 import PROMPT, pack, unpack
 HEADER = struct.Struct("<Q")
 STEPS = 16
 # Decode-8 never holds more than STEPS keys: its plan's softmax and GELU are fitted to positions 0..STEPS-1 (the main
-# decode plan's to 1024-token windows)
+# decode plan's to 1024-token windows); it runs on the lean chain n32a4 (its runtime line's CHAIN_PRESET:
+# speedrun/make_n32a4_decode_plan.sh)
 DECODE_PLAN = "bootstrap_placements/gpt2_decode_python_n32a4_kc16_cm"
-# speedrun/make_prefill_plan.sh's plan with CutMax's scaled normalisers (stage 13 replanned: its PLAN_CMD.txt)
+# speedrun/make_prefill_plan.sh's plan with CutMax's scaled normalisers (stage 13 replanned: its PLAN_CMD.txt), on n32
 PREFILL_PLAN = "bootstrap_placements/gpt2_prefill128_pfbhrd_cm"
 
 
