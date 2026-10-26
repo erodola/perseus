@@ -10,13 +10,22 @@
 #   - stage 13, CutMax with the scaled normalisers, by speedrun/make_cutmax_plan.sh at stage 12's exit.
 # The blocks pass also plans the base capture's stage 13 (the argmax before CutMax) at the old exit; it is dropped,
 # as the served plan's stage 13 is CutMax's. The runtime line gains CHAIN_PRESET=n32a4 (the server's chain).
-# RESUME=1 keeps the blocks already planned (a preempted run).
+# RESUME=1 keeps the blocks already planned (a preempted run). BASE (an n32 Decode-8 plan with a `_cm` CutMax plan
+# beside it), GR (its stages 0-12 capture), CUTMAX_GRAPH (its stage-13 capture) and CONFIGS (its CutMax configs) name
+# another n32 plan to take the recipe and captures of; OUT is BASE with n32a4 for n32.
 #   bash speedrun/make_n32a4_decode_plan.sh   -> bootstrap_placements/gpt2_decode_python_n32a4_kc16{,_cm}
+#   BASE=gpt2_decode_python_n32_kc16r GR=graphs/gpt2_decode_python_n32_kc16rm \
+#   CUTMAX_GRAPH=graphs/gpt2_decode_python_n32_kc16r_cm \
+#   CONFIGS=configs/model/approximation/gpt2_base_n32_kc16r_cm/configs.json bash speedrun/make_n32a4_decode_plan.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/local_env.sh
 export CUDA_VISIBLE_DEVICES="" PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}" OMP_NUM_THREADS=1
-BASE=gpt2_decode_python_n32_kc16 OUT=gpt2_decode_python_n32a4_kc16 GR=graphs/gpt2_decode_python_n32_kc16m
+BASE=${BASE:-gpt2_decode_python_n32_kc16} GR=${GR:-graphs/gpt2_decode_python_n32_kc16m}
+CUTMAX_GRAPH=${CUTMAX_GRAPH:-graphs/gpt2_decode_python_n32_kc16_cm}
+CONFIGS=${CONFIGS:-configs/model/approximation/gpt2_base_n32_kc16_cm/configs.json}
+OUT=${BASE/_n32_/_n32a4_}
+[ "$OUT" != "$BASE" ] || { echo "BASE=$BASE: not an n32 plan name" >&2; exit 2; }
 CAP=46
 RECIPE="$(sed -n 's/^recipe=//p' "bootstrap_placements/$BASE/PLAN_CMD.txt") MAX_LEVEL=48 PLAN_REFRESH_ENV_CAP=48"
 [ "${RESUME:-0}" = 1 ] || rm -rf "bootstrap_placements/$OUT"
@@ -46,9 +55,8 @@ PLAN_ILP_EXIT_CAP=$CAP; feedback)"
 sed -e "s|^tool=.*|tool=$TOOL|" -e "s|^recipe=.*|recipe=$RECIPE|" -e "s|^runtime=\(.*\)|runtime=\1 CHAIN_PRESET=n32a4|" \
     -e "s|make_plan.sh's chain (blocks, argmax, feedback)|make_n32a4_decode_plan.sh's chain|" \
     "bootstrap_placements/$BASE/PLAN_CMD.txt" > "bootstrap_placements/$OUT/PLAN_CMD.txt"
-grep "^capture13=" "bootstrap_placements/${BASE}_cm/PLAN_CMD.txt" >> "bootstrap_placements/$OUT/PLAN_CMD.txt"
-CUTMAX_GRAPH=graphs/gpt2_decode_python_n32_kc16_cm bash speedrun/make_cutmax_plan.sh "$OUT" "${OUT}_cm" \
-    configs/model/approximation/gpt2_base_n32_kc16_cm/configs.json
+grep "^capture13=" "bootstrap_placements/${BASE}_cm/PLAN_CMD.txt" >> "bootstrap_placements/$OUT/PLAN_CMD.txt" || true
+CUTMAX_GRAPH="$CUTMAX_GRAPH" bash speedrun/make_cutmax_plan.sh "$OUT" "${OUT}_cm" "$CONFIGS"
 "$PYTHON" - bootstrap_placements "${BASE}_cm" "${OUT}_cm" <<'PY'
 import json, sys
 root, *names = sys.argv[1:]
