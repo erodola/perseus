@@ -279,8 +279,8 @@ class IlpPlacer(Placer):
     #: deeper exit there is a saving the planner books and the argmax pays back
     #: (measured: n32 block 12 exited 42 instead of 40, argmax +0.13 s/token)
     cap_exit: bool = False
-    #: and no deeper than this effective level (the entry headroom of a stage planned after the block, alone); a min-cut
-    #: plan past it is no fallback
+    #: and no deeper than this absolute effective level (the entry headroom of a stage planned after the block, alone);
+    #: a min-cut plan past it is no fallback
     exit_level_cap: float | None = None
     #: among the optima, take the one a fixed weight per decision (from the site's graph position) ranks first: the
     #: model priced in whole `_UNIT`s (an exact optimum), then a second solve under that optimum, so the plan depends
@@ -806,9 +806,10 @@ class IlpPlacer(Placer):
                     mc_exit = mc_sim.effective(term, self.g.level_unit)
                     cap = mc_exit if self.cap_exit else float("inf")
                     if self.exit_level_cap is not None:
-                        cap = min(cap, self.exit_level_cap)
+                        cap = min(cap, self.exit_level_cap - self.bootstrap_level)
                         if mc_exit > cap:
-                            log.info(f"[ilp] min-cut exits at {mc_exit} past the exit cap {cap}: no incumbent")
+                            log.info(f"[ilp] min-cut exits at {self.bootstrap_level + mc_exit} past the exit cap "
+                                     f"{self.exit_level_cap}: no incumbent")
                             mc_placed, mc_in_eff = None, {}
                     self._exit_cap = (term, cap)
         except PlanInfeasible as e:
@@ -817,7 +818,7 @@ class IlpPlacer(Placer):
         if self._exit_cap is None and self.exit_level_cap is not None:
             term = next((n.output for n in reversed(self.g.nodes) if n.output and not n.is_deliberate_bts), None)
             if term is not None:
-                self._exit_cap = (term, self.exit_level_cap)
+                self._exit_cap = (term, self.exit_level_cap - self.bootstrap_level)
         self.placed = set(forced)
         mc_cost = None
         if mc_placed is not None:
