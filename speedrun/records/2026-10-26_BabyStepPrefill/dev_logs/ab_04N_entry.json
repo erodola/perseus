@@ -1,0 +1,59 @@
+{
+ "run": "20261025-220947-2734169",
+ "track": "prefill",
+ "server_cmd": [
+  "bash",
+  "<perseus>/speedrun/serve.sh",
+  "--device",
+  "0"
+ ],
+ "void": null,
+ "client_perseus": "89bc830017fe12ab967ddb10c24feae65d8af6df",
+ "client_file": "c64daff4b0d2b4c32f0035099b633e4c887c14152a3d3e15e10508b06e3776c3",
+ "harness": "449f7ba10292df3bba04d492744b37c5d77f8678",
+ "server_exit_s": 2.519,
+ "client_rc": 0,
+ "server_rc": 0,
+ "peak_gpu_mib": 64107,
+ "peak_mem_mib": {},
+ "result": {
+  "track": "prefill",
+  "backend": "perseus-core",
+  "requests": [
+   {
+    "warmup": false,
+    "times_s": [
+     17.652913705911487
+    ],
+    "score": 17.652913705911487,
+    "prompt": 8,
+    "kl": [
+     1.0952694684386329e-05
+    ],
+    "kl_scored_mean": 1.0952694684386329e-05,
+    "argmax_ok": [
+     true
+    ],
+    "outputs_ok": true
+   },
+   {
+    "warmup": false,
+    "times_s": [
+     17.623958613723516
+    ],
+    "score": 17.623958613723516,
+    "prompt": 9,
+    "kl": [
+     2.3624493223714515e-06
+    ],
+    "kl_scored_mean": 2.3624493223714515e-06,
+    "argmax_ok": [
+     true
+    ],
+    "outputs_ok": true
+   }
+  ],
+  "prompts_sha256": "ce446d42f61728288fc3191f5e697c7ff2fb2c77dd7e3802fb059109292ff5a2",
+  "manifest_sha256": "e422ba855b700e353ab83d7dbce48dac11ef0ed6f09430d35fc4ab87d78f5f01"
+ }
+}
