@@ -1,0 +1,56 @@
+{
+  "name": "LeanChainDecode",
+  "tracks": [
+    "decode"
+  ],
+  "authors": [
+    {
+      "name": "Emanuele Rodolà",
+      "github": "erodola",
+      "affiliation": "Paradigma"
+    }
+  ],
+  "summary": "Decode-8 on a lean bootstrap chain (StC-first's input stages on single primes, dnum 4, log QP 1734), with the softmax of ten blocks centred on public reference keys (28 normalisation rounds instead of 36) and byte-identical NTT and key-switching kernels; 114 refreshes per token.",
+  "ckks": {
+    "log_n": 16,
+    "log_qp": 1734,
+    "secret": "uniform-ternary",
+    "chain": "n32a4: record 3's n32 without its StC-first prime ids 5-7 (51 Q primes), dnum 4 (13/13/13/12); Prefill-128 stays on n32",
+    "dnum": 4,
+    "special_primes": "record 3's 9 and 158334977, 158072833, 155189249, 154533889 (P 360.5 bits)",
+    "sparse_keys": [
+      {
+        "role": "encapsulation, dense to sparse",
+        "secret": "ternary, Hamming weight 32",
+        "modulus": "q_0 q_1 and P' = record 3's 9 special primes (308 bits), record 1's"
+      },
+      {
+        "role": "SPRU block key",
+        "secret": "binary, one 1 in each of 64 blocks",
+        "modulus": "q_0 q_1 and P' = record 3's 9 special primes (308 bits), record 1's"
+      },
+      {
+        "role": "PCMM ring switch (Prefill-128)",
+        "secret": "ternary on ring dimension 4096",
+        "modulus": "q_0 q_1 P of record 3's chain, on which Prefill-128 stays"
+      }
+    ]
+  },
+  "systems_only": false,
+  "ai_assistance": {
+    "used": true,
+    "share_of_changed_lines": 1.0,
+    "tools": [
+      "Flywheel",
+      "Claude Code"
+    ]
+  },
+  "dev_result": {
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "decode": {
+      "s_per_token": 2.739,
+      "record_s_per_token_same_gpu": 3.475,
+      "mean_kl": 7.48e-06
+    }
+  }
+}
