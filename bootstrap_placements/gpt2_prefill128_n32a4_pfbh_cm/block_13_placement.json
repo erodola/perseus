@@ -154,7 +154,7 @@
       "objective": 8.000109731623214,
       "bound": 8.000107765197754,
       "gap": 2.4579981097327145e-07,
-      "solve_s": 2.24,
+      "solve_s": 2.64,
       "objective_kind": "total",
       "pruned": 0
     },
