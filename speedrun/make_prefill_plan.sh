@@ -20,7 +20,7 @@
 #   server runs on the plan's CHAIN_PRESET): the same captures, every value and refresh at level 48 or below (n32a4's
 #   deepest user level, the composite pair of its 2nd and 3rd bottom primes; n32's is 50), and the inputs of every
 #   PCMM of band shift above 1 one level above the StC-first entry (PLAN_PCMM_PREDIV_CAP: the runtime divides the
-#   shift on that level, pc-gpu matmul::pcmm::prediv)
+#   shift on that level, pc-gpu matmul::pcmm::prediv), the softmax steps sized with SM_KAPPA 6
 #   -> bootstrap_placements/gpt2_prefill128_n32a4_pfbh{,_cm}, ..._pfbhrd{,_cm}
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -30,7 +30,10 @@ case ${PRESET:=n32} in
     n32) TOP=50 TAG= CAP= ;;
     n32a4) TOP=48 TAG=n32a4_ CAP=" MAX_LEVEL=48 PLAN_REFRESH_ENV_CAP=48 PLAN_PCMM_PREDIV_CAP=42"
         # CutMax's stage 13 on the ILP (its added refresh where the quality weight puts it, as Decode-8's)
-        export PLAN_PCMM_PREDIV_CAP=42 CUTMAX_PLACER=ilp ;;
+        export PLAN_PCMM_PREDIV_CAP=42 CUTMAX_PLACER=ilp
+        # its plan refreshes squares of the softmax's normalising rounds that n32's does not (under 4x, block 1's v_1402
+        # at CF 2: 1.17x of its band over the range gate's 80 C4 prompts)
+        : "${SM_KAPPA:=6}" ;;
     *) echo "PRESET=$PRESET: n32 or n32a4" >&2; exit 2 ;;
 esac
 BASE=gpt2_prefill128_m16s0 OUT=gpt2_prefill128_${TAG}pfbh GR=graphs/gpt2_prefill128_pfbh
