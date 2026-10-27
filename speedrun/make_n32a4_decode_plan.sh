@@ -9,7 +9,9 @@
 #   - block 0's feedback variant (make_plan.sh feedback);
 #   - stage 13, CutMax with the scaled normalisers, by speedrun/make_cutmax_plan.sh at stage 12's exit on the ILP
 #     placer (CUTMAX_PLACER=ilp): the one refresh n32a4 adds there goes where the ILP's quality weight puts it (CF 15
-#     early in CutMax, not the min-cut's CF-20 square near its end), which keeps CutMax's one-hot mass at the record's.
+#     on CutMax's last iteration at input level 24, not the min-cut's CF-20 square at its end), which keeps CutMax's
+#     one-hot mass at the record's. The ILP also takes the recipe's raise drops into stage 13 (that refresh and the
+#     record's hint v_54 at raise drop 2).
 # The blocks pass also plans the base capture's stage 13 (the argmax before CutMax) at the old exit; it is dropped,
 # as the served plan's stage 13 is CutMax's. The runtime line gains CHAIN_PRESET=n32a4 (the server's chain).
 # RESUME=1 keeps the blocks already planned (a preempted run). BASE (an n32 Decode-8 plan with a `_cm` CutMax plan
