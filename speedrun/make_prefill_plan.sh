@@ -29,7 +29,8 @@ export CUDA_VISIBLE_DEVICES="" PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH
 case ${PRESET:=n32} in
     n32) TOP=50 TAG= CAP= ;;
     n32a4) TOP=48 TAG=n32a4_ CAP=" MAX_LEVEL=48 PLAN_REFRESH_ENV_CAP=48 PLAN_PCMM_PREDIV_CAP=42"
-        export PLAN_PCMM_PREDIV_CAP=42 ;;
+        # CutMax's stage 13 on the ILP (its added refresh where the quality weight puts it, as Decode-8's)
+        export PLAN_PCMM_PREDIV_CAP=42 CUTMAX_PLACER=ilp ;;
     *) echo "PRESET=$PRESET: n32 or n32a4" >&2; exit 2 ;;
 esac
 BASE=gpt2_prefill128_m16s0 OUT=gpt2_prefill128_${TAG}pfbh GR=graphs/gpt2_prefill128_pfbh
