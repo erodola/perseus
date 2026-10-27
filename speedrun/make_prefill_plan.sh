@@ -15,7 +15,8 @@
 # and SPRU routes, drops 1-5 on SparseB's base drop 1).
 #   bash speedrun/make_prefill_plan.sh  -> bootstrap_placements/gpt2_prefill128_pfbh{,_cm}, ..._pfbhrd{,_cm}
 #   RESUME=1 bash speedrun/make_prefill_plan.sh   continues a run that stopped (a preempted job): the rows' oracles, the
-#   merged capture, the blocks already planned (PLAN_RESUME) and the CutMax capture are kept, each written whole
+#   merged capture, the blocks already planned (PLAN_RESUME) and the CutMax capture are kept, each written whole, and
+#   so are the later stages it completed (stage 12, the argmax, each CutMax replan, the raise-drop pass's blocks)
 #   PRESET=n32a4 bash speedrun/make_prefill_plan.sh   the plan for the lean chain (pc-core ChainSpec::n32a4, which the
 #   server runs on the plan's CHAIN_PRESET): the same captures, every value and refresh at level 48 or below (n32a4's
 #   deepest user level, the composite pair of its 2nd and 3rd bottom primes; n32's is 50), and the inputs of every
@@ -103,7 +104,11 @@ PY
     "$PYTHON" scripts/utils/merge_mags.py "$TMP/r$first" "$GR.part" $(for r in $ROWS; do echo "$TMP/r$r"; done)
     cp "$TMP/pcmm_calib.json" "$GR.part/" && rm -rf "$GR" && mv "$GR.part" "$GR" && rm -rf "$TMP"
 fi
-[ "${RESUME:-0}" = 1 ] || rm -rf "bootstrap_placements/$OUT"
+RD=${OUT}rd
+# the later stages a run completed (RESUME), marked in ST once written whole
+ST=graphs/_resume_$OUT
+[ "${RESUME:-0}" = 1 ] || rm -rf "bootstrap_placements/$OUT" "bootstrap_placements/$RD" "$ST"
+mkdir -p "$ST"
 TMP="$(mktemp -d graphs/_blocks_XXXX)"
 for b in $(seq 0 11); do ln -s "$PWD/$GR/block_$b" "$TMP/block_$b"; done
 cp "$GR/capture_env.json" "$TMP/"
@@ -115,20 +120,27 @@ export MAX_LEVEL=$TOP BTS_LEVEL=28 SRC_LEVEL=36 CACHE_READ_LEVEL=36 PLAN_LEVEL_U
     PLAN_REFRESH_ENV_CAP_STEPS=cutmax:48,tail:46 PLAN_SHARED_REALIZE=1 PLAN_REFRESH_ENV_CAP_ROUTES=0:46 \
     PLAN_RAISE_DROP_MAX=0 PLAN_RAISE_ROUTES=0 PLAN_SLIM_CUBIC=1 PLAN_RAISE_LANDING_MAX=42 PLAN_STC_FIRST_ENTRY=46 \
     PLAN_STC_FIRST_FALLBACK=34:1 "$MAGS"
-read -r L D < <("$PYTHON" -c 'import json, sys; s = json.load(open(sys.argv[1]))["summary"]
+if [ ! -e "$ST/tail" ]; then
+    read -r L D < <("$PYTHON" -c 'import json, sys; s = json.load(open(sys.argv[1]))["summary"]
 print(s["exit_level"], s.get("exit_deg") or 1)' "bootstrap_placements/$OUT/block_11_placement.json")
-TMP="$(mktemp -d graphs/_tail_XXXX)"
-ln -s "$PWD/$GR/block_12" "$TMP/block_12" && cp "$GR/capture_env.json" "$TMP/"
-GRAPH_DIR="$TMP" OUT_NAME="${OUT}_t" FIRST_ENTRY_LEVEL="$L" FIRST_ENTRY_DEG="$D" \
-    bash python/perseus/plan/run_bootstrap_all_blocks.sh
-cp "bootstrap_placements/${OUT}_t/block_12_placement.json" "bootstrap_placements/$OUT/"
-rm -rf "$TMP" "bootstrap_placements/${OUT}_t"
-"$PYTHON" - "$GR" "bootstrap_placements/$OUT/block_12_placement.json" <<'PY'
+    TMP="$(mktemp -d graphs/_tail_XXXX)"
+    ln -s "$PWD/$GR/block_12" "$TMP/block_12" && cp "$GR/capture_env.json" "$TMP/"
+    rm -rf "bootstrap_placements/${OUT}_t"
+    GRAPH_DIR="$TMP" OUT_NAME="${OUT}_t" FIRST_ENTRY_LEVEL="$L" FIRST_ENTRY_DEG="$D" \
+        bash python/perseus/plan/run_bootstrap_all_blocks.sh
+    cp "bootstrap_placements/${OUT}_t/block_12_placement.json" "bootstrap_placements/$OUT/"
+    rm -rf "$TMP" "bootstrap_placements/${OUT}_t"
+    "$PYTHON" - "$GR" "bootstrap_placements/$OUT/block_12_placement.json" <<'PY'
 import json, os, sys
 from perseus.plan import contract
 contract.stamp_file(sys.argv[2], json.load(open(os.path.join(sys.argv[1], "capture_env.json"))))
 PY
-bash python/perseus/examples/gpt2/make_plan.sh "$GR" "$OUT" argmax
+    touch "$ST/tail"
+fi
+if [ ! -e "$ST/argmax" ]; then
+    bash python/perseus/examples/gpt2/make_plan.sh "$GR" "$OUT" argmax
+    touch "$ST/argmax"
+fi
 cp "$GR/pcmm_calib.json" "bootstrap_placements/$OUT/"
 "$PYTHON" - "$GR" "bootstrap_placements/$OUT/plan_rot_steps.json" <<'PY'
 import json, sys
@@ -173,7 +185,10 @@ if [ ! -d "$CMG/block_13" ]; then
         --plan "bootstrap_placements/$OUT" --configs "$CMC"
     mv "$CMG.part" "$CMG"
 fi
-TRACK=prefill GR="$CMG" bash speedrun/make_cutmax_plan.sh "$OUT" "${OUT}_cm"
+if [ ! -e "$ST/cm" ]; then
+    TRACK=prefill GR="$CMG" bash speedrun/make_cutmax_plan.sh "$OUT" "${OUT}_cm"
+    touch "$ST/cm"
+fi
 "$PYTHON" - "$GR" "$CMG" "bootstrap_placements/${OUT}_cm/plan_rot_steps.json" <<'PY'
 import json, sys
 g, cm, f = sys.argv[1:]      # stages 0-12 from the plan's capture, CutMax's stage 13 from its own
@@ -188,11 +203,9 @@ strip_paths "$CMG"
 # and realize anchors, or the block stops; nothing is left to choose, so the min-cut placer and no solver) and the
 # raise-drop search on top, which moves no refresh and changes no block output: block 11 exits as $OUT's does, so stages
 # 12 and 13 are $OUT's
-RD=${OUT}rd
 RD_RECIPE="PLAN_KEEP_PLACEMENTS=bootstrap_placements/$OUT PLAN_KEEP_PLACEMENTS_EXACT=1 PLAN_PLACER=min_cut \
 PLAN_RAISE_DROP_MAX=13 PLAN_RAISE_SEARCH=1 PLAN_RAISE_ROUTES=0,512,1 PLAN_RAISE_DROP_SET=1,2,3,4,5 \
 PLAN_RAISE_DROP_BASE=512:1"
-rm -rf "bootstrap_placements/$RD"
 TMP="$(mktemp -d graphs/_blocks_XXXX)"
 for b in $(seq 0 11); do ln -s "$PWD/$GR/block_$b" "$TMP/block_$b"; done
 cp "$GR/capture_env.json" "$TMP/"
@@ -201,7 +214,7 @@ cp "$GR/capture_env.json" "$TMP/"
       PLAN_RAISE_DROP_SET PLAN_HINT_VETO_STEPS PLAN_REFRESH_ENV_CAP PLAN_REFRESH_ENV_CAP_STEPS PLAN_SHARED_REALIZE \
       PLAN_REFRESH_ENV_CAP_ROUTES PLAN_RAISE_DROP_MAX PLAN_RAISE_ROUTES PLAN_SLIM_CUBIC PLAN_RAISE_LANDING_MAX \
       PLAN_STC_FIRST_ENTRY PLAN_STC_FIRST_FALLBACK PLAN_MAG_SAFETY_STEPS
-  env $RECIPE $RD_RECIPE bash python/perseus/examples/gpt2/make_plan.sh "$TMP" "$RD" blocks )
+  env $RECIPE $RD_RECIPE PLAN_RESUME="${RESUME:-0}" bash python/perseus/examples/gpt2/make_plan.sh "$TMP" "$RD" blocks )
 rm -rf "$TMP"
 "$PYTHON" - "bootstrap_placements/$OUT" "bootstrap_placements/$RD" <<'PY'
 import json, sys
@@ -220,7 +233,11 @@ RD_PLANNER="${PLANNER%%(*}(python/perseus/plan's last commit; PLAN_PLACER=min_cu
 sed -e "s|^tool=.*|tool=$TOOL|" -e "s|^planner=.*|planner=$RD_PLANNER|" -e "/^recipe=/s|\$| $RD_RECIPE|" \
     -e "/^runtime=/s|FIDESLIB_BTS_RAISE_DROPS=1,3,5|FIDESLIB_BTS_RAISE_DROPS=1,2,3,4,5|" \
     -e "/^solver=/s|\$| ($OUT's)|" "bootstrap_placements/$OUT/PLAN_CMD.txt" > "bootstrap_placements/$RD/PLAN_CMD.txt"
-TRACK=prefill GR="$CMG" bash speedrun/make_cutmax_plan.sh "$RD" "${RD}_cm" "$CMC"
+if [ ! -e "$ST/rd_cm" ]; then
+    TRACK=prefill GR="$CMG" bash speedrun/make_cutmax_plan.sh "$RD" "${RD}_cm" "$CMC"
+    touch "$ST/rd_cm"
+fi
 cp "bootstrap_placements/${OUT}_cm/plan_rot_steps.json" "bootstrap_placements/${RD}_cm/"
+rm -rf "$ST"
 ls "bootstrap_placements/$OUT" "bootstrap_placements/${OUT}_cm" \
     "bootstrap_placements/$RD" "bootstrap_placements/${RD}_cm"
