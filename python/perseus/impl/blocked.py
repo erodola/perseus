@@ -402,8 +402,9 @@ def attention_last(rt, Q, K, V, cfg, ch: Chunks, B: Blocks, p: int):
     the blocks of class h K + k (period 2 K tH), so one softmax serves every head; its key sums run over the lanes
     (the halves first) and return to every lane from the first. P.V pairs the halves as P_0 - i P_1 against V."""
     from . import smcheb
-    from .attention import _recip_rounds
+    from .attention import _recip_rounds, uncentred_only
     from .prefill import _KcExtrapolated, recip_lanes
+    uncentred_only(cfg, "attention_last")
     ops, N, t = rt.ops, B.d.N, B.t
     half, lane = _last_lane(ch, B, p)
     if ch.T != 2 * t or len(Q) != 1:
