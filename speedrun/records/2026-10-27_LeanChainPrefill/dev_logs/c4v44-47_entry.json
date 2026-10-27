@@ -1,0 +1,91 @@
+{
+ "run": "20261027-192252-3055840",
+ "track": "prefill",
+ "server_cmd": [
+  "bash",
+  "<perseus>/speedrun/serve.sh",
+  "--device",
+  "0"
+ ],
+ "void": null,
+ "client_perseus": "24d4b3fd04c67293524aac354cc290d02ae2647b",
+ "client_file": "175dcdcae18067dc7d033209ce581a24e1ef1e885f4cebdef9026240730550c8",
+ "harness": "None",
+ "server_exit_s": 2.721,
+ "client_rc": 0,
+ "server_rc": 0,
+ "peak_gpu_mib": 61159,
+ "peak_mem_mib": {},
+ "result": {
+  "track": "prefill",
+  "backend": "perseus-lean",
+  "requests": [
+   {
+    "warmup": false,
+    "times_s": [
+     14.874649840872735
+    ],
+    "score": 14.874649840872735,
+    "prompt": 44,
+    "kl": [
+     2.7706779609486368e-06
+    ],
+    "kl_scored_mean": 2.7706779609486368e-06,
+    "argmax_ok": [
+     true
+    ],
+    "outputs_ok": true
+   },
+   {
+    "warmup": false,
+    "times_s": [
+     14.86003397591412
+    ],
+    "score": 14.86003397591412,
+    "prompt": 45,
+    "kl": [
+     1.0763838870337958e-06
+    ],
+    "kl_scored_mean": 1.0763838870337958e-06,
+    "argmax_ok": [
+     true
+    ],
+    "outputs_ok": true
+   },
+   {
+    "warmup": false,
+    "times_s": [
+     14.832630175165832
+    ],
+    "score": 14.832630175165832,
+    "prompt": 46,
+    "kl": [
+     1.7786258847123977e-05
+    ],
+    "kl_scored_mean": 1.7786258847123977e-05,
+    "argmax_ok": [
+     true
+    ],
+    "outputs_ok": true
+   },
+   {
+    "warmup": false,
+    "times_s": [
+     14.832975409924984
+    ],
+    "score": 14.832975409924984,
+    "prompt": 47,
+    "kl": [
+     1.263053886446159e-05
+    ],
+    "kl_scored_mean": 1.263053886446159e-05,
+    "argmax_ok": [
+     true
+    ],
+    "outputs_ok": true
+   }
+  ],
+  "prompts_sha256": "b87638310a1f9bafdc9b6bb9facd72c45569d6336e6cea787dc1ab097f805f1a",
+  "manifest_sha256": "e422ba855b700e353ab83d7dbce48dac11ef0ed6f09430d35fc4ab87d78f5f01"
+ }
+}

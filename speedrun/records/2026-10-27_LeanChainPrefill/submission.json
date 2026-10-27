@@ -1,0 +1,57 @@
+{
+  "name": "LeanChainPrefill",
+  "tracks": [
+    "prefill"
+  ],
+  "authors": [
+    {
+      "name": "Emanuele Rodolà",
+      "github": "erodola",
+      "affiliation": "Paradigma"
+    }
+  ],
+  "summary": "Prefill-128 on the lean bootstrap chain (n32a4, log QP 1734), its PCMMs of band shift above 1 pre-divided exactly at a composite level and run on the chain's 3-limb split, refresh pairs on the lean chain, and a plan with the softmax's drift margin 6 and CutMax's stage 13 on the ILP; 478 refreshes.",
+  "ckks": {
+    "log_n": 16,
+    "log_qp": 1734,
+    "secret": "uniform-ternary",
+    "chain": "n32a4 on both tracks: record 3's n32 without its StC-first prime ids 5-7 (51 Q primes), dnum 4 (13/13/13/12)",
+    "dnum": 4,
+    "special_primes": "record 3's 9 and 158334977, 158072833, 155189249, 154533889 (P 360.5 bits)",
+    "sparse_keys": [
+      {
+        "role": "encapsulation, dense to sparse",
+        "secret": "ternary, Hamming weight 32",
+        "modulus": "q_0 q_1 and P' = record 3's 9 special primes (308 bits), record 1's"
+      },
+      {
+        "role": "SPRU block key",
+        "secret": "binary, one 1 in each of 64 blocks",
+        "modulus": "q_0 q_1 and P' = record 3's 9 special primes (308 bits), record 1's"
+      },
+      {
+        "role": "PCMM ring switch (Prefill-128)",
+        "secret": "ternary on ring dimension 4096",
+        "modulus": "q_0 q_1 P (87.0 bits): record 3's primes q_0, q_1 and P = 2147352577, unchanged on n32a4"
+      }
+    ]
+  },
+  "systems_only": false,
+  "ai_assistance": {
+    "used": true,
+    "share_of_changed_lines": 1.0,
+    "tools": [
+      "Claude",
+      "Paradigma Flywheel",
+      "Paradigma Discovery Wells"
+    ]
+  },
+  "dev_result": {
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "prefill": {
+      "request_s": 14.84,
+      "record_request_s_same_gpu": 17.6,
+      "mean_kl": 1.5e-05
+    }
+  }
+}
