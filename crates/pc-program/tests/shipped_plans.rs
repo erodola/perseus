@@ -194,6 +194,17 @@ fn gpt2_decode_kc16_cm() {
     shipped_order_sites("gpt2_decode_python_n32_kc16_cm", &progs, &sites);
 }
 
+/// The plan speedrun/server.py serves Decode-8: gpt2_decode_python_n32_kc16r's recipe and captures (softmax centred on
+/// per-head reference keys) on the lean chain n32a4 (its runtime line's CHAIN_PRESET; make_n32a4_decode_plan.sh),
+/// CutMax's scaled normalisers in block 13 on the ILP: three down-projection hints and block 13's five past the entry.
+#[test]
+fn gpt2_decode_n32a4_kc16r_cm() {
+    let Some(progs) = gate("gpt2_decode_python_n32a4_kc16r_cm", "gpt2_decode_python_n32_kc16r_cm") else { return };
+    let sites = [("block_2", "v_1120", 2), ("block_9", "v_921", 2), ("block_11", "v_1182", 2), ("block_13", "v_16", 2),
+                 ("block_13", "v_135", 5), ("block_13", "v_212", 5), ("block_13", "v_289", 5), ("block_13", "v_366", 2)];
+    shipped_order_sites("gpt2_decode_python_n32a4_kc16r_cm", &progs, &sites);
+}
+
 #[test]
 fn gpt2_prefill() {
     gate("gpt2_prefill_python_n32_pcmmstcf", "gpt2_prefill_python_n32_pcmmstcf");

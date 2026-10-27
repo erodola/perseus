@@ -1,8 +1,8 @@
 #!/bin/bash
-# Plan Decode-8 on the lean chain n32a4 (pc-core ChainSpec::n32a4; CPU only), from the record's captures with the
-# record's recipe (bootstrap_placements/gpt2_decode_python_n32_kc16's PLAN_CMD.txt, the ILP with one HiGHS thread) and
-# every value and refresh at level 48 or below: n32a4's deepest user level, the composite pair of its 2nd and 3rd
-# bottom primes (n32's is 50). Then:
+# Plan Decode-8 on the lean chain n32a4 (pc-core ChainSpec::n32a4; CPU only), from an n32 plan's captures with its
+# recipe (by default the served plan's base, gpt2_decode_python_n32_kc16r: its PLAN_CMD.txt, the ILP with one HiGHS
+# thread) and every value and refresh at level 48 or below: n32a4's deepest user level, the composite pair of its 2nd
+# and 3rd bottom primes (n32's is 50). Then:
 #   - stage 12 once more, alone at block 11's exit, its exit capped at effective level 46 (PLAN_ILP_EXIT_CAP; 44/d2):
 #     CutMax's stage 13 takes its first refresh two levels below its entry, past the scaled normaliser (n32: at 50 from
 #     46/d2), so on n32a4 it needs that entry one level higher;
@@ -15,17 +15,17 @@
 # RESUME=1 keeps the blocks already planned (a preempted run). BASE (an n32 Decode-8 plan with a `_cm` CutMax plan
 # beside it), GR (its stages 0-12 capture), CUTMAX_GRAPH (its stage-13 capture) and CONFIGS (its CutMax configs) name
 # another n32 plan to take the recipe and captures of; OUT is BASE with n32a4 for n32.
-#   bash speedrun/make_n32a4_decode_plan.sh   -> bootstrap_placements/gpt2_decode_python_n32a4_kc16{,_cm}
-#   BASE=gpt2_decode_python_n32_kc16r GR=graphs/gpt2_decode_python_n32_kc16rm \
-#   CUTMAX_GRAPH=graphs/gpt2_decode_python_n32_kc16r_cm \
-#   CONFIGS=configs/model/approximation/gpt2_base_n32_kc16r_cm/configs.json bash speedrun/make_n32a4_decode_plan.sh
+#   bash speedrun/make_n32a4_decode_plan.sh   -> bootstrap_placements/gpt2_decode_python_n32a4_kc16r{,_cm} (served)
+#   BASE=gpt2_decode_python_n32_kc16 GR=graphs/gpt2_decode_python_n32_kc16m \
+#   CUTMAX_GRAPH=graphs/gpt2_decode_python_n32_kc16_cm \
+#   CONFIGS=configs/model/approximation/gpt2_base_n32_kc16_cm/configs.json bash speedrun/make_n32a4_decode_plan.sh
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source scripts/local_env.sh
 export CUDA_VISIBLE_DEVICES="" PYTHONPATH="$PWD/python${PYTHONPATH:+:$PYTHONPATH}" OMP_NUM_THREADS=1
-BASE=${BASE:-gpt2_decode_python_n32_kc16} GR=${GR:-graphs/gpt2_decode_python_n32_kc16m}
-CUTMAX_GRAPH=${CUTMAX_GRAPH:-graphs/gpt2_decode_python_n32_kc16_cm}
-CONFIGS=${CONFIGS:-configs/model/approximation/gpt2_base_n32_kc16_cm/configs.json}
+BASE=${BASE:-gpt2_decode_python_n32_kc16r} GR=${GR:-graphs/gpt2_decode_python_n32_kc16rm}
+CUTMAX_GRAPH=${CUTMAX_GRAPH:-graphs/gpt2_decode_python_n32_kc16r_cm}
+CONFIGS=${CONFIGS:-configs/model/approximation/gpt2_base_n32_kc16r_cm/configs.json}
 OUT=${BASE/_n32_/_n32a4_}
 [ "$OUT" != "$BASE" ] || { echo "BASE=$BASE: not an n32 plan name" >&2; exit 2; }
 CAP=46
