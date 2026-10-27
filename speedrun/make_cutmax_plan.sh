@@ -6,6 +6,7 @@
 # gpt2_base_n32_cm / gpt2_base_n32_pf_cm) must be BASE's configs with that cutmax section, and the capture binds when
 # BASE's runtime shapes the op stream as the capture's did (stage 13's stamp equals stage 12's); both are checked.
 # CUTMAX_GRAPH: another Decode-8 capture whose stage 13 has those magnitudes, taken under BASE's runtime.
+# CUTMAX_PLACER=ilp: Decode-8's stage 13 on the recipe's ILP placer instead of the min-cut.
 #   bash speedrun/make_cutmax_plan.sh gpt2_decode_python_n32_m16i_fcf gpt2_decode_python_n32_m16i_fcf_cm
 #   TRACK=prefill bash speedrun/make_cutmax_plan.sh gpt2_prefill128_pf gpt2_prefill128_pf_cm
 #   TRACK=prefill GR=graphs/gpt2_prefill128_pfbh_cm bash speedrun/make_cutmax_plan.sh gpt2_prefill128_pfbh \
@@ -31,9 +32,15 @@ if [ "${TRACK:-decode}" = prefill ]; then
     RECIPE="" HOW="make_prefill_plan.sh's argmax env"
 else
     CM=configs/model/approximation/gpt2_base_n32_cm/configs.json GR=${CUTMAX_GRAPH:-graphs/gpt2_decode_python_n32_cm}
-    RECIPE=$(sed -n 's/^recipe=//p' "bootstrap_placements/$BASE/PLAN_CMD.txt" \
-        | sed 's/PLAN_PLACER=[^ ]*//; s/PLAN_ILP_TIME_LIMIT=[^ ]*//')
-    HOW="the recipe above on the min-cut placer"
+    RECIPE=$(sed -n 's/^recipe=//p' "bootstrap_placements/$BASE/PLAN_CMD.txt")
+    if [ "${CUTMAX_PLACER:-min_cut}" = ilp ]; then
+        # the recipe's own placer (ILP, its quality weight and tie-break) on stage 13 as on the blocks
+        RECIPE=$(echo "$RECIPE" | sed 's/PLAN_ARGMAX_MINCUT=[^ ]*//')
+        HOW="the recipe above on the ILP placer (CUTMAX_PLACER=ilp)"
+    else
+        RECIPE=$(echo "$RECIPE" | sed 's/PLAN_PLACER=[^ ]*//; s/PLAN_ILP_TIME_LIMIT=[^ ]*//')
+        HOW="the recipe above on the min-cut placer"
+    fi
 fi
 CONFIGS=${3:-$CM}
 "$PYTHON" - "bootstrap_placements/$BASE" "$CONFIGS" "$CM" <<'PY'

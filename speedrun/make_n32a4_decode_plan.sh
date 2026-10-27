@@ -7,7 +7,9 @@
 #     CutMax's stage 13 takes its first refresh two levels below its entry, past the scaled normaliser (n32: at 50 from
 #     46/d2), so on n32a4 it needs that entry one level higher;
 #   - block 0's feedback variant (make_plan.sh feedback);
-#   - stage 13, CutMax with the scaled normalisers, by speedrun/make_cutmax_plan.sh at stage 12's exit.
+#   - stage 13, CutMax with the scaled normalisers, by speedrun/make_cutmax_plan.sh at stage 12's exit on the ILP
+#     placer (CUTMAX_PLACER=ilp): the one refresh n32a4 adds there goes where the ILP's quality weight puts it (CF 15
+#     early in CutMax, not the min-cut's CF-20 square near its end), which keeps CutMax's one-hot mass at the record's.
 # The blocks pass also plans the base capture's stage 13 (the argmax before CutMax) at the old exit; it is dropped,
 # as the served plan's stage 13 is CutMax's. The runtime line gains CHAIN_PRESET=n32a4 (the server's chain).
 # RESUME=1 keeps the blocks already planned (a preempted run). BASE (an n32 Decode-8 plan with a `_cm` CutMax plan
@@ -56,7 +58,7 @@ sed -e "s|^tool=.*|tool=$TOOL|" -e "s|^recipe=.*|recipe=$RECIPE|" -e "s|^runtime
     -e "s|make_plan.sh's chain (blocks, argmax, feedback)|make_n32a4_decode_plan.sh's chain|" \
     "bootstrap_placements/$BASE/PLAN_CMD.txt" > "bootstrap_placements/$OUT/PLAN_CMD.txt"
 grep "^capture13=" "bootstrap_placements/${BASE}_cm/PLAN_CMD.txt" >> "bootstrap_placements/$OUT/PLAN_CMD.txt" || true
-CUTMAX_GRAPH="$CUTMAX_GRAPH" bash speedrun/make_cutmax_plan.sh "$OUT" "${OUT}_cm" "$CONFIGS"
+CUTMAX_PLACER=ilp CUTMAX_GRAPH="$CUTMAX_GRAPH" bash speedrun/make_cutmax_plan.sh "$OUT" "${OUT}_cm" "$CONFIGS"
 "$PYTHON" - bootstrap_placements "${BASE}_cm" "${OUT}_cm" <<'PY'
 import json, sys
 root, *names = sys.argv[1:]
