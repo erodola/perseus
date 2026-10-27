@@ -205,11 +205,17 @@ fn gpt2_prefill_speedrun_pf() {
     gate("gpt2_prefill128_pf", "gpt2_prefill128_pf");
 }
 
-/// The Prefill-128 plan the speedrun serves (speedrun/server.py): gpt2_prefill128_pf's, CutMax's scaled normalisers in
-/// stage 13.
+/// gpt2_prefill128_pf with CutMax's scaled normalisers in stage 13.
+#[test]
+fn gpt2_prefill_speedrun_pf_cm() {
+    gate("gpt2_prefill128_pf_cm", "gpt2_prefill128_pf_cm");
+}
+
+/// The Prefill-128 plan the speedrun serves (speedrun/server.py): speedrun/make_prefill_plan.sh's, CutMax's scaled
+/// normalisers in stage 13.
 #[test]
 fn gpt2_prefill_speedrun() {
-    gate("gpt2_prefill128_pf_cm", "gpt2_prefill128_pf_cm");
+    gate("gpt2_prefill128_pfbhrd_cm", "gpt2_prefill128_pfbh_cm");
 }
 
 #[test]

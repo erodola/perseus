@@ -166,7 +166,7 @@ fn siblings_only_reorders() {
 
 #[test]
 fn refresh_pairs_only_reorder() {
-    pairs("gpt2_prefill128_pf", "gpt2_prefill128_pf");
+    pairs("gpt2_prefill128_pfbhrd_cm", "gpt2_prefill128_pfbh_cm");
 }
 
 #[test]
