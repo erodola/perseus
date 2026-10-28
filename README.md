@@ -17,16 +17,19 @@ Every entry is a pull request to this branch. See [Submitting](#submitting).
 
 ## Running the current record
 
-This branch is both tracks' record; the client of every run is the commit the client pins.
+This branch is both tracks' record; the client of every run is the commit its client file pins: record 1's
+client for Prefill-128, record 4's lean client for Decode-8.
 
 ```bash
 git clone -b speedrun https://github.com/gladia-research-group/perseus && cd perseus
 git worktree add ../perseus-client 89bc830017fe12ab967ddb10c24feae65d8af6df
-for d in . ../perseus-client; do (cd $d && uv venv --python 3.12 .venv &&
+git worktree add ../perseus-lean-client 24d4b3fd04c67293524aac354cc290d02ae2647b
+for d in . ../perseus-client ../perseus-lean-client; do (cd $d && uv venv --python 3.12 .venv &&
   uv pip install --python .venv/bin/python -e ".[hf,examples,dev]" && .venv/bin/maturin develop --release); done
 (cd ../perseus-client && .venv/bin/perseus-export --model openai-community/gpt2 --out .cache/models/openai-community/gpt2)
 
-CLIENT=../perseus-client bash speedrun/runner/entry.sh perseus-core . decode 0    # Decode-8, on GPU 0
+CLIENT=../perseus-lean-client WEIGHTS=../perseus-client/.cache/models/openai-community/gpt2/classic/weights.bin.zip \
+  bash speedrun/runner/entry.sh perseus-lean . decode 0                            # Decode-8, on GPU 0
 CLIENT=../perseus-client bash speedrun/runner/entry.sh perseus-core . prefill 0   # Prefill-128
 ```
 
@@ -43,7 +46,7 @@ You need Linux, `bwrap`, a systemd user session, a GPU with 48 GB or more, and `
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="speedrun/records/progress-dark.svg">
-    <img src="speedrun/records/progress-light.svg" width="100%" alt="Record progression of both GPT-2 tracks. Prefill-128: 35.78 s (record 0), 22.22 s (record 1), 15.11 s (record 2), 12.20 s (record 3). Decode-8: 3.993 s/token (record 0), 3.384 s/token (record 1), 3.031 s/token (record 2), 2.325 s/token (record 3). Dotted lines: 1 token/s, and GPT-2 unencrypted on the same GPU, 0.77 ms and 0.65 ms/token.">
+    <img src="speedrun/records/progress-light.svg" width="100%" alt="Record progression of both GPT-2 tracks. Prefill-128: 35.78 s (record 0), 22.22 s (record 1), 15.11 s (record 2), 12.20 s (record 3). Decode-8: 3.993 s/token (record 0), 3.384 s/token (record 1), 3.031 s/token (record 2), 2.325 s/token (record 3), 1.798 s/token (record 4). Dotted lines: 1 token/s, and GPT-2 unencrypted on the same GPU, 0.77 ms and 0.65 ms/token.">
   </picture>
 </p>
 
@@ -76,8 +79,11 @@ unencrypted on the same GPU (at the bottom, not to scale).
 | 1 | 3.384 | Perseus on [perseus‑core](crates), its Rust + CUDA runtime, with its own client | 2026‑10‑22 | [`89bc830`](https://github.com/gladia-research-group/perseus/tree/89bc830017fe12ab967ddb10c24feae65d8af6df) · [log](speedrun/records/2026-10-22_PerseusCore) | [@alexzilligmm](https://github.com/alexzilligmm)<br>[@Davide‑F5‑Marincione](https://github.com/Davide-F5-Marincione) |
 | 2 | 3.031 | FusedUnits: fused key switching, batched rotations, more precise bootstraps | 2026‑10‑24 | [`4d2e72b`](https://github.com/gladia-research-group/perseus/tree/4d2e72be136426f84f3ed402e468693ba00630db) · [log](speedrun/records/2026-10-24_FusedUnits) | [@erodola](https://github.com/erodola) |
 | 3 | 2.325 | FittedDecode: approximations fitted to 16 tokens, cheaper argmax | 2026‑10‑26 | [`9b7471a`](https://github.com/gladia-research-group/perseus/tree/9b7471a50f7badd7a4ddeb4107aa3405e7cc7781) · [log](speedrun/records/2026-10-26_FittedDecode) | [@erodola](https://github.com/erodola) |
+| 4 | 1.798 | LeanChainDecode: leaner key-switching chain, centred softmax | 2026‑10‑27 | [`24d4b3f`](https://github.com/gladia-research-group/perseus/tree/24d4b3fd04c67293524aac354cc290d02ae2647b) · [log](speedrun/records/2026-10-27_LeanChainDecode) | [@erodola](https://github.com/erodola) |
 |  | $`\color{gray}\textsf{0.00065}`$ | $`\color{gray}\textsf{Unencrypted GPT-2}`$ | $`\color{gray}\textsf{2026-10-24}`$ | [code](speedrun/records/plaintext.py) · [log](speedrun/records/plaintext.json) |  |
 
+- **Record 4, LeanChainDecode**: Decode-8 on a shorter modulus chain with fewer key-switching digits, and a softmax
+  centred on reference keys.
 - **Record 3, FittedDecode**: softmax and GELU are fitted to the 16 tokens Decode-8 decodes, the plan has 18 % fewer
   bootstraps, and the argmax needs half as many.
 - **Record 2, FusedUnits**: key switching makes fewer passes over GPU memory, rotations of one ciphertext share their
@@ -112,6 +118,8 @@ polynomials from THOR [1]): GELU, LayerNorm and softmax in every block, and CutM
 
 Records that change it:
 
+- **Record 4, LeanChainDecode** (Decode-8): record 3's, with the softmax of blocks 0-7, 9 and 10 centred on one
+  public reference key per head ([`gpt2_base_n32_kc16r_cm`](python/perseus/configs/model/approximation/gpt2_base_n32_kc16r_cm)).
 - **Record 3, BabyStepPrefill** (Prefill-128): record 2's approximations, and CutMax with scaled normalisers as in
   Decode-8's record 3 ([`gpt2_base_n32_pf_cm`](python/perseus/configs/model/approximation/gpt2_base_n32_pf_cm)).
 - **Record 3, FittedDecode** (Decode-8): the softmax and the GELU of every block fitted to positions 0-15, and CutMax
@@ -137,7 +145,8 @@ Records that change it:
 ### Track 2: Decode-8
 
 - Server: Perseus's served decode, [`perseus.serve.gpt2_decode`](python/perseus/serve/gpt2_decode.py)
-- Plan: [`bootstrap_placements/gpt2_decode_python_n32_kc16_cm`](bootstrap_placements/gpt2_decode_python_n32_kc16_cm)
+- Plan: [`bootstrap_placements/gpt2_decode_python_n32a4_kc16r_cm`](bootstrap_placements/gpt2_decode_python_n32a4_kc16r_cm), on the
+  lean chain `n32a4`, made by [`speedrun/make_n32a4_decode_plan.sh`](speedrun/make_n32a4_decode_plan.sh)
 - In one process, with per-token times: [`scripts/repro/gpt2_decode.sh`](scripts/repro/gpt2_decode.sh), through
   [`run_decode.py`](python/perseus/examples/gpt2/run_decode.py)
 - [`model.py`](python/perseus/examples/gpt2/model.py) holds the per-block K/V caches and the decode step: the 12 blocks of
