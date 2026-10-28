@@ -47,6 +47,7 @@ pub(crate) fn shadow_config_n64(c: &Config) -> PyResult<ShadowConfig> {
         cf_window: (7, 20),
         raise_drops: vec![1, 2, 3],
         k_max: 8,
+        input_room: None,
     };
     Ok(ShadowConfig { chain: ChainShape { n_q: 28, unit: 1 }, bts, quirks: Quirks::none() })
 }

@@ -113,6 +113,13 @@ GATE: dict[str, tuple | None] = {
     # capture of the configs fitted to Decode-8's 16 positions (gpt2_base_n32_kc16; its recipe= and capture= lines); its
     # CutMax variant gpt2_decode_python_n32_kc16_cm comes from speedrun/make_cutmax_plan.sh
     "gpt2_decode_python_n32_kc16": None,
+    # the same recipe on the merged capture of gpt2_base_n32_kc16r_cm (softmax centred on per-head reference keys);
+    # its CutMax variant gpt2_decode_python_n32_kc16r_cm comes from speedrun/make_cutmax_plan.sh
+    "gpt2_decode_python_n32_kc16r": None,
+    # the same on the lean chain n32a4: speedrun/make_n32a4_decode_plan.sh plans its blocks with this recipe, then
+    # stage 12 again with an exit cap and CutMax's stage 13 on the ILP (gpt2_decode_python_n32a4_kc16r_cm), steps the
+    # gate's make_plan.sh stages do not run: the script is its own regeneration check (SELF_CONTAINED)
+    "gpt2_decode_python_n32a4_kc16r": None,
 }
 # plans this planner no longer regenerates, and why: the gate reports them instead of replanning them
 RETIRED = {
@@ -124,7 +131,7 @@ RETIRED = {
                                        "it regenerates at f19831a",
 }
 # tools that capture and plan in one script (their own regeneration check): not replanned here
-SELF_CONTAINED = ("speedrun/make_prefill_plan.sh",)
+SELF_CONTAINED = ("speedrun/make_prefill_plan.sh", "speedrun/make_n32a4_decode_plan.sh")
 # the 10-19 table plans: `python python/tests/test_paper_plans.py table` replans these five
 TABLE = ("llama31_8b_prefill128", "gpt2_prefill128", "gpt2_decode_python_n32", "bert_base_sst2_128", "vit_b16_224")
 
