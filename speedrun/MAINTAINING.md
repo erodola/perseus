@@ -19,13 +19,12 @@ The machine provides what this folder cannot:
   default branch, so keep it on `main` (and the same file here). A repository Actions policy (Settings > Actions >
   Policies) allows `pull_request_target` for that file only; without one, GitHub blocks the event in public
   repositories.
-- Build the commit each record's client pins (`PERSEUS` in [`harness/perseus_core_client.py`](harness/perseus_core_client.py)
-  for Prefill-128, [`harness/perseus_lean_client.py`](harness/perseus_lean_client.py) for Decode-8),
+- Build the commit the records' client pins (`PERSEUS` in [`harness/perseus_lean_client.py`](harness/perseus_lean_client.py),
+  both tracks; [`harness/perseus_core_client.py`](harness/perseus_core_client.py) for records 1-3),
   with GPT-2's weights, and the current record if it is another commit:
   `EXPORT=1 bash speedrun/runner/build.sh https://github.com/gladia-research-group/perseus <commit> <client build>`.
-  Today Prefill-128's record is record 3, BabyStepPrefill, `946694d`, with the client at `89bc830`, and Decode-8's is
-  record 4, LeanChainDecode, `24d4b3f`, with its lean client at `24d4b3f`. Rebuild a track's record arm whenever its
-  record changes.
+  Today Prefill-128's record is record 4, LeanChainPrefill, `e3e6b6b`, and Decode-8's is record 4, LeanChainDecode,
+  `24d4b3f`; both run with the lean client at `24d4b3f`. Rebuild a track's record arm whenever its record changes.
 
 ## When a PR arrives
 

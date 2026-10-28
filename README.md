@@ -17,8 +17,8 @@ Every entry is a pull request to this branch. See [Submitting](#submitting).
 
 ## Running the current record
 
-This branch is both tracks' record; the client of every run is the commit its client file pins: record 1's
-client for Prefill-128, record 4's lean client for Decode-8.
+This branch is both tracks' record; the client of every run is the commit its client file pins: the lean client of
+Decode-8's record 4, for both tracks (record 1's client exports the weights).
 
 ```bash
 git clone -b speedrun https://github.com/gladia-research-group/perseus && cd perseus
@@ -30,7 +30,8 @@ for d in . ../perseus-client ../perseus-lean-client; do (cd $d && uv venv --pyth
 
 CLIENT=../perseus-lean-client WEIGHTS=../perseus-client/.cache/models/openai-community/gpt2/classic/weights.bin.zip \
   bash speedrun/runner/entry.sh perseus-lean . decode 0                            # Decode-8, on GPU 0
-CLIENT=../perseus-client bash speedrun/runner/entry.sh perseus-core . prefill 0   # Prefill-128
+CLIENT=../perseus-lean-client WEIGHTS=../perseus-client/.cache/models/openai-community/gpt2/classic/weights.bin.zip \
+  bash speedrun/runner/entry.sh perseus-lean . prefill 0                           # Prefill-128
 ```
 
 You need Linux, `bwrap`, a systemd user session, a GPU with 48 GB or more, and `HF_HOME` holding
@@ -46,7 +47,7 @@ You need Linux, `bwrap`, a systemd user session, a GPU with 48 GB or more, and `
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="speedrun/records/progress-dark.svg">
-    <img src="speedrun/records/progress-light.svg" width="100%" alt="Record progression of both GPT-2 tracks. Prefill-128: 35.78 s (record 0), 22.22 s (record 1), 15.11 s (record 2), 12.20 s (record 3). Decode-8: 3.993 s/token (record 0), 3.384 s/token (record 1), 3.031 s/token (record 2), 2.325 s/token (record 3), 1.798 s/token (record 4). Dotted lines: 1 token/s, and GPT-2 unencrypted on the same GPU, 0.77 ms and 0.65 ms/token.">
+    <img src="speedrun/records/progress-light.svg" width="100%" alt="Record progression of both GPT-2 tracks. Prefill-128: 35.78 s (record 0), 22.22 s (record 1), 15.11 s (record 2), 12.20 s (record 3), 10.12 s (record 4). Decode-8: 3.993 s/token (record 0), 3.384 s/token (record 1), 3.031 s/token (record 2), 2.325 s/token (record 3), 1.798 s/token (record 4). Dotted lines: 1 token/s, and GPT-2 unencrypted on the same GPU, 0.77 ms and 0.65 ms/token.">
   </picture>
 </p>
 
@@ -61,8 +62,11 @@ unencrypted on the same GPU (at the bottom, not to scale).
 | 1 | 22.22 | Perseus on [perseus‑core](crates), its Rust + CUDA runtime, with its own client | 2026‑10‑22 | [`89bc830`](https://github.com/gladia-research-group/perseus/tree/89bc830017fe12ab967ddb10c24feae65d8af6df) · [log](speedrun/records/2026-10-22_PerseusCore) | [@alexzilligmm](https://github.com/alexzilligmm)<br>[@Davide‑F5‑Marincione](https://github.com/Davide-F5-Marincione) |
 | 2 | 15.11 | PackedPrefill: GELU as one polynomial, the last block on the last position, packed attention, fewer bootstraps | 2026‑10‑24 | [`6f0ba44`](https://github.com/gladia-research-group/perseus/tree/6f0ba4452f73d44ab139b1348c89223d6689e7e4) · [log](speedrun/records/2026-10-24_PackedPrefill) | [@erodola](https://github.com/erodola) |
 | 3 | 12.20 | BabyStepPrefill: baby-step attention rotations, paired bootstraps, fewer bootstraps | 2026‑10‑26 | [`946694d`](https://github.com/gladia-research-group/perseus/tree/946694db552fc4858b68a314f35bf7ccb1c14893) · [log](speedrun/records/2026-10-26_BabyStepPrefill) | [@erodola](https://github.com/erodola) |
+| 4 | 10.12 | LeanChainPrefill: leaner key-switching chain, exactly pre-divided matrix products | 2026‑10‑27 | [`e3e6b6b`](https://github.com/gladia-research-group/perseus/tree/e3e6b6b5834f73766aaec531436f8808a5e276e3) · [log](speedrun/records/2026-10-27_LeanChainPrefill) | [@erodola](https://github.com/erodola) |
 |  | $`\color{gray}\textsf{0.00077}`$ | $`\color{gray}\textsf{Unencrypted GPT-2}`$ | $`\color{gray}\textsf{2026-10-24}`$ | [code](speedrun/records/plaintext.py) · [log](speedrun/records/plaintext.json) |  |
 
+- **Record 4, LeanChainPrefill**: Prefill-128 on Decode-8's shorter modulus chain, its matrix products' inputs
+  pre-divided exactly.
 - **Record 3, BabyStepPrefill**: attention rotates by baby and giant steps (116 rotation keys instead of 173), two
   bootstraps run as one where they can, and the plan has 460 bootstraps instead of 516.
 - **Record 2, PackedPrefill**: the GELU is one Chebyshev series in ten blocks instead of two polynomials with a
@@ -130,8 +134,8 @@ Records that change it:
 ### Track 1: Prefill-128
 
 - Server: the planned prefill, [`PlannedPrefill`](python/perseus/impl/prefill.py)
-- Plan: [`bootstrap_placements/gpt2_prefill128_pfbhrd_cm`](bootstrap_placements/gpt2_prefill128_pfbhrd_cm), made by
-  [`speedrun/make_prefill_plan.sh`](speedrun/make_prefill_plan.sh)
+- Plan: [`bootstrap_placements/gpt2_prefill128_n32a4_pfbhrd_cm`](bootstrap_placements/gpt2_prefill128_n32a4_pfbhrd_cm), on
+  the lean chain `n32a4`, made by `PRESET=n32a4 bash` [`speedrun/make_prefill_plan.sh`](speedrun/make_prefill_plan.sh)
 - In one process: [`scripts/repro/gpt2_prefill128.sh`](scripts/repro/gpt2_prefill128.sh), through
   [`run_prefill.py`](python/perseus/examples/gpt2/run_prefill.py)
 - [`prefill.py`](python/perseus/examples/gpt2/prefill.py) runs the 128 positions through the 12 blocks, packed as complex chunk
