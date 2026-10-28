@@ -222,11 +222,17 @@ fn gpt2_prefill_speedrun_pf_cm() {
     gate("gpt2_prefill128_pf_cm", "gpt2_prefill128_pf_cm");
 }
 
-/// The Prefill-128 plan the speedrun serves (speedrun/server.py): speedrun/make_prefill_plan.sh's, CutMax's scaled
-/// normalisers in stage 13.
+/// BabyStepPrefill's Prefill-128 plan: speedrun/make_prefill_plan.sh's, CutMax's scaled normalisers in stage 13.
+#[test]
+fn gpt2_prefill_speedrun_pfbhrd_cm() {
+    gate("gpt2_prefill128_pfbhrd_cm", "gpt2_prefill128_pfbh_cm");
+}
+
+/// The Prefill-128 plan the speedrun serves (speedrun/server.py): speedrun/make_prefill_plan.sh PRESET=n32a4's on the
+/// same captures, on the lean chain n32a4 (its runtime line's CHAIN_PRESET), CutMax's stage 13 on the ILP.
 #[test]
 fn gpt2_prefill_speedrun() {
-    gate("gpt2_prefill128_pfbhrd_cm", "gpt2_prefill128_pfbh_cm");
+    gate("gpt2_prefill128_n32a4_pfbhrd_cm", "gpt2_prefill128_pfbh_cm");
 }
 
 #[test]

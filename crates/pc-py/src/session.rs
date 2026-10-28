@@ -655,6 +655,10 @@ fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Op
             (setup.lt_tails, setup.em_fuse_rescale) = (lt_tails, em_fuse);
             let mut sfs = StcFirstSetup::n32_shipped();
             sfs.cache_slots = ps.stc_cache.max(1);
+            if pcmm.is_some() {
+                // a lean chain's PCMM inputs take their own fixed StC stages (no-op on a composite chain)
+                sfs.own_split = Some(pc_gpu::bts::stc_first::THIN_SPLIT_PCMM);
+            }
             if ccmm.is_some() {
                 // the CCMM operands' stc_high (50, skip 1) and SinCBoot's stage 0 for every left-operand state, plus
                 // the calibration probes' (fresh tokens at the bootstrap output level)
@@ -666,9 +670,11 @@ fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Op
                 sfs.high = Some(pc_gpu::bts::stc_high::StcHighSetup { shapes, slots: ps.stc_cache.max(4) });
             }
             let mut sp = StcFirstPlan::new(chain, &setup, &sfs).map_err(e)?;
-            // refresh pairs (bts.pair): the compile pairs CFs up to PAIR_CF_MAX, run_pair takes CFs below cf_ref
-            if ps.programs.iter().any(|p| p.batch_report.pairs > 0) && pc_program::program::PAIR_CF_MAX + 1 != sp.sf.cf_ref {
-                return Err(PyValueError::new_err(format!("refresh pairs up to CF {} on an StC-first route of reference CF {}", pc_program::program::PAIR_CF_MAX, sp.sf.cf_ref)));
+            // refresh pairs (bts.pair): the compile pairs CFs up to PAIR_CF_MAX (a lean chain's: PAIR_CF_MAX_LEAN),
+            // run_pair takes CFs below cf_ref
+            let pair_max = if chain.lone_top().is_some() { pc_program::program::PAIR_CF_MAX_LEAN } else { pc_program::program::PAIR_CF_MAX };
+            if ps.programs.iter().any(|p| p.batch_report.pairs > 0) && pair_max + 1 != sp.sf.cf_ref {
+                return Err(PyValueError::new_err(format!("refresh pairs up to CF {pair_max} on an StC-first route of reference CF {}", sp.sf.cf_ref)));
             }
             // a captured graph reads the entries its refreshes used: the cache holds every key the programs ask for
             let keys = stc_first_keys(&ps.programs, n, (chain.q.len() - 1 - sp.entry_top) as u32, sp.sf.cf_default.unwrap_or(13), sp.sf.cf_ref);

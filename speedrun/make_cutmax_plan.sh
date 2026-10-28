@@ -6,7 +6,8 @@
 # gpt2_base_n32_cm / gpt2_base_n32_pf_cm) must be BASE's configs with that cutmax section, and the capture binds when
 # BASE's runtime shapes the op stream as the capture's did (stage 13's stamp equals stage 12's); both are checked.
 # CUTMAX_GRAPH: another Decode-8 capture whose stage 13 has those magnitudes, taken under BASE's runtime.
-# CUTMAX_PLACER=ilp: Decode-8's stage 13 on the recipe's ILP placer instead of the min-cut.
+# CUTMAX_PLACER=ilp: stage 13 on the ILP placer (Decode-8: the recipe's; Prefill-128: with the quality weight) instead of
+# the min-cut.
 #   bash speedrun/make_cutmax_plan.sh gpt2_decode_python_n32_m16i_fcf gpt2_decode_python_n32_m16i_fcf_cm
 #   TRACK=prefill bash speedrun/make_cutmax_plan.sh gpt2_prefill128_pf gpt2_prefill128_pf_cm
 #   TRACK=prefill GR=graphs/gpt2_prefill128_pfbh_cm bash speedrun/make_cutmax_plan.sh gpt2_prefill128_pfbh \
@@ -30,6 +31,11 @@ if [ "${TRACK:-decode}" = prefill ]; then
         PLAN_REFRESH_ENV_CAP_ROUTES=0:46 PLAN_RAISE_DROP_MAX=0 PLAN_RAISE_ROUTES=0 PLAN_SLIM_CUBIC=1 \
         PLAN_RAISE_LANDING_MAX=42 PLAN_STC_FIRST_ENTRY=46 PLAN_STC_FIRST_FALLBACK=34:1
     RECIPE="" HOW="make_prefill_plan.sh's argmax env"
+    if [ "${CUTMAX_PLACER:-min_cut}" = ilp ]; then
+        # the blocks' ILP (tie-break) with the quality weight on stage 13
+        export PLAN_PLACER=ilp PLAN_ILP_TIME_LIMIT=3600 PLAN_ILP_TIEBREAK=1 PLAN_QUALITY_WEIGHT=1
+        HOW="make_prefill_plan.sh's argmax env on the ILP placer (CUTMAX_PLACER=ilp: PLAN_PLACER=ilp PLAN_ILP_TIEBREAK=1 PLAN_QUALITY_WEIGHT=1)"
+    fi
 else
     CM=configs/model/approximation/gpt2_base_n32_cm/configs.json GR=${CUTMAX_GRAPH:-graphs/gpt2_decode_python_n32_cm}
     RECIPE=$(sed -n 's/^recipe=//p' "bootstrap_placements/$BASE/PLAN_CMD.txt")

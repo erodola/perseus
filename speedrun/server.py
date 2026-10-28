@@ -33,8 +33,9 @@ STEPS = 16
 # decode plan's to 1024-token windows); it runs on the lean chain n32a4 (its runtime line's CHAIN_PRESET:
 # speedrun/make_n32a4_decode_plan.sh)
 DECODE_PLAN = "bootstrap_placements/gpt2_decode_python_n32a4_kc16r_cm"
-# speedrun/make_prefill_plan.sh's plan with CutMax's scaled normalisers (stage 13 replanned: its PLAN_CMD.txt), on n32
-PREFILL_PLAN = "bootstrap_placements/gpt2_prefill128_pfbhrd_cm"
+# speedrun/make_prefill_plan.sh's plan with CutMax's scaled normalisers (stage 13 replanned: its PLAN_CMD.txt), on the
+# lean chain n32a4 too (PRESET=n32a4; its runtime line's CHAIN_PRESET)
+PREFILL_PLAN = "bootstrap_placements/gpt2_prefill128_n32a4_pfbhrd_cm"
 
 
 def write(root, rel, payload):

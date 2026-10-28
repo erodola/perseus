@@ -73,6 +73,7 @@ if [[ -n "${PLAN_ILP_GAP:-}"        ]]; then args+=(--ilp-gap "$PLAN_ILP_GAP"); 
 if [[ -n "${PLAN_ILP_OBJECTIVE:-}"  ]]; then args+=(--ilp-objective "$PLAN_ILP_OBJECTIVE");   fi
 if [[ -n "${PLAN_ILP_FREE_EXIT:-}"  ]]; then args+=(--ilp-free-exit);                         fi
 if [[ -n "${PLAN_ILP_EXIT_CAP:-}"   ]]; then args+=(--ilp-exit-cap "$PLAN_ILP_EXIT_CAP");     fi
+if [[ -n "${PLAN_PCMM_PREDIV_CAP:-}" ]]; then args+=(--pcmm-prediv-cap "$PLAN_PCMM_PREDIV_CAP"); fi
 if [[ -n "${PLAN_ILP_TIEBREAK:-}"   ]]; then args+=(--ilp-tiebreak);                          fi
 if [[ -n "${PLAN_BASELINE_RESCUE:-}"   ]]; then args+=(--baseline-rescue);                          fi
 if [[ -n "${PLAN_BASELINE_DEPTH_CAP:-}" ]]; then args+=(--baseline-depth-cap "$PLAN_BASELINE_DEPTH_CAP"); fi
