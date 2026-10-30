@@ -123,6 +123,7 @@ def decode(a):
             wait(a.inbox, f"{k}/{j}")
             _h, outs = h.run({"t": j, "argmax": True}, [read(a.inbox, f"{k}/{j}")], None)
             write_packed(a.outbox, f"{k}/{j}", outs)
+            h.ahead((j + 1) % STEPS)                # the next position's patch while the client turns around
         k += 1
     h.run_.close()
     return 0

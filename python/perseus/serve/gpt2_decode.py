@@ -101,6 +101,10 @@ class Gpt2Handler:
         s, k = r.sess.setup_seconds()
         return {"session_s": round(s, 2), "import_s": round(k, 2), "keys": r.sess.n_keys(), "has_secret": r.sess.has_secret}
 
+    def ahead(self, t):
+        """Position t's patch, applied before its input arrives (PlannedRun.patch_ahead)."""
+        return self.run_.patch_ahead(t)
+
     def run(self, h, frames, ask):
         _pc, r = self._pc, self.run_
         t = int(h["t"])
