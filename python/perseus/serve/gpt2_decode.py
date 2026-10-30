@@ -108,11 +108,14 @@ class Gpt2Handler:
         r.inputs[t] = _pc.import_ct(r.sess, frames[0])
         t1 = time.time()
         reg, rec = r.token(t, self.rows, self.argmax)
+        # CutMax is issued behind the forward before either output is exported (an export waits for the device), so
+        # the device runs it straight after the forward; it reads the logits' register and leaves it as it was
+        z = r.argmax(t) if h.get("argmax") else None
         lg = _pc.export_ct(r.sess, r.ct(reg))
         t2 = time.time()
         out = [lg]
-        if h.get("argmax"):
-            out.append(_pc.export_ct(r.sess, r.ct(r.argmax(t))))
+        if z is not None:
+            out.append(_pc.export_ct(r.sess, r.ct(z)))
         t3 = time.time()
         return {"t": t, "import_s": t1 - t0, "fwd_s": t2 - t1, "argmax_s": t3 - t2, "server_s": t3 - t1, **rec}, out
 
