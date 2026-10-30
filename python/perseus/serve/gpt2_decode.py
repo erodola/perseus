@@ -74,7 +74,7 @@ class Gpt2Handler:
                 return x
 
         self.run_ = Served(Recorder(model, self.n), plan, cfg, labels, keys, work_dir=os.path.join(a.work_dir, "ref"),
-                           pt_rows=a.pt_rows, stc_cache=a.stc_cache)
+                           pt_rows=a.pt_rows, stc_cache=a.stc_cache, pt_cache=getattr(a, "pt_cache", False))
         self.rows = None
         self.argmax = False
 
@@ -204,6 +204,8 @@ def main(argv=None):
     ap.add_argument("--key-layout", choices=("dense", "packed"), default="packed")
     ap.add_argument("--pt-rows", type=int, default=28)
     ap.add_argument("--stc-cache", type=int, default=8)
+    ap.add_argument("--pt-cache", action="store_true", help="encode every position's plaintexts at setup (PlannedRun "
+                    "pt_cache: 7.4 GB at 16 tokens) and copy them per token")
     ap.add_argument("--threads", type=int, default=8, help="client keygen threads")
     ap.add_argument("--work-dir", default=os.path.join(os.environ.get("PC_WORK_DIR", "/tmp"), "m12_served"))
     ap.add_argument("--out", default=None)
