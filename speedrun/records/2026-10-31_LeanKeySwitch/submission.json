@@ -11,7 +11,7 @@
       "affiliation": "Sapienza University of Rome"
     }
   ],
-  "summary": "Record 4's code and plans with the served decode's host work trimmed (every position's plaintexts encoded once at setup and copied into their slots per token, CutMax issued behind the forward, ciphertext frames imported and exported in place, the next position's patch applied ahead of its input; byte-identical outputs), Decode-8's SparseB refreshes on the degree-14 EvalMod series (K = 16), as Prefill-128's, and a leaner key switch for both tracks (base conversion's pre factors folded into the INTT's last pass, double-word sums reduced in 32-bit Shoup products, L2 prefetch of the next key reads in CtS and the inner product, the NTT row passes at five blocks per SM; byte-identical outputs).",
+  "summary": "Record 4's code and plans with the served decode's host work trimmed (every position's plaintexts encoded once at setup and copied into their slots per token, CutMax issued behind the forward, ciphertext frames imported and exported in place, the next position's patch applied ahead of its input; byte-identical outputs), Decode-8's SparseB refreshes on the degree-14 EvalMod series (K = 16), as Prefill-128's, a leaner key switch for both tracks (base conversion's pre factors folded into the INTT's last pass, double-word sums reduced in 32-bit Shoup products, L2 prefetch of the next key reads, a leaner NTT, CtS and base conversion at higher occupancy, chains of plaintext products in one pass; byte-identical outputs) and leaner bootstraps (CtS stage 0 and one StC stage with their giant steps folded, EvalMod's rescales fused with their relinearizations and two alignment rescales dropped; same levels, scales and plans).",
   "ckks": {
     "log_n": 16,
     "log_qp": 1734,
@@ -48,14 +48,14 @@
   "dev_result": {
     "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
     "prefill": {
-      "request_s": 9.842,
+      "request_s": 9.185,
       "record_request_s_same_gpu": 10.13,
-      "mean_kl": 8.64e-06
+      "mean_kl": 7.8e-06
     },
     "decode": {
-      "s_per_token": 1.645,
-      "record_s_per_token_same_gpu": 1.793,
-      "mean_kl": 4.28e-06
+      "s_per_token": 1.53,
+      "record_s_per_token_same_gpu": 1.795,
+      "mean_kl": 2.96e-06
     }
   }
 }

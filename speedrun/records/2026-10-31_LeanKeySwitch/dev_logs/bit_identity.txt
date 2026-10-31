@@ -45,3 +45,37 @@ request 0: times [9.837]
 request 1: times [9.823]
 outputs byte-identical: 2/2
 == 12:20:52 done
+
+# The bootstrap commits' successors (the NTT; CtS's occupancy and resident tails; base conversion over a wave and the
+# product chains): one key bundle and one set of input ciphertexts saved against the bootstrap commits' server (sr-ia),
+# then fed to each later group's server (sr-ib = the NTT, sr-ic = CtS, sr-int = this entry); same protocol, dev GPU.
+== 15:01:08 save on sr-ia
+request 0: times [2.303, 1.602, 1.599, 1.597, 1.596, 1.596, 1.597, 1.597, 1.597, 1.597, 1.599, 1.597, 1.597, 1.596, 1.597, 1.599] max KL 0.000115
+request 1: times [1.599, 1.598, 1.597, 1.598, 1.6, 1.599, 1.598, 1.598, 1.6, 1.599, 1.599, 1.6, 1.603, 1.6, 1.598, 1.599] max KL 0.000238
+== 15:03:17 load on sr-ib
+manifest same
+request 0: times [2.223, 1.553, 1.551, 1.554, 1.551, 1.55, 1.551, 1.551, 1.551, 1.551, 1.551, 1.551, 1.551, 1.551, 1.551, 1.552]
+request 1: times [1.55, 1.55, 1.553, 1.551, 1.554, 1.555, 1.551, 1.551, 1.554, 1.553, 1.553, 1.555, 1.551, 1.551, 1.552, 1.552]
+outputs byte-identical: 32/32
+== 15:05:06 load on sr-ic
+manifest same
+request 0: times [2.206, 1.526, 1.526, 1.526, 1.526, 1.528, 1.527, 1.525, 1.526, 1.526, 1.526, 1.525, 1.526, 1.527, 1.528, 1.53]
+request 1: times [1.531, 1.526, 1.526, 1.526, 1.527, 1.526, 1.528, 1.53, 1.527, 1.527, 1.529, 1.529, 1.53, 1.528, 1.528, 1.526]
+outputs byte-identical: 32/32
+== 15:06:55 load on sr-int
+manifest same
+request 0: times [2.145, 1.517, 1.518, 1.519, 1.518, 1.518, 1.517, 1.518, 1.518, 1.517, 1.52, 1.52, 1.518, 1.52, 1.518, 1.52]
+request 1: times [1.522, 1.52, 1.518, 1.518, 1.518, 1.518, 1.52, 1.521, 1.522, 1.519, 1.518, 1.519, 1.519, 1.521, 1.521, 1.518]
+outputs byte-identical: 32/32
+== 15:08:48 done
+
+# Prefill-128, same protocol: saved against the bootstrap commits' server, fed to this entry's (2 requests).
+== 15:08:56 save on sr-ia
+request 0: times [9.624] max KL 6.6e-06
+request 1: times [9.606] max KL 1.12e-05
+== 15:10:56 load on sr-int
+manifest same
+request 0: times [9.177]
+request 1: times [9.163]
+outputs byte-identical: 2/2
+== 15:12:35 done
