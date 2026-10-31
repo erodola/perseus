@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import mmap
 import os
 import struct
 import sys
@@ -81,8 +82,11 @@ def unpacked(payload, most=64):
 
 
 def read(root, rel):
-    with open(os.path.join(root, rel), "rb") as f:          # the payload read straight into its bytes (no slice copy)
-        return f.read(HEADER.unpack(f.read(HEADER.size))[0])
+    """The payload as a read-only view of the file mapped in place (no copy into a bytes object)."""
+    with open(os.path.join(root, rel), "rb") as f:
+        n = HEADER.unpack(f.read(HEADER.size))[0]
+        m = mmap.mmap(f.fileno(), HEADER.size + n, flags=mmap.MAP_SHARED | mmap.MAP_POPULATE, prot=mmap.PROT_READ)
+    return memoryview(m)[HEADER.size:]
 
 
 def wait(root, *rels):
@@ -90,7 +94,7 @@ def wait(root, *rels):
         for rel in rels:
             if os.path.exists(os.path.join(root, rel)):
                 return rel
-        time.sleep(0.0005)
+        time.sleep(0.00005)
 
 
 def main():
