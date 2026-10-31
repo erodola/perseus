@@ -58,7 +58,10 @@ load = lambda p: json.load(open(PKG / p))
 b, c = load(env.plan_configs(base, "n32")), load(configs)
 if {k: v for k, v in b.items() if k != "cutmax"} != {k: v for k, v in c.items() if k != "cutmax"}:
     sys.exit(f"{configs}: not {base}'s configs outside the cutmax section (stages 0-12 would not bind)")
-if c["cutmax"] != load(cm)["cutmax"]:
+# the op-stream switches of the scaled CutMax (spru_mean, newton_fold, conj_once, entry_dd) change stage 13's
+# capture, not its magnitudes' source: the capture named by CUTMAX_GRAPH must have been taken with them
+form = ("spru_mean", "newton_fold", "conj_once", "entry_dd")
+if {k: v for k, v in c["cutmax"].items() if k not in form} != load(cm)["cutmax"]:
     sys.exit(f"{configs}: the cutmax section is not {cm}'s (the capture of stage 13 would not bind)")
 PY
 rm -rf "bootstrap_placements/$OUT" && cp -r "bootstrap_placements/$BASE" "bootstrap_placements/$OUT"
