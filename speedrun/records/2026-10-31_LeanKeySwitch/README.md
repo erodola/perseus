@@ -269,6 +269,8 @@ The second part:
   and shapes in `crates/pc-client/src/{client,spec,ntt}.rs`, the prime sizes it bounds moduli with in
   `crates/pc-py/src/client.rs`; the switches in `crates/pc-config` and `crates/pc-py/src/session.rs`; the served plans'
   runtime lines.
+- **pc-bench:** a stray profiler-range close from the key-set commit removed (`crates/pc-tools/src/bts_all.rs`:
+  `prof` was never defined, so pc-tools did not compile).
 - **Planned generation's feedback:** `fb_tiles` in `python/perseus/examples/gpt2/model.py` embeds the next token with
   the unfolded LM head (with `lnf_fold` on, the head's tiles are γ-scaled; the served decode takes every position's
   input from the client and does not run the feedback).
@@ -350,11 +352,12 @@ pairs A B A B (`lh_*`).
 
 The speedrun harness on one RTX PRO 6000 Blackwell Server Edition (96 GB; the server pinned to its NUMA node,
 `NUMA=3:3,4`), 6 pairs in the order AB BA BA AB AB BA per job, dev prompts 0-1, two requests per run, scored by
-`score.py`, one job per track: this entry (`e62e79e` with its client `perseus_keyset_client.py`) against the first part
-(`bc06718`'s code with record 4's lean client `24d4b3f`), logs `kfinal_*` and `kpre_*`; and, in an earlier pair of jobs
-on the same GPU, this entry before the LayerNorm commits (`cc13296`, the same Prefill-128) against record 4 (`d97a6f7`
-with `24d4b3f`), logs `efinal_*` and `epre_*`. GPU 5 (on GPU 4's PCIe switch) idle through all four jobs; another user's
-job kept GPU 6 busy in most runs (`*_contention.tsv`).
+`score.py`, one job per track: this entry (`e62e79e` with its client `perseus_keyset_client.py`, which pins `811eadc`:
+`e62e79e` plus a pc-bench compile fix the served code does not build) against the first part (`bc06718`'s code with
+record 4's lean client `24d4b3f`), logs `kfinal_*` and `kpre_*`; and, in an earlier pair of jobs on the same GPU, this
+entry before the LayerNorm commits (`cc13296`, the same Prefill-128) against record 4 (`d97a6f7` with `24d4b3f`), logs
+`efinal_*` and `epre_*`. GPU 5 (on GPU 4's PCIe switch) idle through all four jobs; another user's job kept GPU 6 busy
+in most runs (`*_contention.tsv`).
 
 | Track | Score | The first part, same job | Record 4, same GPU | KL | Argmax (scored) | Peak GPU memory |
 |---|---|---|---|---|---|---|
@@ -485,7 +488,7 @@ published 10.12.
   in blocks 4 and 5), Prefill-128 record 4's `_cm` with its PCMM finishes raised; their runtime lines gain
   `FIDESLIB_BTS_SPARSE_B_K=16` (Decode-8), `PC_BTS_MERGE_S2D=1 PC_BTS_STC_PS=6 PC_EM_LEVEL_KEYS=1`,
   `FIDESLIB_CTS_ALT_BUDGET=5` and the drop switches. CutMax's approximation changes as above; the others are record 4's.
-  The client is `perseus_keyset_client.py`, pinned to `e62e79e`.
+  The client is `perseus_keyset_client.py`, pinned to `811eadc` (`e62e79e` plus a pc-bench compile fix).
 - **Planned generation.** With `lnf_fold` on, `generate`'s encrypted feedback built the next token's embedding from the
   γ-scaled head; `c371e9f` builds it from the unfolded one. The served decode takes every position's input from the
   client and does not run the feedback, so this changes no timed output.

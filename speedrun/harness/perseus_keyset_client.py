@@ -22,7 +22,7 @@ import json
 import os
 from types import SimpleNamespace
 
-PERSEUS = "e62e79e763b2b8e67b107b8f389ab9201ee61022"     # the Perseus commit this client runs (runner/run.py)
+PERSEUS = "811eadc02d8938ca825e508525f8ece56f4a7f6c"     # the Perseus commit this client runs (runner/run.py)
 CHAINS = ("n32", "n32a4")
 VOCAB = 50257
 SPRU_H = 64                                            # the SPRU block key: a single 1 in each of 64 blocks
