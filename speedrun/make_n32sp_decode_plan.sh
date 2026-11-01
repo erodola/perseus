@@ -88,10 +88,23 @@ PY
 fi
 # shellcheck disable=SC2086
 env $RECIPE bash python/perseus/examples/gpt2/make_plan.sh "$GM" "$OUT" feedback
+# the provenance lines (tool, the configs' description, acc_table, oracle, capture, configs_from, solver, capture13)
 { echo "graph=$GM"
+  cat <<'EOF'
+tool=speedrun/make_n32sp_decode_plan.sh: blocks 0-11 by make_plan.sh blocks (the recipe below, ILP) on graphs/gpt2_decode_python_n32sp_kc16r_lhm's blocks 0-11; stage 12 alone at block 11's exit (48:1) with PLAN_ILP_EXIT_CAP=52 (exit 44:2); make_plan.sh feedback; stage 13 by make_cutmax_plan.sh (the cutmax= line); then the rd= pass. The recipe is gpt2_decode_python_n32a4_kc16r_lh's with the levels counted from the bottom 6 units deeper on n32sp's level grid (its last 9 knobs): every landing is n32a4's
+EOF
   echo "recipe=$RECIPE"
   echo "runtime=$RUNTIME"
-  echo "configs=$CFG"; } > "bootstrap_placements/$OUT/PLAN_CMD.txt"
+  cat <<'EOF'
+configs=configs/model/approximation/gpt2_base_n32_kc16r_cmfl_lh/configs.json  (_cmfl's with key_lanes 16 on every softmax; the LayerNorm statistics from one 1-slot refresh (spru) on ln_2 of blocks 1, 2, 3, 7, 10 and ln_1 of blocks 2, 3, 4, 10, 11, on one complex ladder (zladder) on the other 14 block LNs; ln_f as _cmfl)
+acc_table=8dc653fa405969c75f3804a0edfdfe80
+oracle=the capture's input (ALL_BLOCKS_IO_DIR): the repo's oracle row (scripts/utils/gen_gpt2_oracle.py, $PERSEUS_DATA/oracle/gpt2/all_blocks_io), as for gpt2_decode_python_n32_kc16
+capture=graphs/gpt2_decode_python_n32sp_kc16r_lh_p0 (not kept): FAKECAP_SPARSE_EXACT=1 FAKECAP_STC_ENTRY=52 run_decode --fake --tokens 1 --argmax --capture with gpt2_base_n32_kc16r_cmfl_lh and this runtime= line less FIDESLIB_BTS_SPARSE_B_K and the key-set switches (PC_BTS_MERGE_S2D, PC_BTS_STC_PS, PC_EM_LEVEL_KEYS) as --set (position 0 of the oracle row; the same command on gpt2_decode_python_n32a4_kc16r_lh's runtime gives graphs/gpt2_decode_python_n32_kc16r_lh's structure, node for node); graphs/gpt2_decode_python_n32sp_kc16r_lhm: FAKECAP_STC_ENTRY=52 BASE=<that capture> PLAN=<a plan dir with this runtime= and configs=> bash speedrun/make_decode_capture.sh (max over the 4 pool rows x positions 0-15)
+configs_from=python scripts/utils/fit_gpt2_decode16_ref.py --out python/perseus/configs/model/approximation/gpt2_base_n32_kc16r_cm/configs.json (gpt2_base_n32_kc16_cm with the softmax of blocks 0-7, 9 and 10 centred on per-head reference keys, fitted on OpenWebText shard 0042)
+solver=scipy 1.18.1 milp (HiGHS 1.12.0; numpy 2.5.4, Python 3.12.15), one HiGHS thread, real _pc; make_n32sp_decode_plan.sh's chain with the recipe= line. In every block the ILP and its tie-break are proven optimal (an unproven solve stops the planner); on one Xeon core stage 12 takes ~2 min of solver time, every other stage < 30 s, inside the recipe's PLAN_ILP_TIME_LIMIT=3600. Tested with these versions only (pyproject allows scipy>=1.17): another scipy / HiGHS may stop the planner on an unproven solve or, untested, return another plan; regenerate with these
+capture13=graphs/gpt2_decode_python_n32sp_kc16r_lh_cm: the position-0 capture's stage 13, its magnitudes capture_mags --argmax --rows (the logit rows of graphs/gpt2_decode_python_n32_cm/cutmax_rows.json) --blocks 13, and the merged capture's stage 12
+EOF
+} > "bootstrap_placements/$OUT/PLAN_CMD.txt"
 # 3. stage 13
 if ! resume || [ ! -f "$G13/block_13/graph.json" ]; then
     rm -rf "$G13" && mkdir -p "$G13"
