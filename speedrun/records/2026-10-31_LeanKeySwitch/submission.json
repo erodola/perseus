@@ -11,12 +11,12 @@
       "affiliation": "Sapienza University of Rome"
     }
   ],
-  "summary": "Record 4's code and plans with the served decode's host work trimmed (every position's plaintexts encoded once at setup and copied into their slots per token, CutMax issued behind the forward, ciphertext frames imported and exported in place, the next position's patch applied ahead of its input; byte-identical outputs), Decode-8's SparseB refreshes on the degree-14 EvalMod series (K = 16), as Prefill-128's, a leaner key switch for both tracks (base conversion's pre factors folded into the INTT's last pass, double-word sums reduced in 32-bit Shoup products, L2 prefetch of the next key reads, a leaner NTT, CtS and base conversion at higher occupancy, chains of plaintext products in one pass; byte-identical outputs) and leaner bootstraps (CtS stage 0 and one StC stage with their giant steps folded, EvalMod's rescales fused with their relinearizations and two alignment rescales dropped; same levels, scales and plans).",
+  "summary": "Record 4's code and plans with the served decode's host work trimmed (position plaintexts encoded once at setup, CutMax issued behind the forward, ciphertext frames in place, the next position's patch ahead of its input), Decode-8's SparseB refreshes on the degree-14 EvalMod series (K = 16), a leaner key switch and leaner bootstraps for both tracks; then EvalMod's executor fusions, a third round of key-switch kernels with hoisted rotation sums summed inside the key dots, the replay's copies removed, a rotation's Q rows on a second stream, the decode linears with fewer roundings, a shorter CutMax (11 refreshes per token instead of 13, ln_f folded into the LM head), Decode-8's LayerNorm statistics from one refresh or one complex ladder and its attention ladders over the 16 keys' lanes, raise drops on deliberate refreshes, and a key set of their own (SparseRot keys, StC-first's input stages over 6 special primes, level relinearization keys; every new key under the dense main secret at a modulus of at most the main key's, checked key by key by the entry's client).",
   "ckks": {
     "log_n": 16,
     "log_qp": 1734,
     "secret": "uniform-ternary",
-    "chain": "n32a4: record 3's n32 without its StC-first prime ids 5-7 (51 Q primes), dnum 4 (13/13/13/12); Prefill-128 stays on n32",
+    "chain": "n32a4 on both tracks: record 3's n32 without its StC-first prime ids 5-7 (51 Q primes), dnum 4 (13/13/13/12)",
     "dnum": 4,
     "special_primes": "record 3's 9 and 158334977, 158072833, 155189249, 154533889 (P 360.5 bits)",
     "sparse_keys": [
@@ -33,7 +33,7 @@
       {
         "role": "PCMM ring switch (Prefill-128)",
         "secret": "ternary on ring dimension 4096",
-        "modulus": "q_0 q_1 P of record 3's chain, on which Prefill-128 stays"
+        "modulus": "q_0 q_1 P (87.0 bits): record 3's primes q_0, q_1 and P = 2147352577, unchanged on n32a4"
       }
     ]
   },
@@ -48,14 +48,14 @@
   "dev_result": {
     "gpu": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
     "prefill": {
-      "request_s": 9.185,
+      "request_s": 7.084,
       "record_request_s_same_gpu": 10.13,
-      "mean_kl": 7.8e-06
+      "mean_kl": 8.44e-06
     },
     "decode": {
-      "s_per_token": 1.53,
+      "s_per_token": 1.217,
       "record_s_per_token_same_gpu": 1.795,
-      "mean_kl": 2.96e-06
+      "mean_kl": 3.43e-06
     }
   }
 }
