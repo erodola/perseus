@@ -3,7 +3,7 @@
   "heuristic_config": "min_cut",
   "input_graph": {
     "version": 1,
-    "num_nodes": 1154,
+    "num_nodes": 1171,
     "num_nodes_deliberate_bootstrap": 1,
     "num_nodes_optimized": 1144
   },

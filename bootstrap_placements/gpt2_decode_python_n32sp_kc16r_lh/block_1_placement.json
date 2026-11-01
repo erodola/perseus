@@ -3,7 +3,7 @@
   "heuristic_config": "min_cut",
   "input_graph": {
     "version": 1,
-    "num_nodes": 1130,
+    "num_nodes": 1209,
     "num_nodes_deliberate_bootstrap": 1,
     "num_nodes_optimized": 1122
   },
@@ -2386,9 +2386,9 @@
       "num_sites": 6,
       "predicted_rel_err": {
         "median": 1.451870553848525e-05,
-        "p90": 0.001401956324541558,
-        "p99": 0.001401956324541558,
-        "max": 0.001401956324541558
+        "p90": 0.0014019563245415575,
+        "p99": 0.0014019563245415575,
+        "max": 0.0014019563245415575
       },
       "num_sites_missing_target": 0,
       "cf_histogram": {
@@ -2409,7 +2409,7 @@
       "worst_sites": [
         {
           "var": "v_963",
-          "rel_err": 0.001401956324541558,
+          "rel_err": 0.0014019563245415575,
           "max_abs": 18.310748874512885,
           "pack_period": 32768,
           "step": "blk1.down"

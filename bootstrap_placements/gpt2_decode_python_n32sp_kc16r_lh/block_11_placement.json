@@ -3,7 +3,7 @@
   "heuristic_config": "min_cut",
   "input_graph": {
     "version": 1,
-    "num_nodes": 1372,
+    "num_nodes": 1373,
     "num_nodes_deliberate_bootstrap": 1,
     "num_nodes_optimized": 1356
   },
@@ -2921,7 +2921,7 @@
         },
         {
           "var": "v_414",
-          "rel_err": 3.2020419973468983e-06,
+          "rel_err": 3.2020419973468987e-06,
           "max_abs": 5.36878350907773,
           "pack_period": 512,
           "step": "blk11.softmax"

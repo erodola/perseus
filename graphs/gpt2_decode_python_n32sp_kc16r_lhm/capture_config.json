@@ -79,7 +79,8 @@
     "sm_periodic": 1
   },
   "quirks": {
-    "fakecap_sparse_exact": true
+    "fakecap_sparse_exact": true,
+    "fakecap_stc_entry": 52
   },
   "exec": {
     "all_blocks_io_dir": "/work/erodola/perseus/data/oracle/gpt2/all_blocks_io",

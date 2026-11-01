@@ -3,7 +3,7 @@
   "heuristic_config": "ilp",
   "input_graph": {
     "version": 1,
-    "num_nodes": 2300,
+    "num_nodes": 2297,
     "num_nodes_deliberate_bootstrap": 0,
     "num_nodes_optimized": 2293
   },
@@ -73,7 +73,7 @@
       "objective": 3.000091997820001,
       "bound": 3.0000925064086914,
       "gap": 0.0,
-      "solve_s": 103.32,
+      "solve_s": 101.84,
       "objective_kind": "total",
       "pruned": 1
     },

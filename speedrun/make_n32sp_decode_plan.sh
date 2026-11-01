@@ -8,8 +8,11 @@
 # raise-dropped landings to 48, StC-first's entry 52. Raise drops keep EvalMod on its pairs: SparseB to a total drop of
 # 3 and SPRU to 6 (deeper, EvalMod would run on the user region's 2^36 / 2^44.15 levels); no dense drop, so no K/V push
 # raise. The runtime line is _lh's with CHAIN_PRESET=n32sp, the reactive ceiling and the input guard 6 deeper
-# (AUTO_BTS_LEVEL=50, BTS_MAX_INPUT_LEVEL=54), SparseB's raise variants 1-3, and no KV_PUSH_RAISE or
-# FIDESLIB_CTS_ALT_BUDGET (dense drops only). Steps:
+# (AUTO_BTS_LEVEL=50, BTS_MAX_INPUT_LEVEL=54), SparseB's raise variants 1-3, no KV_PUSH_RAISE or
+# FIDESLIB_CTS_ALT_BUDGET (dense drops only), and the CPU twin's StC-first entry at n32sp's (FAKECAP_STC_ENTRY=52):
+# the twin lands a deliberate dense refresh (the K/V push) where the runtime's StC-first route does, not at the
+# shipped order's landing the n32 entry (46) would give an input at 48, which the compile would then reach by a dense
+# raise drop into the user region. Steps:
 #   1. the position-0 capture under that runtime (run_decode --fake, as _lh's: FAKECAP_SPARSE_EXACT=1, the switches that
 #      do not shape the op stream left out) and the merged capture, speedrun/make_decode_capture.sh (4 rows of the
 #      OpenWebText calibration pool x positions 0-15) -> graphs/gpt2_decode_python_n32sp_kc16r_lhm
@@ -33,7 +36,9 @@ CAP=52
 RUNTIME="$(sed -n 's/^runtime=//p' "$REC/PLAN_CMD.txt" | sed -e 's/CHAIN_PRESET=n32a4/CHAIN_PRESET=n32sp/' \
     -e 's/AUTO_BTS_LEVEL=44/AUTO_BTS_LEVEL=50/' -e 's/BTS_MAX_INPUT_LEVEL=48/BTS_MAX_INPUT_LEVEL=54/' \
     -e 's/FIDESLIB_BTS_RAISE_DROPS=[^ ]*/FIDESLIB_BTS_RAISE_DROPS=1,2,3/' -e 's/ KV_PUSH_RAISE=[^ ]*//' \
-    -e 's/ FIDESLIB_CTS_ALT_BUDGET=[^ ]*//' -e 's/  */ /g')"
+    -e 's/ FIDESLIB_CTS_ALT_BUDGET=[^ ]*//' -e 's/  */ /g') FAKECAP_STC_ENTRY=52"
+# the twin reads its quirks from the environment (a --set reaches the session's Config only): the captures' twin too
+export FAKECAP_STC_ENTRY=52
 LEVELS="MAX_LEVEL=54 PLAN_REFRESH_ENV_CAP=54 PLAN_REFRESH_ENV_CAP_STEPS=cutmax:54,tail:54 PLAN_REFRESH_ENV_CAP_ROUTES=0:52 \
 PLAN_RAISE_LANDING_MAX=48 PLAN_STC_FIRST_ENTRY=52 PLAN_RAISE_ROUTES=512,1 PLAN_RAISE_DROP_SET=1,2,3 PLAN_RAISE_DROP_MAX=6"
 RECIPE="$(sed -n 's/^recipe=//p' "$REC/PLAN_CMD.txt") $LEVELS"
