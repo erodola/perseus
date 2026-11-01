@@ -9,7 +9,7 @@
 use crate::context::{Context, DevStrategy, DevWord};
 use crate::error::{shape, Result};
 use crate::executor::Executor;
-use crate::keys::{DevKsk, DevSecret, KeyRole, KeySet, KskShape, KskStore};
+use crate::keys::{DevKsk, DevSecret, KeyRole, KeySet, KskShape, KskStore, LevelRelinSpec};
 use crate::ntt::{self, Dir, RowList};
 use crate::poly::{CtBuf, Layout};
 use pc_core::galois;
@@ -31,7 +31,11 @@ pub struct KeyGen<'a, W: DevWord> {
     digit_of: ConstBuf<'a, i32>,
     /// sigma_{g^-1}(s) of the rotation being generated (part 0).
     perm: CtBuf<'a, Compute, W>,
+    /// The gadget (first kp special primes mod q) of shapes over a prefix of P other than P and P' (`stc_ps_kp`).
+    gadgets: BTreeMap<usize, crate::context::ScalarTable<'a, W>>,
     gauss: DiscreteGaussian,
+    /// Level relinearization keys (prototype): digit_of and (P' mod q, Shoup) by prime id, per limb top.
+    levels: BTreeMap<usize, (ConstBuf<'a, i32>, ConstBuf<'a, W>, ConstBuf<'a, W>)>,
 }
 
 /// Seconds spent per phase over a `generate_set` call.
@@ -50,11 +54,20 @@ impl<'a, W: DevWord> KeyGen<'a, W> {
         let mut sh: Vec<KskShape> = shapes.to_vec();
         sh.sort();
         sh.dedup();
+        let mut kps: Vec<usize> = sh.iter().map(|s| s.kp).filter(|&k| Self::own_gadget(lay, k)).collect();
+        kps.sort();
+        kps.dedup();
+        let gad = kps.len() * 2 * Arena::bytes_for::<W>(lay.rows());
         let tabs: usize = sh
             .iter()
             .map(|s| Arena::bytes_for::<i32>(s.rows()) + Arena::bytes_for::<u32>(s.ndig * s.rows()) + Arena::bytes_for::<i32>(s.ndig * s.rows()))
             .sum();
-        tabs + Arena::bytes_for::<i32>(lay.rows()) + Arena::bytes_for::<W>(CtBuf::<Compute, W>::words(lay, 1))
+        gad + tabs + Arena::bytes_for::<i32>(lay.rows()) + Arena::bytes_for::<W>(CtBuf::<Compute, W>::words(lay, 1))
+    }
+
+    /// A shape over `kp` special primes (a prefix of P: P', `stc_ps_kp`) takes its own gadget table.
+    fn own_gadget(lay: &Layout, kp: usize) -> bool {
+        kp < lay.kp
     }
 
     /// Build the tables for every shape in `shapes` (setup only, uploads synced on `s`).
@@ -72,13 +85,63 @@ impl<'a, W: DevWord> KeyGen<'a, W> {
             e_rows.insert(*sh, RowList::new(arena, s, &rl)?);
         }
         let dof: Vec<i32> = (0..lay.rows()).map(|id| chain.digit_of(id).map_or(-1, |d| d as i32)).collect();
+        let primes = chain.primes();
+        let mut gadgets = BTreeMap::new();
+        for sh in shapes {
+            if Self::own_gadget(&lay, sh.kp) && !gadgets.contains_key(&sh.kp) {
+                let mut v: Vec<u64> = chain.q.iter().map(|&q| chain.p[..sh.kp].iter().fold(1u64 % q, |a, &x| pc_core::modmul::mulmod(a, x % q, q))).collect();
+                v.resize(lay.rows(), 0);
+                gadgets.insert(sh.kp, crate::context::ScalarTable::new(arena, "keygen.gadget", s, &primes, &v)?);
+            }
+        }
         Ok(KeyGen {
+            gadgets,
             ids,
             e_rows,
             digit_of: ConstBuf::new(arena, "keygen.digit_of", s, &dof)?,
             perm: CtBuf::new(arena, "keygen.perm", lay, 1)?,
             gauss: DiscreteGaussian::new(DiscreteGaussian::SIGMA)?,
+            levels: BTreeMap::new(),
         })
+    }
+
+    /// Tables of the level relinearization keys `specs` (their shapes must be among `new`'s); setup only.
+    pub fn add_levels(&mut self, arena: &'a Arena, s: &Stream<Compute>, chain: &Chain, specs: &[LevelRelinSpec]) -> Result<()> {
+        let lay = Layout::from_chain(chain);
+        let primes = chain.primes();
+        for sp in specs {
+            let dof = sp.digit_of(lay.rows());
+            let pm = sp.pmod(&primes, lay.rows());
+            let (v, w): (Vec<W>, Vec<W>) = pm
+                .iter()
+                .enumerate()
+                .map(|(t, &x)| {
+                    let c = pc_core::modmul::shoup(W::from_u64(x % primes[t]), W::from_u64(primes[t]));
+                    (c.w, c.w_prime)
+                })
+                .unzip();
+            self.levels.insert(sp.top, (ConstBuf::new(arena, "keygen.levels", s, &dof)?, ConstBuf::new(arena, "keygen.levels", s, &v)?, ConstBuf::new(arena, "keygen.levels", s, &w)?));
+        }
+        Ok(())
+    }
+    /// Arena bytes of `add_levels`.
+    pub fn levels_bytes(lay: &Layout, nspecs: usize) -> usize {
+        nspecs * (Arena::bytes_for::<i32>(lay.rows()) + 2 * Arena::bytes_for::<W>(lay.rows()))
+    }
+
+    /// Generate the level relinearization key of limb top `top` (`add_levels` tables) into `key`.
+    pub fn generate_level<M: DevStrategy<W>>(
+        &mut self,
+        ctx: &Context<'_, W, M>,
+        ex: &mut Executor<'_, W>,
+        secret: &DevSecret<'_, W>,
+        key: &mut DevKsk<'_, W>,
+        top: usize,
+        prng: &mut Prng,
+    ) -> Result<(f64, f64)> {
+        let (d, v, w) = self.levels.get(&top).ok_or_else(|| shape("KeyGen::generate_level", format!("no level tables for top {top}")))?;
+        let ov = (d.dptr(), v.vptr(), w.vptr());
+        self.generate_with(ctx, ex, secret, key, prng, Some(ov))
     }
 
     /// Generate one key into `key` (its role, shape and layout) from `secret`; the seed and errors are drawn from
@@ -91,6 +154,20 @@ impl<'a, W: DevWord> KeyGen<'a, W> {
         key: &mut DevKsk<'_, W>,
         prng: &mut Prng,
     ) -> Result<(f64, f64)> {
+        self.generate_with(ctx, ex, secret, key, prng, None)
+    }
+
+    /// `generate` with the digit map and the gadget's (P mod q, Shoup) tables overridden (`ov`, level keys).
+    #[allow(clippy::too_many_arguments)]
+    fn generate_with<M: DevStrategy<W>>(
+        &mut self,
+        ctx: &Context<'_, W, M>,
+        ex: &mut Executor<'_, W>,
+        secret: &DevSecret<'_, W>,
+        key: &mut DevKsk<'_, W>,
+        prng: &mut Prng,
+        ov: Option<(*const i32, *const c_void, *const c_void)>,
+    ) -> Result<(f64, f64)> {
         let n = ctx.lay.n;
         let sh = key.shape;
         let ids = self.ids.get(&sh).ok_or_else(|| shape("KeyGen::generate", format!("shape {sh:?} was not given to KeyGen::new")))?;
@@ -99,7 +176,7 @@ impl<'a, W: DevWord> KeyGen<'a, W> {
         if ex.ks.digits.len() < nr * n {
             return Err(shape("KeyGen::generate", format!("ks_work holds {} words, the key's errors need {}", ex.ks.digits.len(), nr * n)));
         }
-        if matches!(key.role, KeyRole::EncDenseToSparse | KeyRole::EncSparseToDense) && !secret.has_sparse {
+        if matches!(key.role, KeyRole::EncDenseToSparse | KeyRole::EncSparseToDense | KeyRole::SparseRot { .. }) && !secret.has_sparse {
             return Err(shape("KeyGen::generate", "encapsulation key requested but the device secret has no sparse part"));
         }
         let t0 = std::time::Instant::now();
@@ -138,7 +215,7 @@ impl<'a, W: DevWord> KeyGen<'a, W> {
             KeyRole::Relin => (part(0), part(0), 1),
             KeyRole::EncDenseToSparse => (part(1), part(0), 0),
             KeyRole::EncSparseToDense => (part(0), part(1), 0),
-            KeyRole::Rot { .. } | KeyRole::Conj => {
+            KeyRole::Rot { .. } | KeyRole::Conj | KeyRole::SparseRot { .. } => {
                 let g = key.role.galois(n).ok_or_else(|| shape("KeyGen::generate", "rotation without a Galois element"))?;
                 let ginv = galois::galois_inverse(g, n)?;
                 let a = AutomorphArgs {
@@ -154,9 +231,12 @@ impl<'a, W: DevWord> KeyGen<'a, W> {
                 };
                 // SAFETY: perm and the secret are distinct context-layout buffers; rows of rs exist in both
                 launch_result("automorph", unsafe { (ctx.table.automorph)(&a, s.raw()) })?;
-                (self.perm.buf.vptr(), part(0), 0)
+                // SparseRot: from the sparse secret (part 1) to sigma_{g^-1}(s)
+                (self.perm.buf.vptr(), if matches!(key.role, KeyRole::SparseRot { .. }) { part(1) } else { part(0) }, 0)
             }
         };
+        // the key's own special set: P, or a prefix of it (P' for a bottom-shape key of a lean chain, `stc_ps_kp`)
+        let gadget = self.gadgets.get(&sh.kp).unwrap_or(&ctx.ks.p_mod_q);
         let (b, a, bits, row_words) = match &mut key.store {
             KskStore::PackedSeeded { b, bits, row_words } => (b.vptr_mut(), std::ptr::null_mut(), *bits as i32, *row_words as u64),
             KskStore::Dense { b, a } => (b.vptr_mut(), a.vptr_mut(), 0, 0),
@@ -169,10 +249,11 @@ impl<'a, W: DevWord> KeyGen<'a, W> {
             s_old,
             seed: key.seed_dev.dptr(),
             ids: ids.dptr(),
-            digit_of: self.digit_of.dptr(),
-            // the key's own special set: P, or P' for a bottom-shape key of a lean chain
-            pmod: if sh.kp < ctx.lay.kp { ctx.ks.ps_mod_q.v.vptr() } else { ctx.ks.p_mod_q.v.vptr() },
-            pmods: if sh.kp < ctx.lay.kp { ctx.ks.ps_mod_q.s.vptr() } else { ctx.ks.p_mod_q.s.vptr() },
+            digit_of: ov.map(|o| o.0).unwrap_or(self.digit_of.dptr()),
+            // the key's own special set: P, a prefix of it (P' for a bottom-shape key of a lean chain, `stc_ps_kp`), or a
+            // level key's
+            pmod: ov.map(|o| o.1).unwrap_or(gadget.v.vptr()),
+            pmods: ov.map(|o| o.2).unwrap_or(gadget.s.vptr()),
             pr: ctx.pr(),
             row_words,
             nrows: rows as i32,

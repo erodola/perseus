@@ -12,7 +12,7 @@ use crate::LevelError;
 use pc_core::keys::{Prng, SecretKey};
 use pc_core::modmul::Barrett64;
 use pc_core::params::Chain;
-use pc_cuda::{Arena, Device, Event, EventPool};
+use pc_cuda::{Arena, Compute, DBuf, Device, Event, EventPool};
 use pc_gpu::decrypt::Decryptor;
 use pc_gpu::encrypt::Encryptor;
 use pc_gpu::keygen::KeyGen;
@@ -32,7 +32,7 @@ use pc_program::bind::{Bound as PBound, Slab};
 use pc_program::replay::{CaptureLock, ReplayCfg, Replayer, Routes, SideLane};
 use pc_program::{Kind, Program};
 use pc_shadow::route::Landing;
-use pc_shadow::Shadow;
+use pc_shadow::{PtMeta, Shadow};
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use std::cell::RefCell;
@@ -285,6 +285,11 @@ pub(crate) struct State {
     pub cached: HashMap<String, Named>,
     pub enc_hits: u64,
     pub enc_misses: u64,
+    /// the plaintext position cache (`PtStore.cache` / `restore`): encodings and their metas, in its own arena
+    pub pt_cache: Vec<(DBuf<'static, Compute, W>, PtMeta)>,
+    /// declared after `pt_cache`, which borrows it
+    #[allow(dead_code)]
+    pub pt_cache_arena: Option<Box<Arena>>,
 }
 
 /// What only a session holding the secret has.
@@ -612,6 +617,10 @@ pub(crate) struct Needs {
     sb_cfgs: Vec<SparseBCfg>,
     spru_cfg: Option<SpruCfg>,
     cplans: Vec<pc_gpu::bts::sparse_classic::ClassicPlan>,
+    /// PC_EM_LEVEL_KEYS: the level relinearization keys (EvalMod relinearization tops 16..=46)
+    levels: Vec<pc_gpu::keys::LevelRelinSpec>,
+    /// Keys outside `spec`: sparse -> dense rotation keys (`bts.merge_s2d`) and P' rotation keys (`bts.stc_ps`).
+    extra: pc_gpu::keys::ExtraKeySpec,
 }
 
 fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Option<PlanSpec>, pcmm: &Option<crate::pcmm::PcmmPlan>, ccmm: &Option<crate::matmul::CcmmPlan>) -> PyResult<Needs> {
@@ -635,12 +644,15 @@ fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Op
     let mut sb_cfgs: Vec<SparseBCfg> = vec![];
     let mut spru_cfg: Option<SpruCfg> = None;
     let mut cplans: Vec<pc_gpu::bts::sparse_classic::ClassicPlan> = vec![];
+    let mut extra = pc_gpu::keys::ExtraKeySpec::default();
     if let Some(ps) = &plan {
         let rn = route_needs(&ps.programs, n);
         // FIDESLIB_CTS_ALT_BUDGET: the dense routes' raise variants of drop >= 1 on a CtS one stage longer
         let cts_alt = knob(cfg.bts.cts_alt_budget, 0, "bts.cts_alt_budget")? as u32;
         // PC_LT_TAILS (default on) / PC_EM_FUSE_RESCALE (default off): pc-gpu BtsSetup::lt_tails / em_fuse_rescale
         let (lt_tails, em_fuse) = (cfg.bts.lt_tails.unwrap_or(true), cfg.bts.em_fuse_rescale.unwrap_or(false));
+        // PC_BTS_MERGE_S2D / PC_BTS_STC_PS (default off): key-set switches (pc-gpu BtsSetup::merge_s2d / stc_ps)
+        let (merge_s2d, stc_ps) = (cfg.bts.merge_s2d.unwrap_or(false), knob(cfg.bts.stc_ps, 0, "bts.stc_ps")? as usize);
         for p in &ps.programs {
             steps.extend(prog_steps(p, half));
         }
@@ -653,6 +665,7 @@ fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Op
             setup.k_max = pcmm.as_ref().map_or(1, |p| p.batch.max(1));
             setup.cts_alt_budget = cts_alt;
             (setup.lt_tails, setup.em_fuse_rescale) = (lt_tails, em_fuse);
+            (setup.merge_s2d, setup.stc_ps) = (merge_s2d, stc_ps);
             let mut sfs = StcFirstSetup::n32_shipped();
             sfs.cache_slots = ps.stc_cache.max(1);
             if pcmm.is_some() {
@@ -679,9 +692,18 @@ fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Op
             // a captured graph reads the entries its refreshes used: the cache holds every key the programs ask for
             let keys = stc_first_keys(&ps.programs, n, (chain.q.len() - 1 - sp.entry_top) as u32, sp.sf.cf_default.unwrap_or(13), sp.sf.cf_ref);
             sp.sf.cache_slots = sp.sf.cache_slots.max(keys);
-            let mut geoms: Vec<_> = sp.dense.variants.iter().flat_map(|v| v.cts.iter().chain(&v.stc)).chain(&sp.input).map(|h| h.geom).collect();
+            // merge_s2d: CtS stage 0 rotates with SparseRot keys only (its plain rotation keys only if another user asks)
+            let skip0 = merge_s2d as usize;
+            let mut geoms: Vec<_> = sp.dense.variants.iter().flat_map(|v| v.cts.iter().skip(skip0).chain(&v.stc)).chain(&sp.input).map(|h| h.geom).collect();
             geoms.extend(sp.sources.iter().flatten().map(|s| s.geom));
             full.extend(lt_steps(&geoms, n));
+            if merge_s2d {
+                extra.sparse_rots.extend(sp.dense.s0_steps().into_iter().map(|st| (st, KskShape::full(chain))));
+            }
+            if sp.input_kp() < chain.p.len() {
+                extra.ps_kp = sp.input_kp();
+                extra.rots_ps.extend(sp.input_steps().into_iter().map(|st| (st, sp.entry_top)));
+            }
             splan = Some(sp);
         }
         if !rn.plain_drops.is_empty() {
@@ -701,7 +723,9 @@ fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Op
                 let mut c = SparseBCfg::n32(sl, d);
                 c.k_max = 1;
                 (c.lt_tails, c.em_fuse_rescale) = (lt_tails, em_fuse);
+                c.merge_s2d = merge_s2d;
                 c.evalmod_k = knob(cfg.bts.sparse_b_k, pc_core::bts_setup::SPARSE_B_K as i64, "bts.sparse_b_k")? as f64;
+                extra.sparse_rots.extend(pc_gpu::bts::sparse_b::sparse_rot_steps(n, &c).map_err(e)?.into_iter().map(|st| (st, KskShape::full(chain))));
                 full.extend(pc_gpu::bts::sparse_b::rot_steps(n, &c).map_err(e)?.into_iter().map(|k| k.rem_euclid(half)));
                 sb_cfgs.push(c);
             }
@@ -729,11 +753,18 @@ fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Op
     let steps: BTreeSet<i64> = steps.union(&full).copied().collect();
     let spec = KeySetSpec { relin: true, conj: ks.conj || plan.is_some(), rots, encaps: !sb_cfgs.is_empty() || dplan.is_some() || !cplans.is_empty() };
     let mut shapes: Vec<_> = spec.keys(chain).map_err(e)?.into_iter().map(|(_, s)| s).collect();
+    shapes.extend(extra.keys(chain).map_err(e)?.into_iter().map(|(_, s)| s));
     if spru_cfg.is_some() {
         shapes.push(KskShape::bottom(chain).map_err(e)?);
         shapes.push(KskShape::full(chain));
     }
-    Ok(Needs { layout, steps, spec, shapes, needs, splan, dplan, sb_cfgs, spru_cfg, cplans })
+    let levels: Vec<pc_gpu::keys::LevelRelinSpec> = if cfg.bts.em_level_keys.unwrap_or(false) && (dplan.is_some() || splan.is_some() || !sb_cfgs.is_empty()) {
+        (16..=46).step_by(2).filter_map(|t| pc_gpu::keys::level_relin_spec(chain, t, pc_client::spec::LEVEL_RELIN_CAP)).collect()
+    } else {
+        Vec::new()
+    };
+    shapes.extend(levels.iter().map(|l| l.shape));
+    Ok(Needs { layout, steps, spec, shapes, needs, splan, dplan, sb_cfgs, spru_cfg, cplans, levels, extra })
 }
 
 /// Where a session's keys come from.
@@ -751,6 +782,8 @@ pub(crate) enum Origin {
 fn manifest(cfg: &pc_config::Config, chain: &Chain, nd: &Needs, pcmm: &Option<crate::pcmm::PcmmPlan>, ccmm: bool) -> PyResult<pc_client::KeySpec> {
     let e = gerr;
     let mut keys: Vec<pc_client::KeyReq> = nd.spec.keys(chain).map_err(e)?.iter().map(|(r, s)| key_req(r, s)).collect();
+    keys.extend(nd.levels.iter().map(|l| pc_client::KeyReq { role: pc_client::Role::RelinLevel { top: l.top }, shape: shape_req(&l.shape) }));
+    keys.extend(nd.extra.keys(chain).map_err(e)?.iter().map(|(r, s)| key_req(r, s)));
     let spru = match &nd.spru_cfg {
         Some(c) => {
             keys.push(pc_client::KeyReq { role: pc_client::Role::SpruAtob, shape: shape_req(&KskShape::bottom(chain).map_err(e)?) });
@@ -846,7 +879,9 @@ fn import_bundle(path: &std::path::Path, req: &pc_client::KeySpec, chain: &Chain
                 let slot = match key.role {
                     R::Relin => keys.relin.as_mut(),
                     R::Conj => keys.conj.as_mut(),
+                    R::Rot { step, .. } if key.shape.kp < chain.p.len() => keys.rots_ps.get_mut(&step.rem_euclid(half)),
                     R::Rot { step, .. } => keys.rots.get_mut(&step.rem_euclid(half)),
+                    R::SparseRot { step, .. } => keys.sparse_rots.get_mut(&step.rem_euclid(half)),
                     R::EncDenseToSparse => keys.bts.as_mut().map(|b| &mut b.enc_dense_to_sparse),
                     R::EncSparseToDense => keys.bts.as_mut().map(|b| &mut b.enc_sparse_to_dense),
                     R::SpruAtob => {
@@ -857,6 +892,7 @@ fn import_bundle(path: &std::path::Path, req: &pc_client::KeySpec, chain: &Chain
                         parts.spru_auto = Some((seed, words));
                         continue;
                     }
+                    R::RelinLevel { top } => keys.relin_levels.get_mut(&top).map(|x| &mut x.1),
                 };
                 let k = slot.ok_or_else(|| PyValueError::new_err(format!("key bundle: no carved key for {:?}", key.role)))?;
                 if shape_req(&k.shape) != key.shape {
@@ -918,6 +954,7 @@ fn key_req(r: &KeyRole, s: &KskShape) -> pc_client::KeyReq {
         KeyRole::Conj => R::Conj,
         KeyRole::EncDenseToSparse => R::EncDenseToSparse,
         KeyRole::EncSparseToDense => R::EncSparseToDense,
+        KeyRole::SparseRot { step, galois } => R::SparseRot { step, galois },
     };
     pc_client::KeyReq { role, shape: shape_req(s) }
 }
@@ -969,12 +1006,21 @@ fn setup(cfg: &pc_config::Config, ks: &PyKeySource, origin: &Origin, sizes: Size
         Origin::Generate => None,
         _ => Some(manifest(cfg, &chain, &nd, &pcmm, ccmm.is_some())?),
     };
-    let Needs { layout, steps, spec, shapes, needs, splan, dplan, sb_cfgs, spru_cfg, cplans } = nd;
+    let Needs { layout, steps, spec, shapes, needs, splan, dplan, sb_cfgs, spru_cfg, cplans, levels, extra } = nd;
     let mp = &mut mplan;
     mp.reserve("ks.plans", KsPlans::bytes::<W>(&chain, k_max).map_err(e)?);
-    mp.reserve("keys", spec.bytes::<W>(&chain, layout).map_err(e)?);
+    mp.reserve("keys", spec.bytes::<W>(&chain, layout).map_err(e)? + extra.bytes::<W>(&chain, layout).map_err(e)?);
     if matches!(origin, Origin::Generate) {
         mp.reserve("keygen", KeyGen::<W>::bytes(&lay, &shapes));
+    }
+    if !levels.is_empty() {
+        // the level relinearization keys, their keygen tables and the EvalMod level plans (prototype: a fixed
+        // allowance per EvalMod plan for the latter)
+        mp.reserve("keys.level", KeySet::<W>::relin_levels_bytes(&levels, layout, n));
+        if matches!(origin, Origin::Generate) {
+            mp.reserve("keygen.level", KeyGen::<W>::levels_bytes(&lay, levels.len()));
+        }
+        mp.reserve("bts.levelks", 512 << 20);
     }
     let nrot = steps.len() + ks.conj as usize;
     let gb: usize = ks.groups.iter().map(|g| KeyGroup::bytes(g.len().max(1), true)).sum::<usize>() + KeyGroup::bytes(nrot.max(1), true) + 2 * KeyGroup::bytes(1, true);
@@ -987,6 +1033,8 @@ fn setup(cfg: &pc_config::Config, ks: &PyKeySource, origin: &Origin, sizes: Size
         None => OpsCfg::default(),
     };
     Ops::<W>::reserve(mp, &ocfg);
+    // the fused relinearization-rescales' tables (compute's op layer)
+    mp.reserve("relin.rr", pc_gpu::relin::RelinRescaler::<W>::bytes(&chain, &lay, k_max).map_err(e)?);
     let pcfg = PtStoreCfg {
         slots: sizes.pt_slots,
         ring: 4,
@@ -1085,6 +1133,8 @@ fn setup(cfg: &pc_config::Config, ks: &PyKeySource, origin: &Origin, sizes: Size
     let pool = CtPool::<W>::new(a, &mplan).map_err(e)?;
     let plans = KsPlans::new(a, &ex.compute, &ctx, k_max).map_err(e)?;
     let mut keys = KeySet::carve(a, &chain, &spec, layout).map_err(e)?;
+    keys.carve_relin_levels(a, &levels).map_err(e)?;
+    keys.carve_extra(a, &chain, &extra).map_err(e)?;
     let mut prng = match ks.seed {
         Some(s) => Prng::from_seed([0x5e55_1013, s as u32, (s >> 32) as u32, 4, 5, 6, 7, 8], 0),
         None => Prng::from_os().map_err(|x| e(x.into()))?,
@@ -1113,6 +1163,14 @@ fn setup(cfg: &pc_config::Config, ks: &PyKeySource, origin: &Origin, sizes: Size
             let mut kg = KeyGen::new(a, &ex.compute, &chain, &shapes).map_err(e)?;
             let sec = secret.as_ref().ok_or_else(|| PyRuntimeError::new_err("device keygen without a secret"))?;
             kg.generate_set(&ctx, &mut ex, sec, &mut keys, &mut prng).map_err(e)?;
+            if !levels.is_empty() {
+                kg.add_levels(a, &ex.compute, &chain, &levels).map_err(e)?;
+                for l in &levels {
+                    let k = &mut keys.relin_levels.get_mut(&l.top).ok_or_else(|| PyRuntimeError::new_err("level key not carved"))?.1;
+                    kg.generate_level(&ctx, &mut ex, sec, k, l.top, &mut prng).map_err(e)?;
+                }
+                ex.sync_compute().map_err(e)?;
+            }
             (Some(kg), None)
         }
         (Origin::Bundle(path) | Origin::DebugBundle(path, _), Some(req)) => (None, Some(import_bundle(path, req, &chain, &ex.compute, &mut keys)?)),
@@ -1145,7 +1203,8 @@ fn setup(cfg: &pc_config::Config, ks: &PyKeySource, origin: &Origin, sizes: Size
         };
         Groups { all, steps: steps.clone(), exact, relin, conj, half }
     };
-    let ops = Ops::new(a, &device, &ex.compute, &ctx, ocfg).map_err(e)?;
+    let mut ops = Ops::new(a, &device, &ex.compute, &ctx, ocfg).map_err(e)?;
+    ops.rr = Some(pc_gpu::relin::RelinRescaler::new(a, &ex.compute, &ctx, k_max).map_err(e)?);
     let pt_events = Box::new(EventPool::new(&device, 64).map_err(|x| e(x.into()))?);
     // SAFETY: `pt_events` is boxed and declared after `pts` in State, so it outlives the store's borrow
     let ev: &'static EventPool = unsafe { &*(pt_events.as_ref() as *const EventPool) };
@@ -1321,6 +1380,8 @@ fn setup(cfg: &pc_config::Config, ks: &PyKeySource, origin: &Origin, sizes: Size
         cached: HashMap::new(),
         enc_hits: 0,
         enc_misses: 0,
+        pt_cache: Vec::new(),
+        pt_cache_arena: None,
     };
     Ok(Dev {
         st: RefCell::new(state),
@@ -1750,10 +1811,11 @@ impl PySession {
                 let (b, a) = k.download_dense(&st.ex.compute, chain)?;
                 let (s_new, s_old, sq) = match k.role {
                     KeyRole::Relin => (s.clone(), &s, true),
-                    KeyRole::Rot { .. } | KeyRole::Conj => {
+                    KeyRole::Rot { .. } | KeyRole::Conj | KeyRole::SparseRot { .. } => {
                         let g = k.role.galois(n).ok_or_else(|| pc_gpu::Error::Shape { what: "debug_key_relation", msg: "no Galois element".into() })?;
                         let gi = pc_core::galois::galois_inverse(g, n)?;
-                        (s.iter().map(|r| pc_core::galois::apply_eval(r, gi)).collect::<std::result::Result<Vec<_>, _>>()?, &s, false)
+                        let old = if matches!(k.role, KeyRole::SparseRot { .. }) { &sp } else { &s };
+                        (s.iter().map(|r| pc_core::galois::apply_eval(r, gi)).collect::<std::result::Result<Vec<_>, _>>()?, old, false)
                     }
                     KeyRole::EncDenseToSparse => (sp.clone(), &s, false),
                     KeyRole::EncSparseToDense => (s.clone(), &sp, false),

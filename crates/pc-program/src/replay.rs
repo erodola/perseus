@@ -20,7 +20,7 @@ use pc_gpu::ks::{KeyGroup, KsPlans, KskSource};
 use pc_gpu::ops::{Ops, Pt};
 use pc_gpu::rotate::{self, KsCfg};
 use pc_gpu::{Context, Ct, DevStrategy, DevWord, Executor};
-use pc_shadow::{CtMeta, Shadow};
+use pc_shadow::{CtMeta, Shadow, PtMeta};
 use std::ffi::c_void;
 use std::time::Instant;
 
@@ -123,8 +123,14 @@ pub struct Captured {
     side_lease: Vec<usize>,
     out_metas: Vec<CtMeta>,
     pt_rows: Vec<*const c_void>,
+    /// The slots' buffers it baked (a driver may lend a slot another buffer for a run: pc-py `run_block`).
+    slot_rows: Vec<*const c_void>,
     stream_base: *const f32,
     pub capture_ms: f64,
+}
+
+fn slot_rows<W: DevWord>(b: &Bound<'_, W>) -> Vec<*const c_void> {
+    b.slots.iter().map(|c| c.buf.r().base as *const c_void).collect()
 }
 
 /// How a run was served.
@@ -284,7 +290,9 @@ fn exec_step<'a, W: DevWord, M: DevStrategy<W>>(block: &str, rt: &mut Rt<'_, 'a,
     match &st.op {
         StepOp::Add | StepOp::Sub => {
             let sub = st.op == StepOp::Sub;
-            if st.inplace {
+            if st.inplace && st.b == st.out && rt.ops.add_self_inplace(ctx, rt.ex, sh, o, sub)? {
+                // x + x in one pass (no copy of x)
+            } else if st.inplace {
                 let b: &Ct<'a, W> = if st.b == st.out {
                     copy_ct(ctx, &rt.ex.compute, tmp, o)?;
                     &*tmp
@@ -331,6 +339,16 @@ fn exec_step<'a, W: DevWord, M: DevStrategy<W>>(block: &str, rt: &mut Rt<'_, 'a,
             let a = src_a!();
             let key = group(block, t.groups, t.relin)?;
             rt.ops.mult(ctx, rt.ex, kc, sh, key, o, a, at(st.b))?
+        }
+        StepOp::MultRescale { square, dbl } => {
+            let key = group(block, t.groups, t.relin)?;
+            let b = if *square { None } else { Some(at(st.b)) };
+            if st.inplace && (*square || st.b != st.out) {
+                rt.ops.mult_rescale(ctx, rt.ex, kc, sh, key, o, None, b, *dbl)?
+            } else {
+                let a = src_a!();
+                rt.ops.mult_rescale(ctx, rt.ex, kc, sh, key, o, Some(a), b, *dbl)?
+            }
         }
         StepOp::Square => {
             let a = src_a!();
@@ -443,7 +461,7 @@ fn issue_range<'a, W: DevWord, M: DevStrategy<W>>(rt: &mut Rt<'_, 'a, W, M>, b: 
         let unit = if in_unit {
             None
         } else {
-            let at = b.unit_at(i).filter(|u| !(stepwise && matches!(u.kind, UnitKind::MultPtAdd { .. })));
+            let at = b.unit_at(i).filter(|u| !(stepwise && matches!(u.kind, UnitKind::MultPtAdd { .. } | UnitKind::MultPtAddChain { .. } | UnitKind::RotAcc { .. })));
             let unit = at
                 .filter(|u| unit_fits(u, &b.slots, &b.steps, &b.pts, rt.sh))
                 .map(|u| (b.unit_of[i], u.hi as usize))
@@ -513,6 +531,7 @@ fn issue_range<'a, W: DevWord, M: DevStrategy<W>>(rt: &mut Rt<'_, 'a, W, M>, b: 
                             }
                             // a fused plaintext product and add leaves the key-switching workspaces alone
                             UnitKind::MultPtAdd { .. } => info.fused += 1,
+                            UnitKind::MultPtAddChain { ref pts, .. } => info.fused += pts.len(),
                             _ => ks_owner = None,
                         }
                         exec_unit(label, rt, unit, steps, slots.as_mut_ptr(), slots.len(), gather, held.as_mut(), groups, *relin, step_lists, pts, stale)
@@ -615,7 +634,9 @@ fn unit_fits<W: DevWord>(u: &Unit, slots: &[Ct<'_, W>], steps: &[Step], pts: &[B
     };
     match &u.kind {
         UnitKind::Grid { .. } | UnitKind::RotateSum { .. } => one(&u.ins, false),
-        UnitKind::Mult { b } => one(&u.ins, true) && one(b, true),
+        // the adds take no prelude: every operand at one level, degree and scale
+        UnitKind::RotAcc { .. } => one(&u.ins, true),
+        UnitKind::Mult { b, .. } => one(&u.ins, true) && one(b, true),
         UnitKind::Refresh { .. } => one(&u.ins, true),
         UnitKind::Pair { .. } => match (meta(&u.ins[0]), meta(&u.ins[1])) {
             (Some(x), Some(y)) => x.level == y.level && x.deg == y.deg && nf_key(x.nf) == nf_key(y.nf),
@@ -631,6 +652,22 @@ fn unit_fits<W: DevWord>(u: &Unit, slots: &[Ct<'_, W>], steps: &[Step], pts: &[B
             } else {
                 out != u.ins[0] && Ops::<W>::mult_pt_add_fusable(sh, &a, &p, &y, *sub, *product_first).unwrap_or(false)
             }
+        }
+        // one pass when no product or add takes a prelude
+        UnitKind::MultPtAddChain { head, pts: ids, pf } => {
+            let pm = |i: u32| pts.get(i as usize).and_then(|p| p.meta);
+            let Some(x0) = meta(&u.ins[0]) else { return false };
+            let mut terms = Vec::with_capacity(ids.len());
+            for (c, (&i, &f)) in ids.iter().zip(pf).enumerate() {
+                let (Some(a), Some(p)) = (u.ins.get(1 + c).and_then(meta), pm(i)) else { return false };
+                terms.push((a, p, f));
+            }
+            let tm: Vec<(&CtMeta, &PtMeta, bool)> = terms.iter().map(|(a, p, f)| (a, p, *f)).collect();
+            let r = match head {
+                Some(h) => pm(*h).map(|p| Ops::<W>::mult_pt_add_chain_meta(sh, Some((&x0, &p)), None, &tm)),
+                None => Some(Ops::<W>::mult_pt_add_chain_meta(sh, None, Some(&x0), &tm)),
+            };
+            matches!(r, Some(Ok(Some(_))))
         }
     }
 }
@@ -683,42 +720,96 @@ fn exec_unit<'a, W: DevWord, M: DevStrategy<W>>(
                 rotate::rotate_grid(rt.ctx, rt.ex, kc, rt.sh, key, &xs, gather, fresh, st, &mut outs)?;
             }
         }
+        UnitKind::RotAcc { gs, gal, steps: st } => {
+            let o = span[span.len() - 1].out;
+            let keys: Vec<&KeyGroup<'a>> = gs.iter().map(|&g| group(block, groups, g)).collect::<Result<_>>()?;
+            // the sum may land on acc_0's slot (then read there, `xs[0]` unused) or on a rotated input's (each is read
+            // before the one write at the end)
+            let acc = if u.ins[0] == o { None } else { Some(xs[0]) };
+            // SAFETY: as the other units' outputs: the only mutable reference into the slots during the unit
+            let out = unsafe { &mut *slots.add(o as usize) };
+            rotate::rotate_acc(rt.ctx, rt.ex, kc, rt.sh, &keys, acc, &xs[1..], gal, st, out)?;
+        }
         UnitKind::RotateSum { l, g } => {
             let st = lists.get(*l as usize).ok_or_else(|| rerr(block, format!("step list {l} out of range")))?;
             let mut outs: Vec<&mut Ct<'a, W>> = span.iter().map(|x| unsafe { &mut *slots.add(x.out as usize) }).collect();
             rotate::rotate_sum_batch(rt.ctx, rt.ex, kc, rt.sh, group(block, groups, *g)?, &xs, &mut gather.a, st, &mut outs)?;
         }
-        UnitKind::Mult { b } => {
+        UnitKind::Mult { b, rs } => {
             // the operands gathered into K-ciphertext buffers, one product of K ciphertexts (one relinearization key
             // read for all of them), the products scattered with their own metadata
             if b.iter().any(|&s| s as usize >= n_slots) {
                 return Err(rerr(block, format!("product unit at step {}: slots outside the {n_slots} bound slots", u.lo)));
             }
             let ys: Vec<&Ct<'a, W>> = b.iter().map(|&s| unsafe { &*slots.add(s as usize) }).collect();
-            let (k, s) = (xs.len(), &rt.ex.compute);
-            for (c, x) in xs.iter().enumerate() {
-                batch::put(rt.ctx, s, &mut gather.a, c, x)?;
+            let (k, s, lay) = (xs.len(), &rt.ex.compute, rt.ctx.lay);
+            // operands / outputs in consecutive slots are read / written where they lie (no gather copies)
+            // SAFETY: the operand views are only read; the output view is the only writer of the outputs (distinct
+            // slots, none an operand's) until it is dropped, before their metadata is set
+            let va = unsafe { pc_gpu::ct::run_view(lay, &xs) };
+            let vb = unsafe { pc_gpu::ct::run_view(lay, &ys) };
+            let mut vo = {
+                let os: Vec<&Ct<'a, W>> = span.iter().map(|st| unsafe { &*slots.add(st.out as usize) }).collect();
+                unsafe { pc_gpu::ct::run_view(lay, &os) }
+            };
+            if va.is_none() {
+                for (c, x) in xs.iter().enumerate() {
+                    batch::put(rt.ctx, s, &mut gather.a, c, x)?;
+                }
             }
-            for (c, y) in ys.iter().enumerate() {
-                batch::put(rt.ctx, s, &mut gather.b, c, y)?;
+            if vb.is_none() {
+                for (c, y) in ys.iter().enumerate() {
+                    batch::put(rt.ctx, s, &mut gather.b, c, y)?;
+                }
             }
             gather.a.buf.k = k;
             gather.a.meta = xs[0].meta;
             gather.out.buf.k = k;
             let key = group(block, groups, relin)?;
-            let Gather { a, b: gb, out } = gather;
-            if ys.is_empty() {
-                rt.ops.square(rt.ctx, rt.ex, kc, rt.sh, key, out, a)?;
-            } else {
+            let Gather { a: ga, b: gb, out: go } = gather;
+            let a: &Ct<'a, W> = match &va {
+                Some(v) => v,
+                None => &*ga,
+            };
+            let out: &mut Ct<'a, W> = match vo.as_mut() {
+                Some(v) => v,
+                None => &mut *go,
+            };
+            if !ys.is_empty() {
                 gb.buf.k = k;
                 gb.meta = ys[0].meta;
-                rt.ops.mult(rt.ctx, rt.ex, kc, rt.sh, key, out, a, gb)?;
             }
+            let b: Option<&Ct<'a, W>> = if ys.is_empty() {
+                None
+            } else {
+                Some(match &vb {
+                    Some(v) => v,
+                    None => &*gb,
+                })
+            };
+            match (rs, b) {
+                (Some(dbl), b) => rt.ops.mult_rescale(rt.ctx, rt.ex, kc, rt.sh, key, out, Some(a), b, *dbl)?,
+                (None, None) => rt.ops.square(rt.ctx, rt.ex, kc, rt.sh, key, out, a)?,
+                (None, Some(b)) => rt.ops.mult(rt.ctx, rt.ex, kc, rt.sh, key, out, a, b)?,
+            }
+            let direct = vo.is_some();
+            drop(vo);
             for (c, st) in span.iter().enumerate() {
                 let r = if ys.is_empty() { rt.sh.square(&xs[c].meta) } else { rt.sh.mult(&xs[c].meta, &ys[c].meta) };
-                let m = r.map_err(|e| rerr(block, e.to_string()))?.out;
+                let mut m = r.map_err(|e| rerr(block, e.to_string()))?.out;
+                if let Some(dbl) = rs {
+                    if *dbl {
+                        m = rt.sh.add(&m, &m).map_err(|e| rerr(block, e.to_string()))?.out;
+                    }
+                    m = rt.sh.realize(&m).map_err(|e| rerr(block, e.to_string()))?.out;
+                }
                 // SAFETY: as the unit's other outputs (distinct slots, none an operand's)
-                batch::take(rt.ctx, &rt.ex.compute, unsafe { &mut *slots.add(st.out as usize) }, out, c, m)?;
+                let o = unsafe { &mut *slots.add(st.out as usize) };
+                if direct {
+                    o.meta = m;
+                } else {
+                    batch::take(rt.ctx, &rt.ex.compute, o, go, c, m)?;
+                }
             }
         }
         UnitKind::MultPtAdd { pt: i, sub, product_first } => {
@@ -733,6 +824,22 @@ fn exec_unit<'a, W: DevWord, M: DevStrategy<W>>(
                 let out = unsafe { &mut *slots.add(span[1].out as usize) };
                 rt.ops.mult_pt_add(rt.ctx, rt.ex, rt.sh, out, xs[0], &p, xs[1], *sub, *product_first)?;
             }
+        }
+        UnitKind::MultPtAddChain { head, pts: ids, pf } => {
+            let ps: Vec<Pt<'_>> = ids.iter().map(|&i| pt(block, pts, i)).collect::<Result<_>>()?;
+            let hp = head.map(|h| pt(block, pts, h)).transpose()?;
+            let out_slot = span[span.len() - 1].out;
+            // y (no head) may be the sum's own slot: its rows and metadata are taken before the output is borrowed
+            let y = if hp.is_none() { Some((xs[0].buf.r(), xs[0].meta)) } else { None };
+            if u.ins[1..].contains(&out_slot) || hp.is_some() && u.ins[0] == out_slot {
+                return Err(rerr(block, format!("product chain at step {}: the sum lands on a term's or the head's operand", u.lo)));
+            }
+            let terms: Vec<(&Ct<'a, W>, &Pt<'_>, bool)> = xs[1..].iter().zip(&ps).zip(pf).map(|((a, p), &f)| (*a, p, f)).collect();
+            let head = hp.as_ref().map(|p| (xs[0], p));
+            // SAFETY: the sum's slot is no term's or head's operand (checked above): the only mutable reference; y may
+            // share it, taken above as rows and metadata (`xs[0]` unused past here in that case)
+            let out = unsafe { &mut *slots.add(out_slot as usize) };
+            rt.ops.mult_pt_add_chain(rt.ctx, rt.ex, rt.sh, out, head, y, &terms)?;
         }
         UnitKind::Refresh { route, kind } => {
             // the inputs gathered into one K-ciphertext buffer, refreshed in place as one K-batch, scattered back
@@ -856,7 +963,8 @@ impl Replayer {
             return Ok(info);
         }
         let dynamic: Vec<u32> = b.dynamic.iter().copied().collect();
-        let hit = b.graphs.iter().position(|g| g.dynamic == dynamic && g.stream_base == b.stream_base && g.pt_rows.len() == b.pts.len() && g.pt_rows.iter().zip(&b.pts).all(|(r, p)| *r == p.rows));
+        let rows = slot_rows(b);
+        let hit = b.graphs.iter().position(|g| g.dynamic == dynamic && g.stream_base == b.stream_base && g.slot_rows == rows && g.pt_rows.len() == b.pts.len() && g.pt_rows.iter().zip(&b.pts).all(|(r, p)| *r == p.rows));
         if let Some(gi) = hit {
             // the dynamic steps need the Bound mutably: take the captured block out while it replays
             let g = b.graphs.remove(gi);
@@ -986,7 +1094,7 @@ impl Replayer {
         let capture_ms = tc.elapsed().as_secs_f64() * 1e3;
         self.stats.captures += 1;
         self.stats.capture_ms += capture_ms;
-        b.graphs.push(Captured { items, dynamic, lease, side_lease, out_metas, pt_rows: b.pts.iter().map(|p| p.rows).collect(), stream_base: b.stream_base, capture_ms });
+        b.graphs.push(Captured { items, dynamic, lease, side_lease, out_metas, pt_rows: b.pts.iter().map(|p| p.rows).collect(), slot_rows: rows, stream_base: b.stream_base, capture_ms });
         info.served = Served::Captured;
         Ok(info)
     }

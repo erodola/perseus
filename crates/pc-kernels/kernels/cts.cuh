@@ -21,7 +21,7 @@ constexpr int BX = 128;
 template <class W>
 constexpr int DMAX = sizeof(W) == 4 ? 6 : 8;
 
-template <class W, class MM, int KMAX, int GMAX, bool REGEN>
+template <class W, class MM, int KMAX, int GMAX, bool REGEN, bool X0 = false>
 __global__ void __launch_bounds__(BX) cts_fused(CtsRegenArgs R) {
     using Wd = WideOf<W>;
     const CtsArgs& A = R.cts;
@@ -53,7 +53,15 @@ __global__ void __launch_bounds__(BX) cts_fused(CtsRegenArgs R) {
         if (i == 0) {
 #pragma unroll
             for (int c = 0; c < KMAX; ++c) {
-                if (c < Kg && isq) {
+                if constexpr (X0) {  // a key-switched identity, extended (every row as stored)
+                    if (c < Kg) {
+                        const W* xc = (const W*)A.x0 + (c0 + c) * A.ct_stride + rowoff;
+                        v0[c] = xc[o];
+                        v1[c] = xc[A.part_stride + o];
+                    } else {
+                        v0[c] = v1[c] = 0;
+                    }
+                } else if (c < Kg && isq) {
                     const W* xc = X + c * A.ct_stride + rowoff;
                     v0[c] = mul_shoup<W>(xc[o], pm, pms, p);
                     v1[c] = mul_shoup<W>(xc[A.part_stride + o], pm, pms, p);
@@ -220,13 +228,21 @@ __device__ __forceinline__ uint32_t mk(uint32_t i, uint32_t d, uint32_t h, uint3
 }
 }  // namespace rq
 
-template <class MM, int KMAX, int GMAX>
-__global__ void __launch_bounds__(BX) cts_fused_rq(CtsRegenArgs R) {
+// Blocks per SM the launch bound asks for: the K = 1 four-giant-step variant (the StC stages) at 7 (70 registers;
+// unbounded it takes 96, 5 blocks: its loads wait with too few warps), the others unbounded (0: no bound).
+template <int KMAX, int GMAX, bool X0 = false>
+constexpr int rq_blocks() {
+    // X0 (a sparse-input stage 0, K = 1): the plain kernel's 9 blocks per SM (its 56 registers)
+    return KMAX == 1 && GMAX == 4 ? 7 : (X0 && KMAX == 1 ? 9 : 0);
+}
+
+template <class MM, int KMAX, int GMAX, bool X0 = false>
+__global__ void __launch_bounds__(BX, rq_blocks<KMAX, GMAX, X0>()) cts_fused_rq(CtsRegenArgs R) {
     using W = uint32_t;
     using Wd = WideOf<W>;
     const CtsArgs& A = R.cts;
     constexpr int NW = BX / 32;
-    constexpr int NBUF = 12;  // digit buffers per warp
+    constexpr int NBUF = KMAX == 1 ? 16 : 12;  // digit buffers per warp (K = 1: 16, fewer part-filled passes)
     __shared__ W sha[NW][NBUF][32];
     __shared__ uint32_t rqs[NW][16];
     const int cg = blockIdx.x % A.ngrp;
@@ -252,19 +268,61 @@ __global__ void __launch_bounds__(BX) cts_fused_rq(CtsRegenArgs R) {
     const size_t krow = (size_t)kskey::slot_of(R.key, (int)t, A.nq);
     const int nreg = min(A.ndig, R.key.nregen);
     const int nbaby = nreg > 0 ? NBUF / nreg : NBUF;  // baby steps in flight
+    // lazy (Barrett64 split, p < 2^29): a baby step's sums reduced only to [0, 4p) and its c0 term to [0, 2p): 6p < 2^32
+    // and 8 giant-step products below 6p p < 2^61 keep the accumulators' headroom; same residues
+    const bool lazy = KMAX == 1 && MM::KIND == 0 && q.split != 0 && p < (1u << 29);
     Wd acc0[KMAX][GMAX], acc1[KMAX][GMAX];
 #pragma unroll
     for (int c = 0; c < KMAX; ++c)
 #pragma unroll
         for (int j = 0; j < GMAX; ++j) acc0[c][j] = acc1[c][j] = 0;
 
+    auto l2 = [](const void* p) { asm volatile("prefetch.global.L2 [%0];" ::"l"(p)); };
+    // K = 1: a baby step's products first ask L2 for the next baby step's lines, so its loads (serialized digit by
+    // digit) hit L2 instead of DRAM. Baby step i's lines (1 <= i < B), one per lane: lanes 2d, 2d+1 the packed `b`
+    // words of digit d (two lines at most), 16 + d the ModUp digit d (c1 at d = dt), 24 + d the resident `a` of
+    // d >= nreg, 30 + j the diagonal of giant step j (j < 2)
+    auto pf = [&](int i) {
+        if (i >= A.B) return;
+        const uint32_t sb = automorph_slot(A.kinv[i - 1], o) & ~31u;
+        const int nd = A.ndig;
+        if ((int)lane < 2 * nd) {
+            const int d = lane >> 1;
+            const uint32_t* r = (const uint32_t*)R.key.kb[i - 1] + ((size_t)d * R.key.srows + krow) * R.key.row_words;
+            if (R.key.bits) {
+                const uint64_t b0 = (uint64_t)sb * (uint32_t)R.key.bits;
+                l2(r + ((lane & 1) ? (b0 + 32u * (uint32_t)R.key.bits) >> 5 : b0 >> 5));
+            } else if ((lane & 1) == 0) {
+                l2((const W*)r + sb);
+            }
+        } else if (lane >= 16 && (int)lane < 16 + nd) {
+            const int d = lane - 16;
+            for (int c = 0; c < Kg; ++c)
+                l2(d == dt ? X + c * A.ct_stride + A.part_stride + rowoff + sb : MU + c * A.mu_ct_stride + d * A.mu_digit_stride + rowoff + sb);
+        } else if (lane >= 24 && (int)lane < 24 + nd) {
+            const int d = lane - 24;
+            if (d >= nreg) l2((const W*)A.ka[i - 1] + rowoff + sb + d * A.key_digit_stride);
+        } else if (lane >= 30) {
+            const int dg = A.B * (lane - 30) + i;
+            if ((int)(lane - 30) < A.G && dg < A.npts) l2((const W*)A.pts[dg] + (size_t)prow * A.ptw + po);
+        }
+    };
     // products of baby step i (its regenerated `a` digits in buffers (i % nbaby) * nreg ..) into the accumulators
     auto mac = [&](int i) {
+        if constexpr (KMAX == 1) pf(i + 1);
         W v0[KMAX], v1[KMAX];
         if (i == 0) {
 #pragma unroll
             for (int c = 0; c < KMAX; ++c) {
-                if (c < Kg && isq) {
+                if constexpr (X0) {  // a key-switched identity, extended (every row as stored)
+                    if (c < Kg) {
+                        const W* xc = (const W*)A.x0 + (c0 + c) * A.ct_stride + rowoff;
+                        v0[c] = xc[o];
+                        v1[c] = xc[A.part_stride + o];
+                    } else {
+                        v0[c] = v1[c] = 0;
+                    }
+                } else if (c < Kg && isq) {
                     const W* xc = X + c * A.ct_stride + rowoff;
                     v0[c] = mul_shoup<W>(xc[o], pm, pms, p);
                     v1[c] = mul_shoup<W>(xc[A.part_stride + o], pm, pms, p);
@@ -295,7 +353,20 @@ __global__ void __launch_bounds__(BX) cts_fused_rq(CtsRegenArgs R) {
             }
 #pragma unroll
             for (int c = 0; c < KMAX; ++c) {
-                if (c < Kg) {
+                if (c < Kg && lazy) {
+                    const uint32_t sp_lo = (uint32_t)q.split, sp_hi = (uint32_t)(q.split >> 32), m32 = (uint32_t)(q.mu_lo >> 32);
+                    auto red4 = [&](uint64_t x) -> uint32_t {  // [0, 4p)
+                        const uint32_t hi = (uint32_t)(x >> 32), lo = (uint32_t)x;
+                        return (hi * sp_lo - __umulhi(hi, sp_hi) * p) + (lo - __umulhi(lo, m32) * p);
+                    };
+                    W r0 = red4(s0[c]);
+                    if (isq) {
+                        const W xa = X[c * A.ct_stride + rowoff + s];
+                        r0 += xa * pm - __umulhi(xa, pms) * p;  // Shoup, [0, 2p)
+                    }
+                    v0[c] = r0;
+                    v1[c] = red4(s1[c]);
+                } else if (c < Kg) {
                     W r0 = MM::reduce(s0[c], q);
                     if (isq) r0 = add<W>(r0, mul_shoup<W>(X[c * A.ct_stride + rowoff + s], pm, pms, p), p);
                     v0[c] = r0;
@@ -372,8 +443,10 @@ __global__ void __launch_bounds__(BX) cts_fused_rq(CtsRegenArgs R) {
                 const uint32_t w = 2u * kq + (m & 1) + 4u * (m >> 1), v = cw[m];
                 if ((need >> w) & 1u) {
                     if (v < m_p || tt == 15u) {
+                        // lazy: the word as drawn (< 2^32, the residue of the expander's value); the products'
+                        // double-word sums hold ndig <= 6 of them times canonical words below 2^29
                         const uint32_t r = v - __umulhi(v, mu32) * p;
-                        dst[w] = r >= p ? r - p : r;
+                        dst[w] = lazy ? v : r >= p ? r - p : r;
                     } else {
                         nn |= 1u << w;
                     }
@@ -416,11 +489,20 @@ int launch_any(const CtsRegenArgs* a, cudaStream_t s) {
     dim3 grid((N / BX) * b.cts.ngrp, a->cts.nrows);
     if constexpr (REGEN && sizeof(W) == 4) {
         if (a->cts.B > 64) return -1;  // queue entries hold the baby index in 6 bits
-        if (g4) cts_fused_rq<MM, 1, 4><<<grid, BX, 0, s>>>(b);
+        if (a->cts.x0) {  // ABI 19: a sparse-input stage (one giant step)
+            if (g4) return -1;
+            if (km == 1) cts_fused_rq<MM, 1, 2, true><<<grid, BX, 0, s>>>(b);
+            else if (km == 2) cts_fused_rq<MM, 2, 2, true><<<grid, BX, 0, s>>>(b);
+            else if (km == 4) cts_fused_rq<MM, 4, 2, true><<<grid, BX, 0, s>>>(b);
+            else cts_fused_rq<MM, 8, 2, true><<<grid, BX, 0, s>>>(b);
+        } else if (g4) cts_fused_rq<MM, 1, 4><<<grid, BX, 0, s>>>(b);
         else if (km == 1) cts_fused_rq<MM, 1, 2><<<grid, BX, 0, s>>>(b);
         else if (km == 2) cts_fused_rq<MM, 2, 2><<<grid, BX, 0, s>>>(b);
         else if (km == 4) cts_fused_rq<MM, 4, 2><<<grid, BX, 0, s>>>(b);
         else cts_fused_rq<MM, 8, 2><<<grid, BX, 0, s>>>(b);
+    } else if (a->cts.x0) {
+        if (km != 1) return -1;  // sparse-input stages run one ciphertext per group off the u32 regen path
+        cts_fused<W, MM, 1, 2, REGEN, true><<<grid, BX, 0, s>>>(b);
     } else {
         if (km == 1) cts_fused<W, MM, 1, 2, REGEN><<<grid, BX, 0, s>>>(b);
         else if (km == 2) cts_fused<W, MM, 2, 2, REGEN><<<grid, BX, 0, s>>>(b);

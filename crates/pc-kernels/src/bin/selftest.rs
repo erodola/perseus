@@ -43,7 +43,7 @@ fn prime_table(primes: &[u64], word_bits: u32) -> Vec<u64> {
         .iter()
         .flat_map(|&p| {
             let c = PrimeConst::new(p, word_bits);
-            [c.p, c.mu_lo, c.mu_hi, c.neal_mu, c.bits as u64 | ((c.word_bits as u64) << 32), c.mont_pinv, c.mont_r2, 0]
+            [c.p, c.mu_lo, c.mu_hi, c.neal_mu, c.bits as u64 | ((c.word_bits as u64) << 32), c.mont_pinv, c.mont_r2, c.split]
         })
         .collect()
 }
@@ -81,7 +81,11 @@ impl<'a> Setup<'a> {
     }
     fn ntt_args(&self, base: *mut c_void, roff: &Dev, rprime: &Dev, nrows: usize) -> NttArgs {
         let t = self.ntt.as_ref().expect("NTT tables");
-        let lazy = self.wbits == 32 && self.primes.iter().all(|&p| p < 1 << 30);
+        let lazy = match self.wbits == 32 {
+            true if self.primes.iter().all(|&p| p < 1 << 28) => 2,
+            true if self.primes.iter().all(|&p| p < 1 << 30) => 1,
+            _ => 0,
+        };
         NttArgs {
             base,
             roff: roff.c() as *const u32,
@@ -95,7 +99,7 @@ impl<'a> Setup<'a> {
             pr: self.pr(),
             nrows: nrows as i32,
             chunk: 128,
-            lazy: lazy as i32,
+            lazy,
             ..Default::default()
         }
     }
@@ -137,7 +141,7 @@ fn t_ntt(st: &mut Setup) -> Vec<TestResult> {
     }
     // the lazy butterflies (when the primes allow them) and the reduced ones
     let a = st.ntt_args(buf.p(), &ro, &rp, 8);
-    for lazy in [a.lazy, 0] {
+    for lazy in (0..=a.lazy).rev() {
         let a = NttArgs { lazy, ..a };
         buf.write(&st.ctx, &host_in);
         ck(unsafe { (st.t.ntt_fwd)(&a, st.s()) });
@@ -154,7 +158,7 @@ fn t_ntt(st: &mut Setup) -> Vec<TestResult> {
         ntt_ref(&mut want16[i * N..(i + 1) * N], &w[i % 8], st.primes[i % 8]);
     }
     let a16 = st.ntt_args(buf16.p(), &ro16, &rp16, 16);
-    for lazy in [a16.lazy, 0] {
+    for lazy in (0..=a16.lazy).rev() {
         let a = NttArgs { lazy, ..a16 };
         buf16.write(&st.ctx, &host16);
         ck(unsafe { (st.t.ntt_fwd)(&a, st.s()) });
@@ -162,14 +166,35 @@ fn t_ntt(st: &mut Setup) -> Vec<TestResult> {
         ck(unsafe { (st.t.ntt_inv)(&a, st.s()) });
         out.push(cmp(&format!("ntt.inv(fwd(x)) == x, 16 rows (lazy {lazy})"), &buf16.read(&st.ctx), &host16));
     }
+    // ABI 17: the inverse with a per-row last-pass scale (es / ess by row, in place of N^-1): inv(fwd(x)) = x * c_i
+    let c: Vec<u64> = (0..16).map(|i| st.rng.below(st.primes[i % 8])).collect();
+    let c_h: Vec<u64> = (0..16).map(|i| mulmod(invmod(N as u64 % st.primes[i % 8], st.primes[i % 8]), c[i], st.primes[i % 8])).collect();
+    let cs_h: Vec<u64> = (0..16).map(|i| shoup(c_h[i], st.primes[i % 8], st.wbits)).collect();
+    let (cd, csd) = (st.ctx.up(&c_h), st.ctx.up(&cs_h));
+    let want_c: Vec<u64> = (0..16 * N).map(|e| mulmod(host16[e], c[e / N], st.primes[(e / N) % 8])).collect();
+    for (lazy, chunk) in [(a16.lazy, 0), (0, 0), (a16.lazy, 5)] {
+        let a = NttArgs { lazy, chunk, ..a16 };
+        buf16.write(&st.ctx, &host16);
+        ck(unsafe { (st.t.ntt_fwd)(&a, st.s()) });
+        let a = NttArgs { es: cd.c(), ess: csd.c(), ..a };
+        ck(unsafe { (st.t.ntt_inv)(&a, st.s()) });
+        out.push(cmp(&format!("ntt.inv row-scaled (fwd(x)) == x c_i, 16 rows (lazy {lazy}, chunk {chunk})"), &buf16.read(&st.ctx), &want_c));
+    }
     out
 }
 
-/// The lazy NTT at the edge of its range (u32): 8 primes just below 2^30 (words up to 4p - 1 < 2^32 between stages),
-/// edge inputs (p - 1, 0, 1) and uniform ones; in place lazy and reduced vs the host, the out-of-place first pass summing
-/// two sources (soff / snum), and epilogue 1 (eout = (ex - v) es) vs the host.
+/// The lazy NTT at the edge of its range (u32): 8 primes just below 2^30 (lazy 1: words up to 4p - 1 < 2^32 between
+/// stages), edge inputs (p - 1, 0, 1) and uniform ones; in place lazy and reduced vs the host, the out-of-place first
+/// pass summing two sources (soff / snum), and epilogue 1 (eout = (ex - v) es) vs the host.
 fn t_ntt_wide(st: &mut Setup) -> Vec<TestResult> {
-    let primes = ntt_primes(30, 8);
+    t_ntt_edge(st, 30, 1)
+}
+/// t_ntt_wide at lazy 2's edge: 8 primes just below 2^28 (forward words up to 16p - 1 < 2^32 between stages).
+fn t_ntt_wide28(st: &mut Setup) -> Vec<TestResult> {
+    t_ntt_edge(st, 28, 2)
+}
+fn t_ntt_edge(st: &mut Setup, bits: u32, lz: i32) -> Vec<TestResult> {
+    let primes = ntt_primes(bits, 8);
     let wbits = st.wbits;
     let mut tabs = (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
     let mut ws = Vec::new();
@@ -229,13 +254,13 @@ fn t_ntt_wide(st: &mut Setup) -> Vec<TestResult> {
         ..Default::default()
     };
     let mut out = Vec::new();
-    for lazy in [1, 0] {
+    for lazy in (0..=lz).rev() {
         let a = NttArgs { lazy, ..args };
         buf.write(ctx, &x0);
         ck(unsafe { (st.t.ntt_fwd)(&a, st.s()) });
-        out.push(cmp(&format!("ntt.fwd vs host, primes < 2^30 (lazy {lazy})"), &buf.read(ctx), &want));
+        out.push(cmp(&format!("ntt.fwd vs host, primes < 2^{bits} (lazy {lazy})"), &buf.read(ctx), &want));
         ck(unsafe { (st.t.ntt_inv)(&a, st.s()) });
-        out.push(cmp(&format!("ntt.inv(fwd(x)) == x, primes < 2^30 (lazy {lazy})"), &buf.read(ctx), &x0));
+        out.push(cmp(&format!("ntt.inv(fwd(x)) == x, primes < 2^{bits} (lazy {lazy})"), &buf.read(ctx), &x0));
     }
     // out of place: the first pass reads the sum of x0 and x1 (sources 8 rows apart), the transform lands in buf
     let mut both = x0.clone();
@@ -245,17 +270,17 @@ fn t_ntt_wide(st: &mut Setup) -> Vec<TestResult> {
     for i in 0..8 {
         ntt_ref(&mut want_s[i * N..(i + 1) * N], &ws[i], primes[i]);
     }
-    let a = NttArgs { lazy: 1, src: src.c(), soff: ro.c() as *const u32, snum: 2, sstride: (8 * N) as u64, ..args };
+    let a = NttArgs { lazy: lz, src: src.c(), soff: ro.c() as *const u32, snum: 2, sstride: (8 * N) as u64, ..args };
     buf.write(ctx, &vec![0u64; 8 * N]);
     ck(unsafe { (st.t.ntt_fwd)(&a, st.s()) });
-    out.push(cmp("ntt.fwd out of place, 2 sources summed (lazy 1)", &buf.read(ctx), &want_s));
+    out.push(cmp(&format!("ntt.fwd out of place, 2 sources summed, primes < 2^{bits} (lazy {lz})"), &buf.read(ctx), &want_s));
     // epilogue 1: eout = (ex - NTT(x0)) es
     let (exd, eo, esd, essd) = (ctx.up(&xe), ctx.zeros(8 * N), ctx.up(&s), ctx.up(&ss));
-    let a = NttArgs { lazy: 1, eout: eo.p(), ex: exd.c(), es: esd.c(), ess: essd.c(), epi: ntt_epi::SUB_MUL, ..args };
+    let a = NttArgs { lazy: lz, eout: eo.p(), ex: exd.c(), es: esd.c(), ess: essd.c(), epi: ntt_epi::SUB_MUL, ..args };
     buf.write(ctx, &x0);
     ck(unsafe { (st.t.ntt_fwd)(&a, st.s()) });
     let want_e: Vec<u64> = (0..8 * N).map(|i| mulmod((xe[i] + primes[i / N] - want[i]) % primes[i / N], s[i / N], primes[i / N])).collect();
-    out.push(cmp("ntt.fwd epilogue (ex - v) es (lazy 1)", &eo.read(ctx), &want_e));
+    out.push(cmp(&format!("ntt.fwd epilogue (ex - v) es, primes < 2^{bits} (lazy {lz})"), &eo.read(ctx), &want_e));
     out
 }
 
@@ -280,10 +305,17 @@ fn t_bconv(st: &mut Setup) -> Vec<TestResult> {
     let mut pool: Vec<u64> = Vec::new();
     let mut jobs = Vec::new();
     let mut want = vec![0u64; 9 * N];
+    // the sources times their pre factors (the prescaled jobs' input: ABI 17)
+    let mut src_pre = src_h.clone();
     for j in &jobs_h {
         let (ns, nt) = (j.sp.len(), j.tp.len());
         let off = pool.len();
         let pre: Vec<u64> = j.sp.iter().map(|&s| st.rng.below(st.p(s))).collect();
+        for (i, &s) in j.sp.iter().enumerate() {
+            for idx in 0..N {
+                src_pre[(j.src_off + i) * N + idx] = mulmod(src_h[(j.src_off + i) * N + idx], pre[i], st.p(s));
+            }
+        }
         let m: Vec<Vec<u64>> = j.sp.iter().map(|_| j.tp.iter().map(|&t| st.rng.below(st.p(t))).collect()).collect();
         let rb: Vec<f64> = j.sp.iter().map(|&s| 1.0 / st.p(s) as f64).collect();
         let bmod: Vec<u64> = j.tp.iter().map(|&t| st.rng.below(st.p(t))).collect();
@@ -316,7 +348,8 @@ fn t_bconv(st: &mut Setup) -> Vec<TestResult> {
             ntgt: nt as u32,
             pool_off: off as u32,
             exact: j.exact as u32,
-            pad: [0; 2],
+            prescaled: 0,
+            split: 0,
         });
         for idx in 0..N {
             let y: Vec<u64> = (0..ns)
@@ -358,7 +391,185 @@ fn t_bconv(st: &mut Setup) -> Vec<TestResult> {
     };
     ck(unsafe { (st.t.bconv)(&a, st.s()) });
     let got = dst.read(&st.ctx);
-    vec![cmp("bconv (plain + exact HPS) vs host", &got, &want)]
+    // the same jobs prescaled (the source rows hold x pre) and with the split reduction (plain jobs only)
+    let flagged: Vec<u32> = jobs.iter().flat_map(|j| [j.src_off, j.dst_off, j.nsrc, j.ntgt, j.pool_off, j.exact, 1, 1]).collect();
+    let jobs2 = st.ctx.up32(&flagged);
+    let src2 = st.ctx.up(&src_pre);
+    let dst2 = st.ctx.zeros(9 * N);
+    let a2 = BconvArgs { src: src2.c(), dst: dst2.p(), jobs: jobs2.c() as *const BconvJob, ..a };
+    ck(unsafe { (st.t.bconv)(&a2, st.s()) });
+    let got2 = dst2.read(&st.ctx);
+    vec![cmp("bconv (plain + exact HPS) vs host", &got, &want), cmp("bconv prescaled + split reduction vs host", &got2, &want)]
+}
+
+// ABI 20: bconv_wide, jobs of 40 sources (prime ids cycled over the 8 test primes; the formula, not a CRT) -> 20 and
+// 12 targets, plain and exact, then prescaled with the split reduction (plain job only), vs host
+fn t_bconv_wide(st: &mut Setup) -> Vec<TestResult> {
+    if st.ctx.wb != 4 {
+        return vec![];
+    }
+    let ns = 40usize;
+    let sp: Vec<usize> = (0..ns).map(|i| i % 8).collect();
+    let src_h: Vec<u64> = (0..ns * N).map(|x| st.rng.below(st.p(sp[x / N]))).collect();
+    let src = st.ctx.up(&src_h);
+    struct J {
+        dst_off: usize,
+        tp: Vec<usize>,
+        exact: bool,
+    }
+    let jobs_h = [J { dst_off: 0, tp: (0..20).map(|t| (3 * t + 1) % 8).collect(), exact: false }, J { dst_off: 20, tp: (0..12).map(|t| (5 * t + 2) % 8).collect(), exact: true }];
+    let ndst = 32;
+    let mut pool: Vec<u64> = Vec::new();
+    let mut jobs = Vec::new();
+    let mut want = vec![0u64; ndst * N];
+    let mut src_pre = src_h.clone();
+    for j in &jobs_h {
+        let nt = j.tp.len();
+        let off = pool.len();
+        let pre: Vec<u64> = sp.iter().map(|&q| st.rng.below(st.p(q))).collect();
+        let m: Vec<Vec<u64>> = sp.iter().map(|_| j.tp.iter().map(|&t| st.rng.below(st.p(t))).collect()).collect();
+        let rb: Vec<f64> = sp.iter().map(|&q| 1.0 / st.p(q) as f64).collect();
+        let bmod: Vec<u64> = j.tp.iter().map(|&t| st.rng.below(st.p(t))).collect();
+        pool.extend((0..ns).map(|i| i as u64));
+        pool.extend(sp.iter().map(|&q| q as u64));
+        pool.extend(&pre);
+        pool.extend((0..nt).map(|i| i as u64));
+        pool.extend(j.tp.iter().map(|&t| t as u64));
+        for row in &m {
+            pool.extend(row);
+        }
+        if j.exact {
+            while (pool.len() * 4) % 8 != 0 {
+                pool.push(0);
+            }
+            for &x in &rb {
+                let bits = x.to_bits();
+                pool.extend([bits & 0xFFFF_FFFF, bits >> 32]);
+            }
+            pool.extend(&bmod);
+        } else {
+            for i in 0..ns {
+                for idx in 0..N {
+                    src_pre[i * N + idx] = mulmod(src_h[i * N + idx], pre[i], st.p(sp[i]));
+                }
+            }
+        }
+        jobs.push([0u32, j.dst_off as u32, ns as u32, nt as u32, off as u32, j.exact as u32]);
+        for idx in 0..N {
+            let y: Vec<u64> = (0..ns).map(|i| mulmod(src_h[i * N + idx], pre[i], st.p(sp[i]))).collect();
+            let mut v = 0.0f64;
+            if j.exact {
+                for i in 0..ns {
+                    v = (y[i] as f64).mul_add(rb[i], v);
+                }
+            }
+            let u = (v + 0.5).floor() as u64;
+            for (k, &t) in j.tp.iter().enumerate() {
+                let p = st.p(t);
+                let acc: u128 = (0..ns).map(|i| y[i] as u128 * m[i][k] as u128).sum();
+                let mut r = (acc % p as u128) as u64;
+                if j.exact {
+                    r = submod(r, mulmod(u % p, bmod[k], p), p);
+                }
+                want[(j.dst_off + k) * N + idx] = r;
+            }
+        }
+    }
+    let pool_d = st.ctx.up(&pool);
+    let words = |pre: u32| -> Vec<u32> { jobs.iter().flat_map(|j| [j[0], j[1], j[2], j[3], j[4], j[5], pre, pre]).collect() };
+    let jobs_d = st.ctx.up32(&words(0));
+    let dst = st.ctx.zeros(ndst * N);
+    let a = BconvArgs { src: src.c(), dst: dst.p(), jobs: jobs_d.c() as *const BconvJob, pool: pool_d.c(), pr: st.pr(), njobs: 2, max_tgt: 20 };
+    ck(unsafe { (st.t.bconv_wide)(&a, st.s()) });
+    let mut out = vec![cmp("bconv_wide 40 sources (plain + exact HPS) vs host", &dst.read(&st.ctx), &want)];
+    // the plain job prescaled (rows hold x pre) with the split reduction
+    let jobs2 = st.ctx.up32(&words(1)[..8]);
+    let src2 = st.ctx.up(&src_pre);
+    let dst2 = st.ctx.zeros(ndst * N);
+    let a2 = BconvArgs { src: src2.c(), dst: dst2.p(), jobs: jobs2.c() as *const BconvJob, njobs: 1, ..a };
+    ck(unsafe { (st.t.bconv_wide)(&a2, st.s()) });
+    let got2 = dst2.read(&st.ctx);
+    out.push(cmp("bconv_wide prescaled + split (plain job) vs host", &got2[..20 * N], &want[..20 * N]));
+    out
+}
+
+/// Lean-chain-sized conversions (u32 words): 13 sources -> 26 targets (a full digit's ModUp, two target blocks) and an
+/// exact 15 -> 37 (the fused ModDown + rescale: P and two tops; more targets than one block's table), prescaled, with
+/// and without the split reduction.
+fn t_bconv_lean(st: &mut Setup) -> Vec<TestResult> {
+    if st.ctx.wb != 4 {
+        return Vec::new();
+    }
+    let src_h = st.rand_slots(2);
+    // (sources: rows 0..ns, prime ids r % 8; targets: prime ids k % 8 at dst rows dst_off..; exact)
+    let shapes = [(13usize, 26usize, 0usize, false), (15, 37, 26, true)];
+    let mut pool: Vec<u64> = Vec::new();
+    let mut words: [Vec<u32>; 2] = [Vec::new(), Vec::new()];
+    let mut want = vec![0u64; 63 * N];
+    let mut src_pre: Vec<Vec<u64>> = Vec::new();
+    for &(ns, nt, dst_off, exact) in &shapes {
+        let off = pool.len();
+        let pre: Vec<u64> = (0..ns).map(|i| st.rng.below(st.p(i % 8))).collect();
+        let m: Vec<Vec<u64>> = (0..ns).map(|_| (0..nt).map(|k| st.rng.below(st.p(k % 8))).collect()).collect();
+        let rb: Vec<f64> = (0..ns).map(|i| 1.0 / st.p(i % 8) as f64).collect();
+        let bmod: Vec<u64> = (0..nt).map(|k| st.rng.below(st.p(k % 8))).collect();
+        pool.extend((0..ns).map(|i| i as u64));
+        pool.extend((0..ns).map(|i| (i % 8) as u64));
+        pool.extend(&pre);
+        pool.extend((0..nt).map(|k| k as u64));
+        pool.extend((0..nt).map(|k| (k % 8) as u64));
+        for row in &m {
+            pool.extend(row);
+        }
+        if exact {
+            while pool.len() % 2 != 0 {
+                pool.push(0);
+            }
+            for &x in &rb {
+                pool.extend([x.to_bits() & 0xFFFF_FFFF, x.to_bits() >> 32]);
+            }
+            pool.extend(&bmod);
+        }
+        let y: Vec<u64> = (0..ns * N).map(|e| mulmod(src_h[e], pre[e / N], st.p((e / N) % 8))).collect();
+        for idx in 0..N {
+            let mut v = 0.0f64;
+            if exact {
+                for (i, &r) in rb.iter().enumerate() {
+                    v = (y[i * N + idx] as f64).mul_add(r, v);
+                }
+            }
+            let u = (v + 0.5).floor() as u64;
+            for k in 0..nt {
+                let p = st.p(k % 8);
+                let acc: u128 = (0..ns).map(|i| y[i * N + idx] as u128 * m[i][k] as u128).sum();
+                let mut r = (acc % p as u128) as u64;
+                if exact {
+                    r = submod(r, mulmod(u % p, bmod[k], p), p);
+                }
+                want[(dst_off + k) * N + idx] = r;
+            }
+        }
+        src_pre.push(y);
+        for (split, w) in words.iter_mut().enumerate() {
+            w.extend([0, dst_off as u32, ns as u32, nt as u32, off as u32, exact as u32, 1, split as u32]);
+        }
+    }
+    let pool_d = st.ctx.up(&pool);
+    let mut out = Vec::new();
+    for (split, w) in words.iter().enumerate() {
+        // one launch per job (each reads its own prescaled rows from row 0)
+        let dst = st.ctx.zeros(63 * N);
+        for (j, sp) in src_pre.iter().enumerate() {
+            let sd = st.ctx.up(sp);
+            let jw = st.ctx.up32(&w[8 * j..8 * j + 8]);
+            let a = BconvArgs { src: sd.c(), dst: dst.p(), jobs: jw.c() as *const BconvJob, pool: pool_d.c(), pr: st.pr(), njobs: 1, max_tgt: shapes[j].1 as i32 };
+            ck(unsafe { (st.t.bconv)(&a, st.s()) });
+        }
+        let got = dst.read(&st.ctx);
+        let name = if split == 1 { "bconv 13 -> 26, exact 15 -> 37, prescaled + split vs host" } else { "bconv 13 -> 26, exact 15 -> 37, prescaled vs host" };
+        out.push(cmp(name, &got, &want));
+    }
+    out
 }
 
 // ================================================================================================ element-wise
@@ -558,12 +769,37 @@ fn t_em(st: &mut Setup) -> Vec<TestResult> {
         o.write(&st.ctx, &h[4]);
         ck(unsafe { (st.t.tensor)(&TensorArgs { dbl: 1, ..a }, st.s()) });
         // rows n.. are not the launch's: kept
+        let pz: Vec<u64> = (0..8).map(|r| st.p(r)).collect();
         let two = |v: &[u64]| -> Vec<u64> {
-            v.iter().enumerate().map(|(j, &x)| if (j / N) % 8 < n { (2 * x) % st.p((j / N) % 8) } else { x }).collect()
+            v.iter().enumerate().map(|(j, &x)| if (j / N) % 8 < n { (2 * x) % pz[(j / N) % 8] } else { x }).collect()
         };
         out.push(cmp("tensor dbl (2 pairs, acc) vs host", &o.read(&st.ctx), &two(&wo)));
         out.push(cmp("tensor dbl d2 vs host", &d2.read(&st.ctx), &two(&wd2)));
         out.push(cmp("tensor dbl coef vs host", &coef.read(&st.ctx), &two(&wc)));
+        // tensor_y (ABI 19): the dbl launch with (c0, c1) -+= c[row] y (y = h5) in the same pass, d2 as before
+        let yc = st.per_row(false);
+        let ycs = st.shoup_row(&yc);
+        let (ycd, ycsd) = (st.ctx.up(&yc), st.ctx.up(&ycs));
+        for sub in [0, 1] {
+            o.write(&st.ctx, &h[4]);
+            let ya = TensorYArgs { t: TensorArgs { dbl: 1, ..a }, y: ctref(&d[5]), c: ycd.c(), cs: ycsd.c(), sub, pad: 0 };
+            ck(unsafe { (st.t.tensor_y)(&ya, st.s()) });
+            let mut wy = two(&wo);
+            for c in 0..k {
+                for part in 0..2 {
+                    for r in 0..n {
+                        let p = st.p(r);
+                        for i in 0..N {
+                            let j = idx(c, part, r, i);
+                            let m = mulmod(h[5][j], yc[r], p);
+                            wy[j] = if sub == 1 { submod(wy[j], m, p) } else { addmod(wy[j], m, p) };
+                        }
+                    }
+                }
+            }
+            out.push(cmp(&format!("tensor_y (dbl, sub {sub}) vs host"), &o.read(&st.ctx), &wy));
+            out.push(cmp(&format!("tensor_y d2 (sub {sub}) vs host"), &d2.read(&st.ctx), &two(&wd2)));
+        }
     }
     // md_epilogue (dbl, k), wsum (3 sources), add_const, mul_table
     {
@@ -663,6 +899,58 @@ fn t_em(st: &mut Setup) -> Vec<TestResult> {
             }
         }
         out.push(cmp("wsum_k (wsum + add_const) vs host", &o4.read(&st.ctx), &w));
+        // wsum_multi (ABI 19): 3 outputs over 4 sources (rows n, n, n - 1; the second without k) == their own wsum_k
+        {
+            let nsrc = 4;
+            let wm: Vec<Vec<u64>> = (0..3).map(|_| (0..nsrc * 8).map(|x| st.rng.below(st.p(x % 8))).collect()).collect();
+            let wms: Vec<Vec<u64>> = wm.iter().map(|v| st.shoup_row(v)).collect();
+            let wmd: Vec<(Dev, Dev)> = wm.iter().zip(&wms).map(|(v, s)| (st.ctx.up(v), st.ctx.up(s))).collect();
+            let outs: Vec<Dev> = (0..3).map(|_| st.ctx.up(&h[5])).collect();
+            let rows = [n, n, n - 1];
+            let mut src = [PolyRef::default(); 8];
+            for j in 0..nsrc {
+                src[j] = ctref(&d[j]);
+            }
+            let mut am = WsumMultiArgs {
+                out: [PolyRef::default(); 3],
+                src,
+                w: [std::ptr::null(); 3],
+                ws: [std::ptr::null(); 3],
+                k: [kd.c(), std::ptr::null(), kd.c()],
+                pr,
+                nout: 3,
+                nsrc: nsrc as i32,
+                rowstride: 8,
+                k_cts: k as i32,
+                n: [rows[0] as i32, rows[1] as i32, rows[2] as i32],
+                nmax: n as i32,
+            };
+            for m in 0..3 {
+                am.out[m] = ctref(&outs[m]);
+                am.w[m] = wmd[m].0.c();
+                am.ws[m] = wmd[m].1.c();
+            }
+            ck(unsafe { (st.t.wsum_multi)(&am, st.s()) });
+            for m in 0..3 {
+                let mut w = h[5].clone();
+                for c in 0..k {
+                    for part in 0..2 {
+                        for r in 0..rows[m] {
+                            let p = st.p(r);
+                            for i in 0..N {
+                                let j = idx(c, part, r, i);
+                                let mut x = (0..nsrc).fold(0, |s, q| addmod(s, mulmod(h[q][j], wm[m][q * 8 + r], p), p));
+                                if part == 0 && m != 1 {
+                                    x = addmod(x, kc[r] % p, p);
+                                }
+                                w[j] = x;
+                            }
+                        }
+                    }
+                }
+                out.push(cmp(&format!("wsum_multi output {m} (rows {}) vs host", rows[m]), &outs[m].read(&st.ctx), &w));
+            }
+        }
 
         let o3 = st.ctx.up(&h[5]);
         let a = AddConstArgs { x: ctref(&o3), k: kd.c(), pr, n: n as i32, kk: k as i32 };
@@ -697,6 +985,39 @@ fn t_em(st: &mut Setup) -> Vec<TestResult> {
         }
         let g4 = o4.read(&st.ctx);
         out.push(cmp("mul_table vs host", &g4, &w));
+
+        // ABI 18: mul_add_n = y + sum_j x_j t_j over 5 terms (x from d[0..5], t five tables), lazy and per term, with
+        // y (in place: y = out) and without
+        let tbs: Vec<Vec<u64>> = (0..5).map(|_| (0..8 * N).map(|x| st.rng.below(st.p(x / N))).collect()).collect();
+        let tds: Vec<Dev> = tbs.iter().map(|v| st.ctx.up(v)).collect();
+        for (lazy, with_y) in [(1, true), (0, true), (1, false), (0, false)] {
+            let o5 = if with_y { st.ctx.up(&h[5]) } else { st.ctx.zeros(tot) };
+            let mut a = MulAddNArgs { out: ctref(&o5), y: if with_y { ctref(&o5) } else { PolyRef::default() }, pr, n: n as i32, k: k as i32, nterm: 5, lazy, ..Default::default() };
+            for j in 0..5 {
+                a.x[j] = ctref(&d[j]);
+                a.t[j] = tds[j].c();
+            }
+            ck(unsafe { (st.t.mul_add_n)(&a, st.s()) });
+            let mut w = vec![0u64; tot];
+            for c in 0..k {
+                for part in 0..2 {
+                    for r in 0..n {
+                        let p = st.p(r);
+                        for i in 0..N {
+                            let jj = idx(c, part, r, i);
+                            let mut v = if with_y { h[5][jj] % p } else { 0 };
+                            for j in 0..5 {
+                                v = addmod(v, mulmod(h[j][jj], tbs[j][r * N + i], p), p);
+                            }
+                            w[jj] = v;
+                        }
+                    }
+                }
+            }
+            let g5 = o5.read(&st.ctx);
+            let mask = |v: &[u64]| -> Vec<u64> { (0..k).flat_map(|c| (0..2).flat_map(move |part| (0..n).map(move |r| idx(c, part, r, 0)))).flat_map(|j| v[j..j + N].to_vec()).collect() };
+            out.push(cmp(&format!("mul_add_n (5 terms, lazy {lazy}, y {with_y}) vs host"), &mask(&g5), &mask(&w)));
+        }
     }
     out
 }
@@ -1056,6 +1377,7 @@ fn t_cts(st: &mut Setup) -> Vec<TestResult> {
         nrows: g.rows.len() as i32,
         kmax,
         pair_cts: 0,
+        x0: std::ptr::null(),
     };
     ck(unsafe { (st.t.cts_fused)(&a, st.s()) });
     let got = res.read(&st.ctx);
@@ -1280,6 +1602,74 @@ fn keytab(st: &mut Setup, g: &KsGeo, all: bool) -> Vec<TestResult> {
             }
         }
     }
+    // ---- KS_SUM (u32): the R rotations summed into rotation 0's output (K = 1: ks_dot_seg; K > 1: ks_dot_key_sum)
+    // == the sum of ks_dot's R outputs (automorphisms 125 and 2N - 5: both rotations permute)
+    if st.ctx.wb == 4 {
+        let autos = st.ctx.up32(&[125, 2 * N as u32 - 5]);
+        for (key, rowsd, nrows, name) in [(key_full, &rows_full, 6, "dense full".to_string()), (key_band, &rows_band, 5, band_name.clone())] {
+            for (kc, mode) in [1usize, 2, 3].into_iter().flat_map(|kc| [1, 2, 1 | KS_ACC].map(|m| (kc, m))) {
+                let pre = if mode & KS_ACC != 0 { st.rand_slots(k * r) } else { zero.clone() };
+                o0.write(&st.ctx, &zero);
+                o1.write(&st.ctx, &zero);
+                let mut a = KsArgs {
+                    c1: c1.c(),
+                    modup: mu.c(),
+                    c0: c0.c(),
+                    out0: o0.p(),
+                    out1: o1.p(),
+                    kb: kbp.c() as *const *const c_void,
+                    ka: kap.c() as *const *const c_void,
+                    autok: autos.c() as *const u32,
+                    rows: rowsd.c() as *const u32,
+                    digit_of: dod.c() as *const i32,
+                    pmod: pmd.c(),
+                    pmods: pmsd.c(),
+                    pr: st.pr(),
+                    ct_stride: (8 * N) as u64,
+                    mu_ct_stride: (g.ndig * 8 * N) as u64,
+                    mu_digit_stride: (8 * N) as u64,
+                    out_ct_stride: (r * 8 * N) as u64,
+                    out_rot_stride: (8 * N) as u64,
+                    key_digit_stride: kds as u64,
+                    k: kc as i32,
+                    r: r as i32,
+                    ndig: g.ndig as i32,
+                    c0_mode: mode & 3,
+                    nq: g.nq as i32,
+                    nrows,
+                };
+                ck(unsafe { (st.t.ks_dot)(&a, st.s()) });
+                // want: output (c, rotation 0) = pre + sum_r dot_r, every other output = pre
+                let (d0, d1) = (o0.read(&st.ctx), o1.read(&st.ctx));
+                let ctw = r * 8 * N;
+                let mut want = pre.clone();
+                want.extend(pre.iter().copied());
+                for (part, d) in [&d0, &d1].into_iter().enumerate() {
+                    for c in 0..kc {
+                        for i in 0..8 * N {
+                            let p = st.p(i / N);
+                            let w = &mut want[part * pre.len() + c * ctw + i];
+                            for rr in 0..r {
+                                *w = (*w + d[c * ctw + rr * 8 * N + i]) % p;
+                            }
+                        }
+                    }
+                }
+                a.kb = std::ptr::null();
+                a.ka = std::ptr::null();
+                q0.write(&st.ctx, &pre);
+                q1.write(&st.ctx, &pre);
+                a.out0 = q0.p();
+                a.out1 = q1.p();
+                a.c0_mode = mode | KS_SUM;
+                let ka = KsKeyArgs { ks: a, key };
+                ck(unsafe { (st.t.ks_dot_key)(&ka, st.s()) });
+                let mut got = q0.read(&st.ctx);
+                got.extend(q1.read(&st.ctx));
+                out.push(cmp(&format!("ks_dot_key KS_SUM ({name}, {} digits, K={kc}, R=2, c0 mode {mode}) == sum of ks_dot", g.ndig), &got, &want));
+            }
+        }
+    }
     if !all {
         return out;
     }
@@ -1386,6 +1776,7 @@ fn keytab(st: &mut Setup, g: &KsGeo, all: bool) -> Vec<TestResult> {
                 nrows,
                 kmax,
                 pair_cts: 0,
+                x0: std::ptr::null(),
             };
             ck(unsafe { (st.t.cts_fused)(&a, st.s()) });
             let want = res.read(&st.ctx);
@@ -1457,6 +1848,7 @@ fn keytab(st: &mut Setup, g: &KsGeo, all: bool) -> Vec<TestResult> {
             nrows: 6,
             kmax: 1,
             pair_cts: 0,
+            x0: std::ptr::null(),
         };
         // cached reference: giant steps 0, 1 at region 0, giant steps 2, 3 at region `pair`
         ck(unsafe { (st.t.cts_fused)(&base, st.s()) });
@@ -1863,9 +2255,10 @@ fn run_instance(dev: &Device, inst: Instance, do_bench: bool) -> (u64, Vec<Strin
         tests.push(t_ntt);
         if wb == 4 {
             tests.push(t_ntt_wide);
+            tests.push(t_ntt_wide28);
         }
     }
-    tests.extend([t_bconv as Test, t_ew, t_pt_dot, t_em, t_mul_range, t_ks, t_regen, t_cts, t_keytab, t_rescale, t_automorph]);
+    tests.extend([t_bconv as Test, t_bconv_wide, t_bconv_lean, t_ew, t_pt_dot, t_em, t_mul_range, t_ks, t_regen, t_cts, t_keytab, t_rescale, t_automorph]);
     if has_ntt {
         tests.push(t_encode);
     }

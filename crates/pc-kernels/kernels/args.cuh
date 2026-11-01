@@ -9,7 +9,7 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 
-#define PC_KERNELS_ABI 16u
+#define PC_KERNELS_ABI 20u
 #define PC_RING_ABI 7u
 // the ring tables (RingTable) are compiled once per ring size with -DPC_LOGN; everything else is N = 2^16
 #ifndef PC_LOGN
@@ -34,7 +34,7 @@
 //   36   word_bits  BITS of the word this entry was built for (16, 32 or 64); kernels do not read it, checks do
 //   40   mont_pinv  -p^-1 mod 2^BITS                        (Montgomery)
 //   48   mont_r2    2^(2*BITS) mod p                         (Montgomery: R^2, converts a REDC result back)
-//   56   reserved   0
+//   56   split      u32: 2^32 mod p (low word), floor((2^32 mod p) 2^32 / p) (high word); other words 0
 struct PrimeConst {
     uint64_t p;
     uint64_t mu_lo;
@@ -44,7 +44,7 @@ struct PrimeConst {
     uint32_t word_bits;
     uint64_t mont_pinv;
     uint64_t mont_r2;
-    uint64_t reserved;
+    uint64_t split;
 };
 static_assert(sizeof(PrimeConst) == 64, "PrimeConst layout");
 
@@ -76,7 +76,10 @@ static_assert(sizeof(PolyRef) == 24, "PolyRef layout");
 //     1: eout[r] = (x - v) s            (ModDown's last step: (x - conv) P^-1)
 //     2: eout[r] = d[r] + (x - v) s     (the same, accumulated: d = ed, or eout when ed is null; ABI 12)
 //     3: eout[r] = x s + v              (the rescale's combine: alpha x + the correction)
-//   lazy: 1 when every prime of the launch is below 2^30: lazy butterflies at u32 (same canonical result).
+//   lazy: 1 when every prime of the launch is below 2^30: lazy butterflies at u32 (same canonical result); 2 when
+//   every prime is below 2^28: the forward transform's words grow to 16p between its few reductions.
+// ABI 17: an inverse transform with es non-null scales row i by es[i] (Shoup companion ess[i]) in place of N^-1 (a
+// per-row constant folded into the last pass: N^-1 times the base conversion's pre factor of the row).
 struct NttArgs {
     void* base;
     const uint32_t* roff;
@@ -106,6 +109,7 @@ static_assert(sizeof(NttArgs) == 176, "NttArgs layout");
 // ------------------------------------------------------------------------------------------------ BConv
 // Batched fast base conversion (coefficient domain), one launch for many jobs (digits x ciphertexts):
 //   y_i = x_i * pre_i mod s_i (i < nsrc <= 16);  out_t = sum_i y_i * M[i][t] mod t;
+//   prescaled jobs (ABI 17): y_i = x_i as stored (the INTT's last pass multiplied by pre_i);
 //   exact jobs: v = sum_i y_i * rb_i (double FMA, source order), u = floor(v + 0.5), out_t -= u * (B mod t).
 // The pool is an array of W words. Pool layout at pool_off (all counts in W words):
 //   src_row[nsrc], src_prime[nsrc], pre[nsrc], tgt_row[ntgt], tgt_prime[ntgt], M[nsrc][ntgt],
@@ -116,7 +120,8 @@ struct BconvJob {
     uint32_t nsrc, ntgt;
     uint32_t pool_off;          // W words
     uint32_t exact;
-    uint32_t pad[2];
+    uint32_t prescaled;  // ABI 17: 1 = the source rows hold y_i = x_i pre_i already (folded into the INTT)
+    uint32_t split;      // ABI 17: 1 = u32 words, every target < 2^30: the sums reduced as hi 2^32 + lo (plain jobs)
 };
 static_assert(sizeof(BconvJob) == 32, "BconvJob layout");
 
@@ -171,6 +176,8 @@ static_assert(sizeof(PtDotArgs) == 128, "PtDotArgs layout");
 // 2 c0 extended; c0_mode | KS_ACC (ABI 16): (s0, s1) added onto the outputs' words. Outputs written at
 // automorph_slot(autok[r], i) (k = 1: identity). Grid row y -> prime id rows[y].
 constexpr int32_t KS_ACC = 4;
+// c0_mode | KS_SUM: ks_dot_seg (u32, K = 1) sums its R rotations into rotation 0's output (other dot launchers refuse it)
+constexpr int32_t KS_SUM = 8;
 struct KsArgs {
     const void* c1;
     const void* modup;
@@ -275,8 +282,12 @@ struct CtsArgs {
     // > 0: giant steps j = 2l, 2l+1 of a launch sit at res + l * pair_cts cts (the LtStage result layout), so one
     // K=1 launch carries up to 4 giant steps and regenerates the baby keys once; 0: all at res + (c G + j) cts (G <= 2)
     int32_t pair_cts;
+    // ABI 20: non-null: baby 0 is x0 as stored (extended: Q rows 0..=top and the special rows, ct c at
+    // x0 + c*ct_stride), a key-switched identity (the sparse -> dense switch of a raise folded into its CtS stage 0);
+    // null: baby 0 = (P c0, P c1) of x
+    const void* x0;
 };
-static_assert(sizeof(CtsArgs) == 192, "CtsArgs layout");
+static_assert(sizeof(CtsArgs) == 200, "CtsArgs layout");
 
 // ------------------------------------------------------------------------------------------------ EvalMod kernels
 // Q rows [0, n) of K ciphertexts (row index == prime id), PolyRef layout.
@@ -291,6 +302,17 @@ struct TensorArgs {
     int32_t dbl, pad;
 };
 static_assert(sizeof(TensorArgs) == 192, "TensorArgs layout");
+
+// tensor_y (ABI 19): tensor, then (c0, c1) +-= y * c[row] (Shoup companion cs; both parts of y, after the doubling;
+// d2 unchanged). EvalMod's `x * y +- c t` before the relinearization (= tensor; ew_scale; ew_add, word for word).
+struct TensorYArgs {
+    TensorArgs t;
+    PolyRef y;
+    const void* c;
+    const void* cs;
+    int32_t sub, pad;
+};
+static_assert(sizeof(TensorYArgs) == 240, "TensorYArgs layout");
 
 // md_epilogue: for parts 0, 1: dst = f (dst + (x - t) binv) [+ k on part 0]
 struct MdEpiArgs {
@@ -330,6 +352,21 @@ struct WsumKArgs {
 };
 static_assert(sizeof(WsumKArgs) == 264, "WsumKArgs layout");
 
+// wsum_multi (ABI 19): nout <= 3 weighted sums of one source list read once: out[m] = sum_{j < nsrc <= 8} w[m][j][row] *
+// src_j (both parts; Shoup companions ws[m]) [+ k[m][row] on part 0, raw, reduced once if >= p] on rows [0, n[m]);
+// blocks over rows [0, max n). Each output equals its own wsum / wsum_k word for word (zero weights add exact zeros).
+struct WsumMultiArgs {
+    PolyRef out[3];
+    PolyRef src[8];
+    const void* w[3];
+    const void* ws[3];
+    const void* k[3];
+    const PrimeConst* pr;
+    int32_t nout, nsrc, rowstride, K;
+    int32_t n[3], nmax;
+};
+static_assert(sizeof(WsumMultiArgs) == 376, "WsumMultiArgs layout");
+
 // add_const: part 0 += k[row];  mul_table: out = in * t[row][i] (both parts; general ModMul product)
 struct AddConstArgs {
     PolyRef x;
@@ -355,6 +392,19 @@ struct MulAddArgs {
     int32_t sub, pad;
 };
 static_assert(sizeof(MulAddArgs) == 104, "MulAddArgs layout");
+
+// mul_add_n (ABI 18): out = y + sum_j x_j * t_j over nterm <= 8 terms (y.base null: no y), rows [0, n) of K
+// ciphertexts, both parts, t_j as mul_table's: a chain of mult_pt_add's in one pass. lazy = 1: the products summed in
+// the double word and reduced once (nterm (max p)^2 < 2^(2 BITS), the host's check), else each reduced. The same
+// canonical words as the chain. out may alias y or any x_j (element-wise).
+struct MulAddNArgs {
+    PolyRef out, y;
+    PolyRef x[8];
+    const void* t[8];
+    const PrimeConst* pr;
+    int32_t n, K, nterm, lazy;
+};
+static_assert(sizeof(MulAddNArgs) == 328, "MulAddNArgs layout");
 
 // ------------------------------------------------------------------------------------------------ rescale
 // Composite one-pass rescale by the top ndrop (1 or 2) primes:
@@ -584,7 +634,7 @@ struct CtsRegenArgs {
     CtsArgs cts;
     KeyTab key;
 };
-static_assert(sizeof(CtsRegenArgs) == 232, "CtsRegenArgs layout");
+static_assert(sizeof(CtsRegenArgs) == 240, "CtsRegenArgs layout");
 
 // ks_dot (K <= 4 ciphertexts x R keys, automorphism, c0 modes) with the keys read through KeyTab (`ks.kb` unused;
 // `ks.ka` / `ks.key_digit_stride` only for digits >= key.nregen); at K = 1 (u32) on warp-sized row segments, 8 slots
@@ -803,8 +853,13 @@ struct KernelTable {
     int (*coeff_sum)(const CoeffArgs*, cudaStream_t);
     int (*mul_add)(const MulAddArgs*, cudaStream_t);
     int (*rescale_fwd)(const RescaleNttArgs*, cudaStream_t);
+    int (*mul_add_n)(const MulAddNArgs*, cudaStream_t);
+    int (*tensor_y)(const TensorYArgs*, cudaStream_t);
+    int (*wsum_multi)(const WsumMultiArgs*, cudaStream_t);
+    // ABI 20: bconv for jobs of more than 16 sources (u32 words: up to 48), the same formula
+    int (*bconv_wide)(const BconvArgs*, cudaStream_t);
 };
-static_assert(sizeof(KernelTable) == 16 + 40 * 8, "KernelTable layout");
+static_assert(sizeof(KernelTable) == 16 + 44 * 8, "KernelTable layout");
 
 // ------------------------------------------------------------------------------------------------ ring tables
 // One table per (W, MM, log_n), exported as `extern "C" const RingTable* pc_ring_<w>_<log_n>()`: the transforms

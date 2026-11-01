@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "heuristic_config": "ilp",
+  "heuristic_config": "min_cut",
   "input_graph": {
     "version": 1,
     "num_nodes": 1092,
@@ -125,21 +125,6 @@
     "v_921"
   ],
   "summary": {
-    "placer_meta": {
-      "n_vars": 16302,
-      "n_int": 16302,
-      "n_rows": 60410,
-      "mincut_cost": 8.00013178442154,
-      "mincut_placed": 4,
-      "tie": "optimal",
-      "status": "optimal",
-      "objective": 7.000063292528716,
-      "bound": 7.000062112133935,
-      "gap": 1.6862630117795773e-07,
-      "solve_s": 10.15,
-      "objective_kind": "total",
-      "pruned": 0
-    },
     "num_placements": 4,
     "num_hint_bootstraps": 3,
     "num_hints_total": 6,
@@ -2409,41 +2394,8 @@
         "shipped_order": 1
       },
       "blind_branches": {
-        "count": 94,
-        "vars": [
-          "v_426",
-          "v_427",
-          "v_428",
-          "v_429",
-          "v_430",
-          "v_431",
-          "v_432",
-          "v_433",
-          "v_434",
-          "v_435",
-          "v_436",
-          "v_437",
-          "v_438",
-          "v_439",
-          "v_440",
-          "v_441",
-          "v_442",
-          "v_443",
-          "v_444",
-          "v_445",
-          "v_446",
-          "v_447",
-          "v_448",
-          "v_449",
-          "v_450",
-          "v_451",
-          "v_452",
-          "v_453",
-          "v_454",
-          "v_455",
-          "v_456",
-          "v_490"
-        ]
+        "count": 0,
+        "vars": []
       },
       "placed_input_levels": {
         "v_379": 44.0,

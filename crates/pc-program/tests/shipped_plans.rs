@@ -205,6 +205,31 @@ fn gpt2_decode_n32a4_kc16r_cm() {
     shipped_order_sites("gpt2_decode_python_n32a4_kc16r_cm", &progs, &sites);
 }
 
+/// Decode-8's served plan, CutMax's `_cmfl` (ln_f folded into the LM head): blocks 0-11 on the kc16r capture, stages 12
+/// and 13 on the `_cmfl` capture (its PLAN_CMD.txt `graph=` line), joined in one graph dir.
+#[test]
+fn gpt2_decode_n32a4_kc16r_cmfl() {
+    let g = assets().join("graphs");
+    let (base, tail) = (g.join("gpt2_decode_python_n32_kc16r_cm"), g.join("gpt2_decode_python_n32_kc16r_cmfl"));
+    if !base.join("block_0/graph.json").is_file() || !tail.join("block_12/graph.json").is_file() {
+        println!("SKIP gpt2_decode_python_n32a4_kc16r_cmfl: graphs not on disk");
+        return;
+    }
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("graph_kc16r_cmfl");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    for b in 0..14 {
+        let src = if b < 12 { &base } else { &tail };
+        std::os::unix::fs::symlink(src.join(format!("block_{b}")), dir.join(format!("block_{b}"))).unwrap();
+    }
+    for f in ["capture_env.json", "capture_config.json"] {
+        std::fs::copy(tail.join(f), dir.join(f)).unwrap();
+    }
+    let Some(progs) = gate("gpt2_decode_python_n32a4_kc16r_cmfl", dir.to_str().unwrap()) else { return };
+    let sites = [("block_2", "v_1120", 2), ("block_9", "v_921", 2), ("block_11", "v_1182", 2)];
+    shipped_order_sites("gpt2_decode_python_n32a4_kc16r_cmfl", &progs, &sites);
+}
+
 #[test]
 fn gpt2_prefill() {
     gate("gpt2_prefill_python_n32_pcmmstcf", "gpt2_prefill_python_n32_pcmmstcf");

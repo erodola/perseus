@@ -22,6 +22,19 @@ __device__ __forceinline__ W b_at(const KeyTab& T, const void* kb, size_t row, u
     }
     return __ldg((const W*)kb + row * T.row_words + s);
 }
+// 4 consecutive words read once (evict-first in L2: the key stream does not push the ModUp digits and the dot's
+// outputs out of L2)
+template <class W>
+__device__ __forceinline__ V4<W> ldcs4(const W* p) {
+    V4<W> r;
+    if constexpr (sizeof(W) == 4) {
+        const uint4 x = __ldcs((const uint4*)p);
+        r.v[0] = x.x; r.v[1] = x.y; r.v[2] = x.z; r.v[3] = x.w;
+    } else {
+        r = ldg4<W>(p);
+    }
+    return r;
+}
 // PACKED: the table's rows are packed (T.bits > 0; u32 only), a compile-time split so dense reads carry no packed code
 template <class W, bool PACKED>
 __device__ __forceinline__ V4<W> b_at4(const KeyTab& T, const void* kb, size_t row, uint32_t s4) {
@@ -35,7 +48,7 @@ __device__ __forceinline__ V4<W> b_at4(const KeyTab& T, const void* kb, size_t r
         const uint32_t nw = (o + 4 * bits + 31) >> 5;
         uint32_t wd[5];
 #pragma unroll
-        for (int t = 0; t < 5; ++t) wd[t] = (uint32_t)t < nw ? __ldg(r + w0 + t) : 0u;
+        for (int t = 0; t < 5; ++t) wd[t] = (uint32_t)t < nw ? __ldcs(r + w0 + t) : 0u;
         const uint32_t mask = (uint32_t)((1ull << bits) - 1);
         V4<W> v;
 #pragma unroll
@@ -47,7 +60,7 @@ __device__ __forceinline__ V4<W> b_at4(const KeyTab& T, const void* kb, size_t r
         }
         return v;
     }
-    return ldg4<W>((const W*)kb + row * T.row_words + s4);
+    return ldcs4<W>((const W*)kb + row * T.row_words + s4);
 }
 }  // namespace kskey
 
@@ -141,7 +154,7 @@ __global__ void __launch_bounds__(BX) ks_dot_regen(KsRegenArgs G) {
         chacha::regen_slots4<W, MM>(G.seed, lane, (uint32_t)base, (uint32_t)d, q, chacha::TAG_KSKA, a4);
         V4<W> b4;
         if constexpr (TAB != 0) b4 = kskey::b_at4<W, TAB == 2>(T, kb, (size_t)d * T.srows + slot, (uint32_t)base);
-        else b4 = ldg4<W>((const W*)kb + d * A.key_digit_stride + roff);
+        else b4 = kskey::ldcs4<W>((const W*)kb + d * A.key_digit_stride + roff);
 #pragma unroll
         for (int c = 0; c < KMAX; ++c) {
             if (c < A.K) {
@@ -276,12 +289,24 @@ __global__ void __launch_bounds__(BX) ks_dot_key(KsKeyArgs G) {
     }
 }
 
+// k^-1 mod 2N for an odd Galois element k (Newton: each step doubles the correct low bits)
+__device__ __forceinline__ uint32_t galois_inv(uint32_t k) {
+    uint32_t x = k;
+#pragma unroll
+    for (int i = 0; i < 5; ++i) x *= 2u - k * x;
+    return x & (2u * N - 1);
+}
 // ks_dot_key at K = 1 (u32) on warp-sized row segments: a warp owns slots R * 256.. of row t, 8 consecutive per lane.
 // Its lanes expand `a` one 16-slot ChaCha block per thread (two digits per pass, through shared memory), and the
 // automorphism maps the segment onto one segment (in the bit-reversed order a slot's segment decides its image's), so
 // the outputs are permuted inside the warp.
-template <class MM, bool PACKED>
-__global__ void __launch_bounds__(256) ks_dot_seg(KsKeyArgs G) {
+// Each digit first asks L2 for the next digit's lines of the warp's segment (`b`, the ModUp digit or c1, a resident `a`),
+// so its loads hit L2 instead of DRAM. At most 80 registers: 3 blocks per SM (shared memory holds 3).
+// SUM (c0_mode & KS_SUM, ABI-free: a bit of c0_mode): the R rotations summed into rotation 0's output, out =
+// sum_r sigma_r(dot_r) (+ out with KS_ACC). A warp owns output segment S; rotation r's dot runs on the input segment
+// sigma_r^-1 maps onto S, its outputs permuted onto S and added: the R extended rotations are never stored.
+template <class MM, bool PACKED, bool SUM>
+__global__ void __launch_bounds__(256, 3) ks_dot_seg(KsKeyArgs G) {
     using W = uint32_t;
     using Wd = WideOf<W>;
     __shared__ W sa[8][2][264];
@@ -292,14 +317,20 @@ __global__ void __launch_bounds__(256) ks_dot_seg(KsKeyArgs G) {
     const PrimeConst& q = A.pr[t];
     const W p = (W)q.p;
     const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
-    const uint32_t R = blockIdx.x * 8 + wp;
-    const uint32_t base = R * 256 + 8 * lane;
+    const uint32_t S = blockIdx.x * 8 + wp;
     const int dt = (int)t < A.nq ? A.digit_of[t] : -1;
-    const size_t roff = (size_t)t * N + base;
     const int slot = kskey::slot_of(T, (int)t, A.nq);
     const int nreg = min(A.ndig, T.nregen);
     auto pad = [](int e) { return e + (e >> 5); };
+    W acc[2][8];
     for (int r = 0; r < A.R; ++r) {
+        uint32_t R = S;
+        if constexpr (SUM) {
+            const uint32_t k = A.autok[r];
+            if (k != 1) R = automorph_slot(galois_inv(k), S * 256) >> 8;
+        }
+        const uint32_t base = R * 256 + 8 * lane;
+        const size_t roff = (size_t)t * N + base;
         Wd s0[8], s1[8];
 #pragma unroll
         for (int u = 0; u < 8; ++u) s0[u] = s1[u] = 0;
@@ -308,6 +339,31 @@ __global__ void __launch_bounds__(256) ks_dot_seg(KsKeyArgs G) {
 #pragma unroll
         for (int i = 0; i < 8; ++i) key[i] = __ldg(T.seed[r] + i);
         for (int d = 0; d < A.ndig; ++d) {
+            if (d + 1 < A.ndig) {
+                // digit e's lines of the segment, 8 per source: lanes 0-7 `b`, 8-15 the ModUp digit (c1), 16-23 a resident `a`
+                const int e = d + 1;
+                const size_t seg = (size_t)t * N + R * 256;
+                const char* p = nullptr;
+                if (lane < 8) {
+                    const size_t row = ((size_t)e * T.srows + slot) * T.row_words;
+                    p = PACKED ? (const char*)((const uint32_t*)kb + row + (((uint64_t)R * 256 * (uint32_t)T.bits) >> 5))
+                               : (const char*)((const W*)kb + row + R * 256);
+                } else if (lane < 16) {
+                    p = (const char*)((e == dt) ? (const W*)A.c1 + seg : (const W*)A.modup + e * A.mu_digit_stride + seg);
+                } else if (lane < 24 && e >= nreg) {
+                    p = (const char*)((const W*)A.ka[r] + e * A.key_digit_stride + seg);
+                }
+                if (lane < 8) {
+                    // the key's lines as evict-first (a 16-byte aligned bulk prefetch with an evict-first policy), the
+                    // segment's bytes only (32 bits per 128-byte line of a packed row)
+                    if (PACKED && lane * 4 >= (int)T.bits) p = nullptr;
+                    uint64_t pol;
+                    asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(pol));
+                    const char* q16 = (const char*)((uintptr_t)(p + 128 * lane) & ~(uintptr_t)15);
+                    if (p) asm volatile("cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], 128, %1;" ::"l"(q16), "l"(pol) : "memory");
+                } else if (p)
+                    asm volatile("prefetch.global.L2 [%0];" ::"l"(p + 128 * (lane & 7)));
+            }
             if ((d & 1) == 0 && d < nreg) {
                 // digits d, d + 1: lanes 0-15 / 16-31 expand the segment's 16 blocks of one digit each
                 const int dd = d + (lane >> 4);
@@ -370,6 +426,11 @@ __global__ void __launch_bounds__(256) ks_dot_seg(KsKeyArgs G) {
             W x[8];
 #pragma unroll
             for (int u = 0; u < 8; ++u) x[u] = so[wp][pad(8 * lane + u)];
+            if constexpr (SUM) {
+#pragma unroll
+                for (int u = 0; u < 8; ++u) acc[part][u] = r == 0 ? x[u] : add<W>(acc[part][u], x[u], p);
+                continue;
+            }
             W* g = (W*)(part ? A.out1 : A.out0) + r * A.out_rot_stride + (size_t)t * N + R2 * 256 + 8 * lane;
             if (A.c0_mode & KS_ACC) {
                 const V4<W> y0 = load4<W>(g), y1 = load4<W>(g + 4);
@@ -379,6 +440,376 @@ __global__ void __launch_bounds__(256) ks_dot_seg(KsKeyArgs G) {
             store4<W>(g, x[0], x[1], x[2], x[3]);
             store4<W>(g + 4, x[4], x[5], x[6], x[7]);
         }
+    }
+    if constexpr (SUM) {
+#pragma unroll
+        for (int part = 0; part < 2; ++part) {
+            W* g = (W*)(part ? A.out1 : A.out0) + (size_t)t * N + S * 256 + 8 * lane;
+            W x[8];
+#pragma unroll
+            for (int u = 0; u < 8; ++u) x[u] = acc[part][u];
+            if (A.c0_mode & KS_ACC) {
+                const V4<W> y0 = load4<W>(g), y1 = load4<W>(g + 4);
+#pragma unroll
+                for (int u = 0; u < 4; ++u) x[u] = add<W>(x[u], y0.v[u], p), x[4 + u] = add<W>(x[4 + u], y1.v[u], p);
+            }
+            store4<W>(g, x[0], x[1], x[2], x[3]);
+            store4<W>(g + 4, x[4], x[5], x[6], x[7]);
+        }
+    }
+}
+
+// ks_dot_key with the R rotations summed into rotation 0's output (KS_SUM) at K > 1 (u32): out = sum_r sigma_r(dot_r)
+// (+ out with KS_ACC), one extended ciphertext per member stored instead of R. A thread owns 4 consecutive OUTPUT slots
+// O of row t; rotation r's dot runs on the 4 input slots sigma_r^-1 maps onto them (in the bit-reversed order an
+// automorphism maps aligned blocks onto aligned blocks, permuted inside), its 4 results permuted onto O in registers.
+// The input groups of a 4-lane group are the quarters of one aligned 16-slot block: its cooperative ChaCha block, each
+// lane taking its quarter (regen4q). Same words as ks_dot_key + the summed ModDown.
+template <class MM, int KMAX, bool PACKED>
+__global__ void __launch_bounds__(BX) ks_dot_key_sum(KsKeyArgs G) {
+    using W = uint32_t;
+    using Wd = WideOf<W>;
+    const KsArgs& A = G.ks;
+    const KeyTab& T = G.key;
+    const uint32_t t = A.rows[blockIdx.y];
+    const PrimeConst& q = A.pr[t];
+    const W p = (W)q.p;
+    const uint32_t O = (blockIdx.x * BX + threadIdx.x) * 4;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t O16 = O & ~15u;
+    const int dt = (int)t < A.nq ? A.digit_of[t] : -1;
+    const size_t row0 = (size_t)t * N;
+    const int slot = kskey::slot_of(T, (int)t, A.nq);
+    W acc0[KMAX][4], acc1[KMAX][4];
+#pragma unroll
+    for (int c = 0; c < KMAX; ++c)
+#pragma unroll
+        for (int w = 0; w < 4; ++w) acc0[c][w] = acc1[c][w] = 0;
+    for (int r = 0; r < A.R; ++r) {
+        const uint32_t k = A.autok[r];
+        const uint32_t ki = k == 1 ? 1u : galois_inv(k);
+        // this lane's input group, the quarter of the group's 16-block each of its 4 lanes reads, and the input index of
+        // each output slot O + v
+        uint32_t I = O, jsel = 0xE4u, wsel = 0xE4u;
+        if (k != 1) {
+            I = automorph_slot(ki, O) & ~3u;
+            jsel = 0;
+            wsel = 0;
+#pragma unroll
+            for (uint32_t m = 0; m < 4; ++m) {
+                jsel |= ((automorph_slot(ki, O16 + 4 * m) >> 2) & 3u) << (2 * m);
+                wsel |= (automorph_slot(ki, O + m) & 3u) << (2 * m);
+            }
+        }
+        const size_t roff = row0 + I;
+        Wd s0[KMAX][4], s1[KMAX][4];
+#pragma unroll
+        for (int c = 0; c < KMAX; ++c)
+#pragma unroll
+            for (int w = 0; w < 4; ++w) s0[c][w] = s1[c][w] = 0;
+        const void* kb = T.kb[r];
+        const uint32_t* seed = T.seed[r];
+        for (int d = 0; d < A.ndig; ++d) {
+            W a4[4];
+            if (d < T.nregen) {
+                chacha::regen4q(seed, lane, I >> 4, (uint32_t)d, (uint32_t)p, N >> 4, chacha::TAG_KSKA, jsel, a4);
+            } else {  // resident dense `a` (full layout, prime-id rows)
+                const V4<W> av = ldg4<W>((const W*)A.ka[r] + d * A.key_digit_stride + roff);
+#pragma unroll
+                for (int w = 0; w < 4; ++w) a4[w] = av.v[w];
+            }
+            const V4<W> b4 = kskey::b_at4<W, PACKED>(T, kb, (size_t)d * T.srows + slot, I);
+#pragma unroll
+            for (int c = 0; c < KMAX; ++c) {
+                if (c < A.K) {
+                    const V4<W> x4 = (d == dt) ? load4<W>((const W*)A.c1 + c * A.ct_stride + roff)
+                                               : load4<W>((const W*)A.modup + c * A.mu_ct_stride + d * A.mu_digit_stride + roff);
+#pragma unroll
+                    for (int w = 0; w < 4; ++w) {
+                        s0[c][w] += (Wd)x4.v[w] * b4.v[w];
+                        s1[c][w] += (Wd)x4.v[w] * a4[w];
+                    }
+                }
+            }
+        }
+#pragma unroll
+        for (int c = 0; c < KMAX; ++c) {
+            if (c < A.K) {
+                V4<W> c04{};
+                if (A.c0_mode & 3) c04 = load4<W>((const W*)A.c0 + c * A.ct_stride + roff);
+                W r0[4], r1[4];
+#pragma unroll
+                for (int w = 0; w < 4; ++w) {
+                    r0[w] = MM::reduce(s0[c][w], q);
+                    r1[w] = MM::reduce(s1[c][w], q);
+                    if ((A.c0_mode & 3) == 1) {
+                        if ((int)t < A.nq) r0[w] = add<W>(r0[w], mul_shoup<W>(c04.v[w], ((const W*)A.pmod)[t], ((const W*)A.pmods)[t], p), p);
+                    } else if ((A.c0_mode & 3) == 2) {
+                        r0[w] = add<W>(r0[w], c04.v[w], p);
+                    }
+                }
+#pragma unroll
+                for (int v = 0; v < 4; ++v) {
+                    const uint32_t iv = (wsel >> (2 * v)) & 3u;
+                    const W x0 = chacha::sel4(iv, r0[0], r0[1], r0[2], r0[3]);
+                    const W x1 = chacha::sel4(iv, r1[0], r1[1], r1[2], r1[3]);
+                    acc0[c][v] = r == 0 ? x0 : add<W>(acc0[c][v], x0, p);
+                    acc1[c][v] = r == 0 ? x1 : add<W>(acc1[c][v], x1, p);
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int c = 0; c < KMAX; ++c) {
+        if (c < A.K) {
+            const size_t ob = c * A.out_ct_stride + row0 + O;
+            W* g0 = (W*)A.out0 + ob;
+            W* g1 = (W*)A.out1 + ob;
+            if (A.c0_mode & KS_ACC) {
+                const V4<W> y0 = load4<W>(g0), y1 = load4<W>(g1);
+#pragma unroll
+                for (int w = 0; w < 4; ++w) acc0[c][w] = add<W>(acc0[c][w], y0.v[w], p), acc1[c][w] = add<W>(acc1[c][w], y1.v[w], p);
+            }
+            store4<W>(g0, acc0[c][0], acc0[c][1], acc0[c][2], acc0[c][3]);
+            store4<W>(g1, acc1[c][0], acc1[c][1], acc1[c][2], acc1[c][3]);
+        }
+    }
+}
+
+// ks_dot_key_sum with at most SUM_D digits: per rotation the digits' `a` and `b` of the thread's input slots are
+// expanded / read once into registers, then the members run one after the other (one member's double-word sums
+// live at a time): fewer registers than ks_dot_key_sum's K x 4 sums, so more warps per SM. Same words.
+constexpr int SUM_D = 4;
+template <class MM, int KMAX, bool PACKED>
+__device__ __forceinline__ void key_sum_c(const KsKeyArgs& G) {
+    using W = uint32_t;
+    using Wd = WideOf<W>;
+    const KsArgs& A = G.ks;
+    const KeyTab& T = G.key;
+    const uint32_t t = A.rows[blockIdx.y];
+    const PrimeConst& q = A.pr[t];
+    const W p = (W)q.p;
+    const uint32_t O = (blockIdx.x * BX + threadIdx.x) * 4;
+    const uint32_t lane = threadIdx.x & 31u;
+    const uint32_t O16 = O & ~15u;
+    const int dt = (int)t < A.nq ? A.digit_of[t] : -1;
+    const size_t row0 = (size_t)t * N;
+    const int slot = kskey::slot_of(T, (int)t, A.nq);
+    const bool cq = (A.c0_mode & 3) == 1 && (int)t < A.nq;
+    const W pm = cq ? ((const W*)A.pmod)[t] : 0, pms = cq ? ((const W*)A.pmods)[t] : 0;
+    W acc0[KMAX][4], acc1[KMAX][4];
+#pragma unroll
+    for (int c = 0; c < KMAX; ++c)
+#pragma unroll
+        for (int w = 0; w < 4; ++w) acc0[c][w] = acc1[c][w] = 0;
+    for (int r = 0; r < A.R; ++r) {
+        const uint32_t k = A.autok[r];
+        const uint32_t ki = k == 1 ? 1u : galois_inv(k);
+        uint32_t I = O, jsel = 0xE4u, wsel = 0xE4u;
+        if (k != 1) {
+            I = automorph_slot(ki, O) & ~3u;
+            jsel = 0;
+            wsel = 0;
+#pragma unroll
+            for (uint32_t m = 0; m < 4; ++m) {
+                jsel |= ((automorph_slot(ki, O16 + 4 * m) >> 2) & 3u) << (2 * m);
+                wsel |= (automorph_slot(ki, O + m) & 3u) << (2 * m);
+            }
+        }
+        const size_t roff = row0 + I;
+        const void* kb = T.kb[r];
+        const uint32_t* seed = T.seed[r];
+        W a4[SUM_D][4], b4[SUM_D][4];
+#pragma unroll
+        for (int d = 0; d < SUM_D; ++d) {
+            if (d < A.ndig) {
+                if (d < T.nregen) {
+                    chacha::regen4q(seed, lane, I >> 4, (uint32_t)d, (uint32_t)p, N >> 4, chacha::TAG_KSKA, jsel, a4[d]);
+                } else {
+                    const V4<W> av = ldg4<W>((const W*)A.ka[r] + d * A.key_digit_stride + roff);
+#pragma unroll
+                    for (int w = 0; w < 4; ++w) a4[d][w] = av.v[w];
+                }
+                const V4<W> bv = kskey::b_at4<W, PACKED>(T, kb, (size_t)d * T.srows + slot, I);
+#pragma unroll
+                for (int w = 0; w < 4; ++w) b4[d][w] = bv.v[w];
+            }
+        }
+#pragma unroll
+        for (int c = 0; c < KMAX; ++c) {
+            if (c < A.K) {
+                Wd s0[4] = {0, 0, 0, 0}, s1[4] = {0, 0, 0, 0};
+#pragma unroll
+                for (int d = 0; d < SUM_D; ++d) {
+                    if (d < A.ndig) {
+                        const V4<W> x4 = (d == dt) ? load4<W>((const W*)A.c1 + c * A.ct_stride + roff)
+                                                   : load4<W>((const W*)A.modup + c * A.mu_ct_stride + d * A.mu_digit_stride + roff);
+#pragma unroll
+                        for (int w = 0; w < 4; ++w) {
+                            s0[w] += (Wd)x4.v[w] * b4[d][w];
+                            s1[w] += (Wd)x4.v[w] * a4[d][w];
+                        }
+                    }
+                }
+                V4<W> c04{};
+                if (A.c0_mode & 3) c04 = load4<W>((const W*)A.c0 + c * A.ct_stride + roff);
+                W r0[4], r1[4];
+#pragma unroll
+                for (int w = 0; w < 4; ++w) {
+                    r0[w] = MM::reduce(s0[w], q);
+                    r1[w] = MM::reduce(s1[w], q);
+                    if (cq) r0[w] = add<W>(r0[w], mul_shoup<W>(c04.v[w], pm, pms, p), p);
+                    else if ((A.c0_mode & 3) == 2) r0[w] = add<W>(r0[w], c04.v[w], p);
+                }
+#pragma unroll
+                for (int v = 0; v < 4; ++v) {
+                    const uint32_t iv = (wsel >> (2 * v)) & 3u;
+                    const W x0 = chacha::sel4(iv, r0[0], r0[1], r0[2], r0[3]);
+                    const W x1 = chacha::sel4(iv, r1[0], r1[1], r1[2], r1[3]);
+                    acc0[c][v] = r == 0 ? x0 : add<W>(acc0[c][v], x0, p);
+                    acc1[c][v] = r == 0 ? x1 : add<W>(acc1[c][v], x1, p);
+                }
+            }
+        }
+    }
+#pragma unroll
+    for (int c = 0; c < KMAX; ++c) {
+        if (c < A.K) {
+            const size_t ob = c * A.out_ct_stride + row0 + O;
+            W* g0 = (W*)A.out0 + ob;
+            W* g1 = (W*)A.out1 + ob;
+            if (A.c0_mode & KS_ACC) {
+                const V4<W> y0 = load4<W>(g0), y1 = load4<W>(g1);
+#pragma unroll
+                for (int w = 0; w < 4; ++w) acc0[c][w] = add<W>(acc0[c][w], y0.v[w], p), acc1[c][w] = add<W>(acc1[c][w], y1.v[w], p);
+            }
+            store4<W>(g0, acc0[c][0], acc0[c][1], acc0[c][2], acc0[c][3]);
+            store4<W>(g1, acc1[c][0], acc1[c][1], acc1[c][2], acc1[c][3]);
+        }
+    }
+}
+
+template <class MM, int KMAX, bool PACKED>
+__global__ void __launch_bounds__(BX, 5) ks_dot_key_sum_c(KsKeyArgs G) {
+    key_sum_c<MM, KMAX, PACKED>(G);
+}
+
+// ks_dot_regen at K = 1 (u32, key read through its KeyTab) on ks_dot_seg's warp-sized row segments: a warp owns slots
+// R * 256.. of row t, 8 consecutive per lane, and its lanes expand `a` one 16-slot ChaCha block per thread (two digits
+// per pass, through shared memory) instead of ks_dot_regen's 4-lane cooperative blocks (their shuffles). No
+// automorphism, so the outputs (or the fused ModDown epilogue) stay in slot order. The same words as ks_dot_regen.
+template <class MM, bool EPI, bool PACKED>
+__global__ void __launch_bounds__(256, 3) ks_dot_rseg(KsRegenArgs G) {
+    using W = uint32_t;
+    using Wd = WideOf<W>;
+    __shared__ W sa[8][2][264];
+    const KsArgs& A = G.ks;
+    const KeyTab& T = G.key;
+    const uint32_t t = A.rows[blockIdx.y];
+    const PrimeConst& q = A.pr[t];
+    const W p = (W)q.p;
+    const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
+    const uint32_t R = blockIdx.x * 8 + wp;
+    const uint32_t base = R * 256 + 8 * lane;
+    const int dt = (int)t < A.nq ? A.digit_of[t] : -1;
+    const size_t roff = (size_t)t * N + base;
+    const int slot = kskey::slot_of(T, (int)t, A.nq);
+    auto pad = [](int e) { return e + (e >> 5); };
+    const void* kb = T.kb[0];
+    uint32_t key[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) key[i] = __ldg(G.seed + i);
+    Wd s0[8], s1[8];
+#pragma unroll
+    for (int u = 0; u < 8; ++u) s0[u] = s1[u] = 0;
+    for (int d = 0; d < A.ndig; ++d) {
+        if (d + 1 < A.ndig) {
+            // digit e's lines of the segment: lanes 0-7 `b` (evict-first), 8-15 the ModUp digit (c1)
+            const int e = d + 1;
+            if (lane < 8) {
+                const size_t row = ((size_t)e * T.srows + slot) * T.row_words;
+                const char* bp = PACKED ? (const char*)((const uint32_t*)kb + row + (((uint64_t)R * 256 * (uint32_t)T.bits) >> 5))
+                                        : (const char*)((const W*)kb + row + R * 256);
+                if (!PACKED || lane * 4 < (int)T.bits) {
+                    uint64_t pol;
+                    asm volatile("createpolicy.fractional.L2::evict_first.b64 %0, 1.0;" : "=l"(pol));
+                    const char* q16 = (const char*)((uintptr_t)(bp + 128 * lane) & ~(uintptr_t)15);
+                    asm volatile("cp.async.bulk.prefetch.L2.global.L2::cache_hint [%0], 128, %1;" ::"l"(q16), "l"(pol) : "memory");
+                }
+            } else if (lane < 16) {
+                const size_t seg = (size_t)t * N + R * 256;
+                const char* xp = (const char*)((e == dt) ? (const W*)A.c1 + seg : (const W*)A.modup + e * A.mu_digit_stride + seg);
+                asm volatile("prefetch.global.L2 [%0];" ::"l"(xp + 128 * (lane & 7)));
+            }
+        }
+        if ((d & 1) == 0) {
+            // digits d, d + 1: lanes 0-15 / 16-31 expand the segment's 16 blocks of one digit each
+            const int dd = d + (lane >> 4);
+            __syncwarp();
+            if (dd < A.ndig) {
+                uint32_t v[16];
+                chacha::regen_block16(key, R * 16 + (lane & 15), (uint32_t)dd, p, N >> 4, chacha::TAG_KSKA, v);
+#pragma unroll
+                for (int k = 0; k < 16; ++k) sa[wp][lane >> 4][pad(16 * (lane & 15) + k)] = v[k];
+            }
+            __syncwarp();
+        }
+        W a[8];
+#pragma unroll
+        for (int u = 0; u < 8; ++u) a[u] = sa[wp][d & 1][pad(8 * lane + u)];
+        const size_t brow = (size_t)d * T.srows + slot;
+        const V4<W> b0 = kskey::b_at4<W, PACKED>(T, kb, brow, base), b1 = kskey::b_at4<W, PACKED>(T, kb, brow, base + 4);
+        const W* xp = (d == dt) ? (const W*)A.c1 + roff : (const W*)A.modup + d * A.mu_digit_stride + roff;
+        const V4<W> x0 = load4<W>(xp), x1 = load4<W>(xp + 4);
+#pragma unroll
+        for (int u = 0; u < 4; ++u) {
+            s0[u] += (Wd)x0.v[u] * b0.v[u];
+            s0[4 + u] += (Wd)x1.v[u] * b1.v[u];
+            s1[u] += (Wd)x0.v[u] * a[u];
+            s1[4 + u] += (Wd)x1.v[u] * a[4 + u];
+        }
+    }
+    W r[2][8];
+#pragma unroll
+    for (int u = 0; u < 8; ++u) {
+        r[0][u] = MM::reduce(s0[u], q);
+        r[1][u] = MM::reduce(s1[u], q);
+    }
+    const size_t ob = (size_t)t * N + base;
+    if constexpr (EPI) {
+        const EpiArgs& E = G.epi;
+        const W bi = ((const W*)E.binv)[t], bis = ((const W*)E.binvs)[t];
+        const W* kp = (const W*)E.k;
+        const W kk = kp ? (kp[t] >= p ? (W)(kp[t] - p) : kp[t]) : (W)0;
+        const W* al = (const W*)E.alpha;
+        const W ai = al ? al[t] : (W)0, ais = al ? ((const W*)E.alphas)[t] : (W)0;
+#pragma unroll
+        for (int part = 0; part < 2; ++part) {
+#pragma unroll
+            for (int h = 0; h < 2; ++h) {
+                W* dp = (W*)E.dst + ob + part * E.part_stride + 4 * h;
+                const V4<W> cv = load4<W>((const W*)E.conv + ob + part * E.part_stride + 4 * h);
+                V4<W> dv = load4<W>(dp);
+                V4<W> av{};
+                if (G.add) av = load4<W>((const W*)G.add + ob + part * E.part_stride + 4 * h);
+#pragma unroll
+                for (int w = 0; w < 4; ++w) {
+                    const W x = r[part][4 * h + w];
+                    const W dd = al ? mul_shoup<W>(dv.v[w], ai, ais, p) : dv.v[w];
+                    W y = add<W>(dd, mul_shoup<W>(sub<W>(x, cv.v[w], p), bi, bis, p), p);
+                    if (E.dbl) y = add<W>(y, y, p);
+                    if (part == 0) y = add<W>(y, kk, p);
+                    if (G.add) y = add<W>(y, av.v[w], p);
+                    dv.v[w] = y;
+                }
+                store4<W>(dp, dv.v[0], dv.v[1], dv.v[2], dv.v[3]);
+            }
+        }
+    } else {
+        store4<W>((W*)A.out0 + ob, r[0][0], r[0][1], r[0][2], r[0][3]);
+        store4<W>((W*)A.out0 + ob + 4, r[0][4], r[0][5], r[0][6], r[0][7]);
+        store4<W>((W*)A.out1 + ob, r[1][0], r[1][1], r[1][2], r[1][3]);
+        store4<W>((W*)A.out1 + ob + 4, r[1][4], r[1][5], r[1][6], r[1][7]);
     }
 }
 
@@ -392,6 +823,7 @@ __global__ void ksk_expand(KskExpandArgs A) {
 
 template <class W, class MM>
 int dot_l(const KsArgs* a, cudaStream_t s) {
+    if (a->c0_mode & KS_SUM) return -3;  // the summed rotations: ks_dot_seg only
     dim3 grid(N / BX, a->nrows);
     if (a->K <= 1) ks_dot<W, MM, 1><<<grid, BX, 0, s>>>(*a);
     else if (a->K <= 2) ks_dot<W, MM, 2><<<grid, BX, 0, s>>>(*a);
@@ -404,6 +836,12 @@ template <class W, class MM, bool EPI, int TAB>
 int regen_k(const KsRegenArgs* a, cudaStream_t s) {
     dim3 grid(N / (BX * 4), a->ks.nrows);
     const int K = a->ks.K;
+    if constexpr (sizeof(W) == 4 && TAB != 0) {
+        if (K == 1) {
+            ks_dot_rseg<MM, EPI, TAB == 2><<<dim3(N / 2048, a->ks.nrows), 256, 0, s>>>(*a);
+            return (int)cudaGetLastError();
+        }
+    }
     if (K <= 1) ks_dot_regen<W, MM, 1, EPI, TAB><<<grid, BX, 0, s>>>(*a);
     else if (K <= 2) ks_dot_regen<W, MM, 2, EPI, TAB><<<grid, BX, 0, s>>>(*a);
     else if (K <= 4) ks_dot_regen<W, MM, 4, EPI, TAB><<<grid, BX, 0, s>>>(*a);
@@ -430,9 +868,23 @@ int key_k(const KsKeyArgs* a, cudaStream_t s) {
     const int K = a->ks.K;
     if constexpr (sizeof(W) == 4) {
         if (K == 1) {
-            ks_dot_seg<MM, PACKED><<<dim3(N / 2048, a->ks.nrows), 256, 0, s>>>(*a);
+            if (a->ks.c0_mode & KS_SUM) ks_dot_seg<MM, PACKED, true><<<dim3(N / 2048, a->ks.nrows), 256, 0, s>>>(*a);
+            else ks_dot_seg<MM, PACKED, false><<<dim3(N / 2048, a->ks.nrows), 256, 0, s>>>(*a);
             return (int)cudaGetLastError();
         }
+    }
+    if (a->ks.c0_mode & KS_SUM) {  // the summed rotations: ks_dot_seg (u32, K = 1) or ks_dot_key_sum (u32, K > 1)
+        if constexpr (sizeof(W) == 4) {
+            if (a->ks.ndig <= SUM_D) {
+                if (K <= 2) ks_dot_key_sum_c<MM, 2, PACKED><<<grid, BX, 0, s>>>(*a);
+                else if (K <= 4) ks_dot_key_sum_c<MM, 4, PACKED><<<grid, BX, 0, s>>>(*a);
+                else return -2;
+            } else if (K <= 2) ks_dot_key_sum<MM, 2, PACKED><<<grid, BX, 0, s>>>(*a);
+            else if (K <= 4) ks_dot_key_sum<MM, 4, PACKED><<<grid, BX, 0, s>>>(*a);
+            else return -2;
+            return (int)cudaGetLastError();
+        }
+        return -3;
     }
     if (K <= 1) ks_dot_key<W, MM, 1, PACKED><<<grid, BX, 0, s>>>(*a);
     else if (K <= 2) ks_dot_key<W, MM, 2, PACKED><<<grid, BX, 0, s>>>(*a);

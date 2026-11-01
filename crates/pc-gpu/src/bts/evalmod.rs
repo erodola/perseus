@@ -16,7 +16,7 @@ use crate::poly::{CtBuf, Layout};
 use pc_core::modmul::{invmod, mulmod, shoup};
 use pc_cuda::{launch_result, Arena, Compute, ConstBuf, Lane, Stream};
 use pc_kernels::{AddConstArgs, EwArgs, MdEpiArgs, MulTableArgs, PolyRef, RescaleArgs, TensorArgs, WsumArgs, WsumKArgs, MdEpiToArgs};
-use pc_shadow::evalmod::{build_evalmod, EmOp, EmProgram, Epi, PsPlan};
+use pc_shadow::evalmod::{build_evalmod, build_evalmod_opts, EmOp, EmProgram, Epi, PsPlan};
 use pc_shadow::fides::FMeta;
 use rayon::prelude::*;
 use std::collections::BTreeMap;
@@ -103,6 +103,77 @@ struct RelinRescale<'a, W: DevWord> {
     wtop: ScalarPair<'a, W>,
 }
 
+/// A fused relinearization-rescale at a top over a level relinearization key (`keys::LevelRelinSpec`, prototype): fewer
+/// digits, special modulus P' = P x the Q primes idle above the level (`attach_level_keys`).
+struct LevelKs<'a, W: DevWord> {
+    lv: crate::ks::LevelPlan<'a>,
+    digit_of: ConstBuf<'a, i32>,
+    /// dot rows: top - 1, top, then the specials
+    rows: ConstBuf<'a, u32>,
+    nsp: usize,
+    md: MdPlan<'a>,
+    beta: ScalarPair<'a, W>,
+    wtop: ScalarPair<'a, W>,
+    /// the level key (None: the relinearization key's words stand in; timing experiments only)
+    key: Option<LevelKey<'a>>,
+    /// P' k on the two tops by epilogue constant index (the fused rescale's `RrConst::tops` over P')
+    ktops: BTreeMap<usize, ConstBuf<'a, W>>,
+}
+
+/// A level relinearization key as the regen dots read it.
+struct LevelKey<'a> {
+    kb: ConstBuf<'a, u64>,
+    seed: *const u32,
+    tab: pc_kernels::KeyTab,
+    stride: u64,
+    _group: KeyGroup<'a>,
+}
+
+/// The plan of a fused relinearization-rescale at `top` over a level key's digits and P' (`keys::LevelRelinSpec`).
+#[allow(clippy::too_many_arguments)]
+fn level_ks<'a, W: DevWord, M: DevStrategy<W>>(
+    arena: &'a Arena,
+    s: &Stream<Compute>,
+    ctx: &Context<'_, W, M>,
+    top: usize,
+    kk_max: usize,
+    digs: Vec<Vec<usize>>,
+    specials: Vec<usize>,
+    consts: &[Vec<u64>],
+    ks: &[usize],
+    key: Option<LevelKey<'a>>,
+) -> Result<LevelKs<'a, W>> {
+    let lay = ctx.lay;
+    let nq = lay.nq;
+    let primes = ctx.chain.primes();
+    let a = digs.iter().map(|g| g.len()).max().unwrap_or(1);
+    let lv = crate::ks::custom_level(arena, s, ctx, top, kk_max, digs, specials.clone())?;
+    let digit_of: Vec<i32> = (0..lay.rows()).map(|t| if t <= top { (t / a) as i32 } else { -1 }).collect();
+    let mut src = specials.clone();
+    src.extend([top - 1, top]);
+    let rws: Vec<u32> = [top - 1, top].into_iter().chain(specials.iter().copied()).map(|t| t as u32).collect();
+    let pp: Vec<u64> = (0..nq).map(|i| specials.iter().fold(1u64, |acc, &x| mulmod(acc, primes[x] % primes[i], primes[i]))).collect();
+    let qab = |i: usize| mulmod(primes[top] % primes[i], primes[top - 1] % primes[i], primes[i]);
+    let be: Vec<u64> = (0..nq).map(|i| if i + 2 <= top { invmod(mulmod(qab(i), pp[i], primes[i]), primes[i]) } else { 0 }).collect();
+    let mut ktops = BTreeMap::new();
+    for &k in ks {
+        let c = &consts[k];
+        let t: Vec<W> = [top - 1, top].iter().map(|&t| W::from_u64(mulmod(c[t] % primes[t], pp[t], primes[t]))).collect();
+        ktops.insert(k, ConstBuf::new(arena, "bts.em", s, &t)?);
+    }
+    Ok(LevelKs {
+        lv,
+        digit_of: ConstBuf::new(arena, "bts.em", s, &digit_of)?,
+        rows: ConstBuf::new(arena, "bts.em", s, &rws)?,
+        nsp: specials.len(),
+        md: md_plan::<_, W>(arena, s, &lay, &primes, &(0..kk_max).collect::<Vec<_>>(), &[0, 1], &src, top - 1, true)?,
+        beta: ScalarPair::new(arena, s, &primes[..nq], &be)?,
+        wtop: ScalarPair::new(arena, s, &[primes[top - 1], primes[top]], &[pp[top - 1], pp[top], 1, 1])?,
+        key,
+        ktops,
+    })
+}
+
 /// A constant k of the fused relinearization-rescale at one top: k (q_a q_b)^-1 by prime id (rows 0..top-2, the
 /// epilogue's part-0 term) and P k on the two tops (the extended product's).
 struct RrConst<'a, W: DevWord> {
@@ -116,12 +187,162 @@ fn relin_rescale_pairs(ops: &[EmOp], d: usize) -> Vec<(usize, Option<usize>)> {
     if d != 2 {
         return Vec::new();
     }
-    ops.windows(2)
-        .filter_map(|w| match (&w[0], &w[1]) {
-            (EmOp::Mult { dst, n, epi, .. } | EmOp::MultAcc { dst, n, epi, .. }, EmOp::Rescale { x, n: n2, k: None }) if x == dst && n == n2 && *n >= 3 => Some((n - 1, epi.k)),
-            _ => None,
-        })
-        .collect()
+    (0..ops.len()).filter_map(|i| fused_rescale_at(ops, i).map(|(n, k, _)| (n - 1, k))).collect()
+}
+
+/// The `Mult; Rescale` (or `Mult; Add dst += / -= y; Rescale`) at op `i` that `RelinRescale` serves: (rows, the
+/// epilogue's constant index, the addend (y, sub)).
+fn fused_rescale_at(ops: &[EmOp], i: usize) -> Option<(usize, Option<usize>, Option<(usize, bool)>)> {
+    let (dst, n, epi) = match ops.get(i)? {
+        EmOp::Mult { dst, n, epi, .. } | EmOp::MultAcc { dst, n, epi, .. } => (*dst, *n, *epi),
+        _ => return None,
+    };
+    if n < 3 {
+        return None;
+    }
+    match (ops.get(i + 1), ops.get(i + 2)) {
+        (Some(EmOp::Rescale { x, n: n2, k: None }), _) if *x == dst && *n2 == n => Some((n, epi.k, None)),
+        (Some(EmOp::Add { dst: d, a, b, n: n2, sub }), Some(EmOp::Rescale { x, n: n3, k: None })) if *d == dst && *a == dst && *b != dst && *n2 == n && *x == dst && *n3 == n => {
+            Some((n, epi.k, Some((*b, *sub))))
+        }
+        _ => None,
+    }
+}
+
+/// Program values an op reads and writes.
+fn reads_writes(op: &EmOp) -> (Vec<usize>, Vec<usize>) {
+    match op {
+        EmOp::Copy { dst, src, .. } => (vec![*src], vec![*dst]),
+        EmOp::Add { dst, a, b, .. } => (vec![*a, *b], vec![*dst]),
+        EmOp::MulConst { x, .. } | EmOp::AddConst { x, .. } | EmOp::Rescale { x, .. } => (vec![*x], vec![*x]),
+        EmOp::Mult { dst, a, b, .. } => (vec![*a, *b], vec![*dst]),
+        EmOp::MultAcc { dst, pairs, .. } => (std::iter::once(*dst).chain(pairs.iter().flat_map(|p| [p.0, p.1])).collect(), vec![*dst]),
+        EmOp::WSum { dst, srcs, .. } => (srcs.clone(), vec![*dst]),
+    }
+}
+
+/// Two ops whose order does not matter (neither writes what the other reads or writes).
+fn commute(a: &EmOp, b: &EmOp) -> bool {
+    let ((ra, wa), (rb, wb)) = (reads_writes(a), reads_writes(b));
+    !wa.iter().any(|v| rb.contains(v) || wb.contains(v)) && !wb.iter().any(|v| ra.contains(v))
+}
+
+/// Value `x` is not read after op `i` before it is written again.
+fn dead_after(ops: &[EmOp], i: usize, x: usize) -> bool {
+    for op in &ops[i + 1..] {
+        let (r, w) = reads_writes(op);
+        if r.contains(&x) {
+            return false;
+        }
+        if w.contains(&x) {
+            return true;
+        }
+    }
+    x != 0
+}
+
+/// Moves the ops between a relinearization and the rescale of its result out of the way (before the Mult, or
+/// after the rescale, where they commute), keeping one `dst +/-= y` between them, so the pair runs as one fused
+/// relinearization-rescale (`RelinRescale`); a `Copy z <- dst; Rescale z` with dst dead after becomes
+/// `Rescale dst; Copy z <- dst`. The same values in the same buffers: without the fusion the program computes
+/// what the unscheduled one does, word for word.
+pub fn schedule_relin_rescales(mut ops: Vec<EmOp>, d: usize) -> Vec<EmOp> {
+    let mut i = 0;
+    // a transform may move other relinearizations ahead of this one: they are visited again (bounded)
+    let mut budget = 4 * ops.len();
+    while i < ops.len() {
+        let (dst, n) = match &ops[i] {
+            EmOp::Mult { dst, n, .. } | EmOp::MultAcc { dst, n, .. } if *n >= 3 => (*dst, *n),
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        if fused_rescale_at(&ops, i).is_some() {
+            i += 1;
+            continue;
+        }
+        // the rescale of dst (or of its copy z, dst dead after) with only commuting ops and at most one add between
+        let mut r = None;
+        for j in i + 1..ops.len() {
+            match &ops[j] {
+                EmOp::Rescale { x, n: n2, k: None } if *x == dst && *n2 == n => {
+                    r = Some((j, None));
+                    break;
+                }
+                EmOp::Copy { dst: z, src, n: n2 } if *src == dst && *n2 == n && *z != dst => {
+                    if let Some(EmOp::Rescale { x, n: n3, k: None }) = ops.get(j + 1) {
+                        if x == z && *n3 == n && dead_after(&ops, j + 1, dst) {
+                            r = Some((j, Some(*z)));
+                        }
+                    }
+                    break;
+                }
+                op => {
+                    let (rd, wr) = reads_writes(op);
+                    if rd.contains(&dst) || wr.contains(&dst) {
+                        let ok = matches!(op, EmOp::Add { dst: dd, a, b, n: n2, .. } if *dd == dst && *a == dst && *b != dst && *n2 == n);
+                        if !ok {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let Some((j, copy_to)) = r else {
+            i += 1;
+            continue;
+        };
+        let mid: Vec<usize> = (i + 1..j).collect();
+        let adds: Vec<usize> = mid.iter().copied().filter(|&m| reads_writes(&ops[m]).1.contains(&dst)).collect();
+        if adds.len() > 1 {
+            i += 1;
+            continue;
+        }
+        let add = adds.first().copied();
+        let (mut before, mut after) = (Vec::new(), Vec::new());
+        let mut ok = true;
+        for &m in &mid {
+            if Some(m) == add {
+                continue;
+            }
+            let o = &ops[m];
+            let past_add = add.is_some_and(|a| m > a);
+            let jumps_after = after.iter().all(|&a: &usize| commute(&ops[a], o));
+            if commute(&ops[i], o) && jumps_after && (!past_add || commute(&ops[add.unwrap()], o)) {
+                before.push(m);
+            } else if add.map_or(true, |a| m > a || commute(&ops[a], o)) && copy_to.map_or(true, |z| !reads_writes(o).0.contains(&z) && !reads_writes(o).1.contains(&z)) {
+                after.push(m);
+            } else {
+                ok = false;
+                break;
+            }
+        }
+        if !ok {
+            i += 1;
+            continue;
+        }
+        let mut sched: Vec<EmOp> = before.iter().map(|&m| ops[m].clone()).collect();
+        sched.push(ops[i].clone());
+        if let Some(a) = add {
+            sched.push(ops[a].clone());
+        }
+        match copy_to {
+            None => sched.push(ops[j].clone()),
+            Some(z) => {
+                sched.push(EmOp::Rescale { x: dst, n, k: None });
+                sched.push(EmOp::Copy { dst: z, src: dst, n: n - d });
+            }
+        }
+        sched.extend(after.iter().map(|&m| ops[m].clone()));
+        let end = if copy_to.is_some() { j + 2 } else { j + 1 };
+        ops.splice(i..end, sched);
+        budget = budget.saturating_sub(1);
+        if budget == 0 {
+            i += before.len() + 1;
+        }
+    }
+    ops
 }
 
 /// An EvalMod program with its device constants, rescale plans and keys.
@@ -151,6 +372,12 @@ pub struct EvalModPlan<'a, W: DevWord> {
     rr: BTreeMap<usize, RelinRescale<'a, W>>,
     rr_k: BTreeMap<(usize, usize), RrConst<'a, W>>,
     pub fuse_rescale: bool,
+    /// Exact executor fusions (`plan_fusions`) and their device tables: the wsum_multi weights by group head (one
+    /// pair per output), the folded rescale constants by rescale op (index into `consts_host` / `fused_alpha`).
+    fz: Fuse,
+    levelks: BTreeMap<usize, LevelKs<'a, W>>,
+    wmulti: BTreeMap<usize, Vec<ScalarPair<'a, W>>>,
+    rfold_k: BTreeMap<usize, usize>,
     bytes: usize,
     nq: usize,
 }
@@ -353,12 +580,281 @@ fn ids(op: &EmOp) -> Vec<usize> {
     ids_mut(&mut o).into_iter().map(|x| *x).collect()
 }
 
+/// One output of a `wsum_multi` group: (dst, rows, weights by group source (|srcs| blocks of |Q| rows), the AddConst
+/// folded in (raw constant index)).
+#[derive(Clone, Debug)]
+pub struct WOut {
+    pub dst: usize,
+    pub n: usize,
+    pub w: Vec<u64>,
+    pub k: Option<usize>,
+}
+
+/// Exact executor fusions of the final program (buffer ids), decided at build (`plan_fusions`):
+/// * `addend` (relinearization-rescale path only): a `Mult d; Add d -+= y; Rescale d` whose y is `c * s` (a MulConst on
+///   y, in place or right after a `Copy y <- s`; y read by nothing else): the scaled add rides the tensor (`tensor_y`)
+///   reading s (through earlier copies when their source is unchanged), the MulConst / Copy are skipped (`skip_a`);
+/// * `wgroups`: up to three WSum (+ AddConst) ops over <= 8 distinct sources whose later members commute with the ops
+///   between: one `wsum_multi` launch at the first, the rest skipped (`skip_w`);
+/// * `rfold`: `WSum z = [s] w; Rescale z (folded c)`: the rescale out of place from s with c w (the WSum skipped).
+/// Copies whose value no executed op reads any more are skipped too. Every value is computed with the same modular
+/// operations as before: the outputs are the same words.
+#[derive(Clone, Debug, Default)]
+pub struct Fuse {
+    pub skip_w: Vec<bool>,
+    pub skip_a: Vec<bool>,
+    pub addend: BTreeMap<usize, (usize, usize, bool)>,
+    pub wgroups: BTreeMap<usize, (Vec<usize>, Vec<WOut>)>,
+    pub rfold: BTreeMap<usize, (usize, Vec<u64>)>,
+}
+
+fn writes_of(op: &EmOp) -> Vec<usize> {
+    rw(op).1
+}
+
+/// The last op before `before` (exclusive) writing `v`, or None.
+fn last_writer(ops: &[EmOp], before: usize, v: usize) -> Option<usize> {
+    (0..before).rev().find(|&t| writes_of(&ops[t]).contains(&v))
+}
+
+/// No op in [from, to) writes `v`.
+fn unwritten(ops: &[EmOp], from: usize, to: usize, v: usize) -> bool {
+    (from..to.min(ops.len())).all(|t| !writes_of(&ops[t]).contains(&v))
+}
+
+/// The buffer holding at op `at` the value `v` holds right before op `before`, through copies whose source is unchanged
+/// in between (`v` itself when it is not a copy).
+fn resolve_copy(ops: &[EmOp], skip: &[bool], mut v: usize, mut before: usize, at: usize) -> usize {
+    for _ in 0..4 {
+        match last_writer(ops, before, v) {
+            Some(c) if !skip[c] => match ops[c] {
+                EmOp::Copy { dst, src, .. } if dst == v && src != v && unwritten(ops, c + 1, at + 1, src) => {
+                    v = src;
+                    before = c;
+                }
+                _ => break,
+            },
+            _ => break,
+        }
+    }
+    v
+}
+
+/// The fusions of `ops` (see `Fuse`); `consts`: the program's constant rows; `nq`: |Q|; `fusing_addend`: whether the
+/// relinearization-rescale path runs (the addends and the copies they free apply only then).
+pub fn plan_fusions(ops: &[EmOp], consts: &[Vec<u64>], q: &[u64]) -> Fuse {
+    let n = ops.len();
+    let nq = q.len();
+    let mut f = Fuse { skip_w: vec![false; n], skip_a: vec![false; n], ..Default::default() };
+    // rescale folds: WSum z = [s] (one source) then Rescale z (k folded)
+    for i in 0..n.saturating_sub(1) {
+        if let (EmOp::WSum { dst, srcs, n: wn, k: kw }, EmOp::Rescale { x, n: rn, k: Some(kc) }) = (&ops[i], &ops[i + 1]) {
+            if srcs.len() == 1 && x == dst && wn == rn && srcs[0] != *dst {
+                let c = &consts[*kc];
+                let w = &consts[*kw];
+                let row: Vec<u64> = (0..nq).map(|t| pc_core::modmul::mulmod(c[t] % q[t], w[t] % q[t], q[t])).collect();
+                let src = resolve_copy(ops, &f.skip_w, srcs[0], i, i + 1);
+                f.skip_w[i] = true;
+                f.rfold.insert(i + 1, (src, row));
+            }
+        }
+    }
+    // WSum groups (hoisted to the first member)
+    let wsum = |t: usize| match &ops[t] {
+        EmOp::WSum { dst, srcs, n, k } => Some((*dst, srcs.clone(), *n, *k)),
+        _ => None,
+    };
+    let addk = |t: usize, dst: usize, wn: usize| match ops.get(t) {
+        Some(EmOp::AddConst { x, n, k }) if *x == dst && *n == wn => Some(*k),
+        _ => None,
+    };
+    let mut grouped = vec![false; n];
+    for i in 0..n {
+        if grouped[i] || f.skip_w[i] {
+            continue;
+        }
+        let Some((d0, s0, n0, k0)) = wsum(i) else { continue };
+        let mut members = vec![(i, d0, s0.clone(), n0, k0, addk(i + 1, d0, n0))];
+        let mut srcs: Vec<usize> = s0.clone();
+        let mut covered: Vec<usize> = vec![i];
+        if members[0].5.is_some() {
+            covered.push(i + 1);
+        }
+        let mut t = i + 1;
+        while t < n && t <= i + 12 && members.len() < 3 {
+            if covered.contains(&t) || f.skip_w[t] {
+                t += 1;
+                continue;
+            }
+            if let Some((d, s, wn, kw)) = wsum(t) {
+                let mut u: Vec<usize> = srcs.clone();
+                for &x in &s {
+                    if !u.contains(&x) {
+                        u.push(x);
+                    }
+                }
+                let dsts: Vec<usize> = members.iter().map(|m| m.1).collect();
+                let ak = addk(t + 1, d, wn);
+                // hoistable: the ops in (i, t) outside the group neither write its sources nor touch its dst
+                let ok = u.len() <= 8
+                    && !s.contains(&d)
+                    && !dsts.contains(&d)
+                    && !s.iter().any(|x| dsts.contains(x))
+                    && !srcs.contains(&d)
+                    && (i + 1..t).filter(|x| !covered.contains(x)).all(|x| {
+                        let (r, w) = rw(&ops[x]);
+                        !r.contains(&d) && !w.contains(&d) && !s.iter().any(|y| w.contains(y))
+                    });
+                if ok {
+                    srcs = u;
+                    covered.push(t);
+                    if ak.is_some() {
+                        covered.push(t + 1);
+                    }
+                    members.push((t, d, s, wn, kw, ak));
+                    t += if ak.is_some() { 2 } else { 1 };
+                    continue;
+                }
+            }
+            t += 1;
+        }
+        if members.len() < 2 {
+            continue;
+        }
+        let mut outs = Vec::new();
+        for (_, d, s, wn, kw, ak) in &members {
+            let mut w = vec![0u64; srcs.len() * nq];
+            for (j, x) in s.iter().enumerate() {
+                let pos = srcs.iter().position(|y| y == x).unwrap_or(0);
+                w[pos * nq..(pos + 1) * nq].copy_from_slice(&consts[*kw][j * nq..(j + 1) * nq]);
+            }
+            outs.push(WOut { dst: *d, n: *wn, w, k: *ak });
+        }
+        for &c in &covered {
+            grouped[c] = true;
+            if c != i {
+                f.skip_w[c] = true;
+            }
+        }
+        f.wgroups.insert(i, (srcs, outs));
+    }
+    // copies nothing executed reads any more (without the addends)
+    dead_copies(ops, &mut f, false);
+    // addends (relinearization-rescale path)
+    let mut skip_a = f.skip_w.clone();
+    for i in 0..n {
+        let Some((_, _, Some((y, sub)))) = fused_rescale_at(ops, i) else { continue };
+        let (dst, operands) = match &ops[i] {
+            EmOp::Mult { dst, a, b, .. } => (*dst, vec![*a, *b]),
+            EmOp::MultAcc { dst, pairs, .. } => (*dst, pairs.iter().flat_map(|p| [p.0, p.1]).collect()),
+            _ => continue,
+        };
+        let Some(j) = last_writer(ops, i, y) else { continue };
+        let EmOp::MulConst { x, k, .. } = ops[j] else { continue };
+        if x != y || skip_a[j] || operands.contains(&y) || !dead_after(ops, i + 1, y) {
+            continue;
+        }
+        // y read by nothing between the MulConst and the add
+        if (j + 1..i).any(|t| rw(&ops[t]).0.contains(&y)) {
+            continue;
+        }
+        let copy = match ops.get(j.wrapping_sub(1)) {
+            Some(EmOp::Copy { dst: cd, src, .. }) if j > 0 && *cd == y && !skip_a[j - 1] => Some(*src),
+            _ => None,
+        };
+        let (src0, before) = match copy {
+            Some(s0) if unwritten(ops, j, i + 1, s0) => (s0, j - 1),
+            Some(_) => continue,
+            None => (y, j),
+        };
+        let src = resolve_copy(ops, &skip_a, src0, before, i);
+        if src == dst {
+            continue;
+        }
+        skip_a[j] = true;
+        if copy.is_some() {
+            skip_a[j - 1] = true;
+        }
+        f.addend.insert(i, (src, k, sub));
+    }
+    f.skip_a = skip_a;
+    dead_copies(ops, &mut f, true);
+    f
+}
+
+/// Values op `t` reads when it runs under the fusions (`addend`: with the addends applied).
+fn eff_reads(ops: &[EmOp], f: &Fuse, t: usize, addend: bool) -> Vec<usize> {
+    let skip = if addend { &f.skip_a } else { &f.skip_w };
+    if skip[t] {
+        return vec![];
+    }
+    if let Some((srcs, _)) = f.wgroups.get(&t) {
+        return srcs.clone();
+    }
+    if let Some((src, _)) = f.rfold.get(&t) {
+        return vec![*src];
+    }
+    let mut r = rw(&ops[t]).0;
+    if addend {
+        if let Some((src, _, _)) = f.addend.get(&t) {
+            r.push(*src);
+        }
+        // the add a relinearization-rescale's addend replaces reads nothing on its own
+        if t > 0 && f.addend.contains_key(&(t - 1)) && matches!(ops[t], EmOp::Add { .. }) {
+            return vec![];
+        }
+    }
+    r
+}
+
+/// Values op `t` writes when it runs under the fusions.
+fn eff_writes(ops: &[EmOp], f: &Fuse, t: usize, addend: bool) -> Vec<usize> {
+    let skip = if addend { &f.skip_a } else { &f.skip_w };
+    if skip[t] {
+        return vec![];
+    }
+    if let Some((_, outs)) = f.wgroups.get(&t) {
+        return outs.iter().map(|o| o.dst).collect();
+    }
+    rw(&ops[t]).1
+}
+
+/// Skip the copies whose destination no executed op reads before it is written again (never the output value 0).
+fn dead_copies(ops: &[EmOp], f: &mut Fuse, addend: bool) {
+    for t in 0..ops.len() {
+        let skipped = if addend { f.skip_a[t] } else { f.skip_w[t] };
+        let EmOp::Copy { dst, .. } = ops[t] else { continue };
+        if skipped || dst == 0 {
+            continue;
+        }
+        let mut dead = true;
+        for u in t + 1..ops.len() {
+            if eff_reads(ops, f, u, addend).contains(&dst) {
+                dead = false;
+                break;
+            }
+            if eff_writes(ops, f, u, addend).contains(&dst) {
+                break;
+            }
+        }
+        if dead {
+            if addend {
+                f.skip_a[t] = true;
+            } else {
+                f.skip_w[t] = true;
+                f.skip_a[t] = true;
+            }
+        }
+    }
+}
+
 impl<'a, W: DevWord> EvalModPlan<'a, W> {
     /// The program of an input with metadata `input` (FIDESlib coordinates) and its buffer count (after the
     /// liveness assignment `new` runs). The returned program's ops are already fused and rewritten (`rewrite`).
     pub fn program(st: &pc_core::scale::ScaleTables, input: FMeta, ps: &PsPlan, da_its: u32) -> Result<(EmProgram, FMeta, usize)> {
-        let (mut prog, out) = build_evalmod(st, input, ps, da_its as i32)?;
+        let (mut prog, out) = build_evalmod_opts(st, input, ps, da_its as i32, true)?;
         let (ops, consts) = rewrite(prog.fused(), &prog.consts, &st.q);
+        let ops = schedule_relin_rescales(ops, st.d);
         let (_, n) = assign_buffers(ops.clone());
         prog.ops = ops;
         prog.consts = consts;
@@ -418,6 +914,12 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
         let mkeys: std::collections::BTreeSet<usize> = mtops.iter().map(|&n| n - 1).collect();
         b += rr_tops.iter().map(|&t| t - 2).filter(|k| !mkeys.contains(k)).collect::<std::collections::BTreeSet<_>>().iter().map(|&k| Arena::bytes_for::<u32>(k + 1)).sum::<usize>();
         b += rr_k.len() * (rows_b(nq) + rows_b(2));
+        // the executor fusions' tables: wsum_multi weights per group output, the folded rescale constants
+        let fz = plan_fusions(&assign_buffers(fused.clone()).0, &prog.consts, &st.q);
+        for (_, outs) in fz.wgroups.values() {
+            b += outs.iter().map(|o| 2 * rows_b(o.w.len())).sum::<usize>();
+        }
+        b += fz.rfold.len() * 2 * rows_b(nq);
         Ok(b)
     }
 
@@ -532,6 +1034,26 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
                 }
             }
         }
+        let levelks = BTreeMap::new();
+        // the executor fusions (exact) and their tables
+        let fz = plan_fusions(&ops, &prog.consts, &primes[..nq]);
+        let mut wmulti = BTreeMap::new();
+        for (&h, (_, outs)) in &fz.wgroups {
+            let v: Vec<ScalarPair<'a, W>> = outs.iter().map(|o| ScalarPair::new(arena, s, &primes[..nq], &o.w)).collect::<Result<_>>()?;
+            wmulti.insert(h, v);
+        }
+        let mut consts_host = prog.consts.clone();
+        let mut rfold_k = BTreeMap::new();
+        for (&r, (_, row)) in &fz.rfold {
+            let EmOp::Rescale { n, .. } = ops[r] else { return Err(shape("evalmod fusions", "a rescale fold on a non-rescale op")) };
+            let top = n - 1;
+            let rp = &rescale[&top];
+            let al: Vec<u64> = (0..nq).map(|i| if i + rp.d <= top { mulmod(rp.alpha_host[i], row[i] % primes[i], primes[i]) } else { 0 }).collect();
+            consts_host.push(row.clone());
+            let ki = consts_host.len() - 1;
+            fused_alpha.insert(ki, ScalarPair::new(arena, s, &primes[..nq], &al)?);
+            rfold_k.insert(r, ki);
+        }
         let plan = EvalModPlan {
             mode,
             ops,
@@ -540,7 +1062,7 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
             out_meta,
             consts,
             raw,
-            consts_host: prog.consts.clone(),
+            consts_host,
             fused_alpha,
             rescale,
             mono_3n2: ConstBuf::new(arena, "bts.em", s, &monomial_rows(ctx, 3 * n / 2))?,
@@ -553,6 +1075,10 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
             rr,
             rr_k,
             fuse_rescale: false,
+            fz,
+            levelks,
+            wmulti,
+            rfold_k,
             bytes: 0,
             nq,
         };
@@ -615,6 +1141,28 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
 
     pub fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    /// Run the fused relinearization-rescales whose top has a level relinearization key in `ring` over that key
+    /// (prototype; `keys::LevelRelinSpec`). Setup only; the plan's carved bytes grow by the level tables.
+    pub fn attach_level_keys<M: DevStrategy<W>>(&mut self, arena: &'a Arena, s: &Stream<Compute>, ctx: &Context<'_, W, M>, ring: &dyn super::BtsKeyRing, stage: Option<(*const c_void, *const c_void)>) -> Result<usize> {
+        let used0 = arena.used_bytes();
+        let pairs = relin_rescale_pairs(&self.ops, ctx.chain.level_unit);
+        let tops: Vec<usize> = self.rr.keys().copied().collect();
+        let mut n = 0;
+        for top in tops {
+            let Some((sp, key)) = ring.relin_level(top) else { continue };
+            let group = KeyGroup::new(arena, s, ctx.lay.n, &[key], stage)?;
+            let tab = group.regen_tab(0)?.unwrap_or_default();
+            let seed = key.seed_ptr().ok_or_else(|| shape("evalmod level key", "level relinearization keys are seeded"))?;
+            let lk = LevelKey { kb: ConstBuf::new(arena, "bts.em", s, &[key.b_ptr() as u64])?, seed, tab, stride: key.digit_stride() as u64, _group: group };
+            let ks: Vec<usize> = pairs.iter().filter(|p| p.0 == top).filter_map(|p| p.1).collect();
+            let l = level_ks(arena, s, ctx, top, self.kk_max, sp.digits.clone(), sp.specials.clone(), &self.consts_host, &ks, Some(lk))?;
+            self.levelks.insert(top, l);
+            n += 1;
+        }
+        self.bytes += arena.used_bytes() - used0;
+        Ok(n)
     }
 
     /// Ciphertexts per program launch for a call of k: (kk, joint).
@@ -759,9 +1307,21 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
         // its in-place operand d comes from s (`from`)
         let mut from: Option<(usize, usize)> = None;
         let mut subst: EmOp;
+        // the relinearization-rescale path runs: its addend fusions (and the ops they skip) apply
+        let fusing = self.fuse_rescale && self.regen_epi.is_some() && self.relin_source == KskSource::Regen && self.relin.seeded();
+        let skip = if fusing { &self.fz.skip_a } else { &self.fz.skip_w };
         while i < self.ops.len() {
+            if skip[i] {
+                i += 1;
+                continue;
+            }
             let mut op = &self.ops[i];
-            if let Some((d, s0)) = from.take() {
+            let absorbed = from.take();
+            let from_sub = |y: usize| match absorbed {
+                Some((d, s0)) if d == y => s0,
+                _ => y,
+            };
+            if let Some((d, s0)) = absorbed {
                 subst = op.clone();
                 for v in ids_mut(&mut subst) {
                     if *v == d {
@@ -796,7 +1356,8 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
             let s = &cx.ex.compute;
             match op {
                 EmOp::Copy { dst, src, n } => {
-                    let absorb = match next {
+                    let annotated = skip.get(i).copied().unwrap_or(false) || self.fz.wgroups.contains_key(&i) || self.fz.rfold.contains_key(&i);
+                    let absorb = !annotated && match next {
                         Some(EmOp::Rescale { x, n: n2, .. }) | Some(EmOp::MulConst { x, n: n2, .. }) => x == dst && n2 == n,
                         Some(EmOp::Add { dst: d, n: n2, .. }) | Some(EmOp::Mult { dst: d, n: n2, .. }) | Some(EmOp::WSum { dst: d, n: n2, .. }) => d == dst && n2 == n,
                         _ => false,
@@ -836,16 +1397,25 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
                     // SAFETY: as above
                     launch_result("add_const", unsafe { (ctx.table.add_const)(&a, s.raw()) })?;
                 }
-                EmOp::Rescale { x, n, k } => self.rescale_from(cx, base + *x, None, *n, *k, kk)?,
+                EmOp::Rescale { x, n, k } => match self.fz.rfold.get(&(i - 1)) {
+                    // `WSum x = [s] w; Rescale x (c)`: from s with c w
+                    Some((src, _)) => self.rescale_from(cx, base + *x, Some(base + *src), *n, Some(self.rfold_k[&(i - 1)]), kk)?,
+                    None => self.rescale_from(cx, base + *x, None, *n, *k, kk)?,
+                },
                 EmOp::Mult { dst, n, .. } | EmOp::MultAcc { dst, n, .. } => {
                     // the rescale right after the relin rides its ModDown (`RelinRescale`)
                     let regen = self.regen_epi.is_some() && self.relin_source == KskSource::Regen && self.relin.seeded();
-                    if let Some(EmOp::Rescale { x, n: n2, k: None }) = next {
-                        if self.fuse_rescale && regen && x == dst && n2 == n && self.rr.contains_key(&(n - 1)) {
-                            i += 1;
+                    // (ops[i - 1] is this op, or the copy-absorbed original at the same index)
+                    if let Some((_, _, add)) = fused_rescale_at(&self.ops, i - 1) {
+                        if self.fuse_rescale && regen && self.rr.contains_key(&(n - 1)) {
+                            // the addend `c s` rides the tensor (`Fuse::addend`; s read for an absorbed copy's d as
+                            // the op's other operands are)
+                            let ya = self.fz.addend.get(&(i - 1)).map(|&(y, k, sub)| (from_sub(y), k, sub));
+                            let add = if ya.is_some() { None } else { add };
+                            i += if self.fz.addend.contains_key(&(i - 1)) || add.is_some() { 2 } else { 1 };
                             match op {
-                                EmOp::Mult { a, b, epi, .. } => self.relin_rescale(cx, base, *dst, &[(*a, *b)], *n, false, *epi, kk)?,
-                                EmOp::MultAcc { pairs, epi, .. } => self.relin_rescale(cx, base, *dst, pairs, *n, true, *epi, kk)?,
+                                EmOp::Mult { a, b, epi, .. } => self.relin_rescale(cx, base, *dst, &[(*a, *b)], *n, false, *epi, add, ya, kk)?,
+                                EmOp::MultAcc { pairs, epi, .. } => self.relin_rescale(cx, base, *dst, pairs, *n, true, *epi, add, ya, kk)?,
                                 _ => unreachable!(),
                             }
                             continue;
@@ -864,6 +1434,38 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
                         EmOp::MultAcc { pairs, epi, .. } => self.relin(cx, base, *dst, pairs, *n, true, *epi, add, kk)?,
                         _ => unreachable!(),
                     }
+                }
+                EmOp::WSum { .. } if self.fz.wgroups.contains_key(&(i - 1)) => {
+                    // the group's sums in one pass over its sources (`Fuse::wgroups`)
+                    let (srcs, outs) = &self.fz.wgroups[&(i - 1)];
+                    let tabs = &self.wmulti[&(i - 1)];
+                    let mut a = pc_kernels::WsumMultiArgs {
+                        out: [PolyRef::default(); 3],
+                        src: [PolyRef::default(); 8],
+                        w: [std::ptr::null(); 3],
+                        ws: [std::ptr::null(); 3],
+                        k: [std::ptr::null(); 3],
+                        pr,
+                        nout: outs.len() as i32,
+                        nsrc: srcs.len() as i32,
+                        rowstride: self.nq as i32,
+                        k_cts: kk as i32,
+                        n: [0; 3],
+                        nmax: outs.iter().map(|o| o.n).max().unwrap_or(0) as i32,
+                    };
+                    for (j, &x) in srcs.iter().enumerate() {
+                        a.src[j] = slot(cx, from_sub(x)).r();
+                    }
+                    for (m, o) in outs.iter().enumerate() {
+                        a.out[m] = slot(cx, o.dst).r();
+                        a.w[m] = tabs[m].v.vptr();
+                        a.ws[m] = tabs[m].s.vptr();
+                        a.k[m] = o.k.map(|k| self.raw[k].vptr()).unwrap_or(std::ptr::null());
+                        a.n[m] = o.n as i32;
+                    }
+                    // SAFETY: kk-ct views of the program buffers (outputs distinct from the sources, checked by
+                    // `plan_fusions`), weight tables of |srcs| blocks of |Q| rows, raw constants covering every Q row
+                    launch_result("wsum_multi", unsafe { (ctx.table.wsum_multi)(&a, s.raw()) })?;
                 }
                 EmOp::WSum { dst, srcs, n, k } => {
                     if srcs.len() > 8 {
@@ -967,14 +1569,23 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
     /// One `ks_dot_regen` launch per <= REGEN_KMAX cts of the relinearization key over `nrows` rows of `rows`: raw
     /// into `ks.ext` (`epi` None) or through the epilogue.
     #[allow(clippy::too_many_arguments)]
-    fn regen_dot<M: DevStrategy<W>>(&self, cx: &mut BtsCx<'_, '_, W, M>, rows: *const u32, nrows: usize, top: usize, kk: usize, epi: Option<pc_kernels::EpiArgs>) -> Result<()> {
+    fn regen_dot<M: DevStrategy<W>>(&self, cx: &mut BtsCx<'_, '_, W, M>, rows: *const u32, nrows: usize, top: usize, kk: usize, epi: Option<pc_kernels::EpiArgs>, lk: Option<&LevelKs<'a, W>>) -> Result<()> {
         let ctx = cx.ctx;
         let lay = ctx.lay;
         let re = self.regen_epi.as_ref().ok_or_else(|| shape("evalmod relin", "no in-place relinearization key tables"))?;
         let ex = &*cx.ex;
         let (pw, cw) = (lay.poly_words() as u64, lay.ct_words() as u64);
         let mu_ct = (cx.ks.dnum * lay.poly_words()) as u64;
-        let ndig = cx.ks.ndig(top)?;
+        let ndig = match lk {
+            Some(l) => l.lv.ndig(),
+            None => cx.ks.ndig(top)?,
+        };
+        let digit_of = lk.map(|l| l.digit_of.dptr()).unwrap_or(re.digit_of.dptr());
+        let key = lk.and_then(|l| l.key.as_ref());
+        let kbp = key.map(|k| k.kb.dptr()).unwrap_or(re.kb.dptr()) as *const *const c_void;
+        let seed = key.map(|k| k.seed).unwrap_or(re.seed);
+        let ktab = key.map(|k| k.tab).unwrap_or(re.key);
+        let kstride = key.map(|k| k.stride).unwrap_or(re.key_digit_stride);
         let ext = View::of(&ex.ks.ext, 0);
         let mut c = 0;
         while c < kk {
@@ -987,11 +1598,11 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
                 c0: std::ptr::null(),
                 out0: out as *mut c_void,
                 out1: (out as *const W).wrapping_add(pw as usize) as *mut c_void,
-                kb: re.kb.dptr() as *const *const c_void,
-                ka: re.kb.dptr() as *const *const c_void,
+                kb: kbp,
+                ka: kbp,
                 autok: re.autok.dptr(),
                 rows,
-                digit_of: re.digit_of.dptr(),
+                digit_of,
                 pmod: ctx.ks.p_mod_q.v.vptr(),
                 pmods: ctx.ks.p_mod_q.s.vptr(),
                 pr: ctx.pr(),
@@ -1000,7 +1611,7 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
                 mu_digit_stride: pw,
                 out_ct_stride: cw,
                 out_rot_stride: 0,
-                key_digit_stride: re.key_digit_stride,
+                key_digit_stride: kstride,
                 k: kc as i32,
                 r: 1,
                 ndig: ndig as i32,
@@ -1012,7 +1623,7 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
                 Some(e) => (1, pc_kernels::EpiArgs { dst: at(e.dst, cw) as *mut c_void, conv: at(e.conv, cw), ..e }),
                 None => (0, pc_kernels::EpiArgs::default()),
             };
-            let a = pc_kernels::KsRegenArgs { ks: ka, seed: re.seed, epi: e, use_epi, pad: 0, key: re.key, add: std::ptr::null() };
+            let a = pc_kernels::KsRegenArgs { ks: ka, seed, epi: e, use_epi, pad: 0, key: ktab, add: std::ptr::null() };
             // SAFETY: kc-ct views of the KS workspace and the program buffers (prefix of kk <= k_max), the key's seed
             // and stored `b`, row tables built at setup over rows of the context layout
             launch_result("ks_dot_regen", unsafe { (ctx.table.ks_dot_regen)(&a, ex.compute.raw()) })?;
@@ -1024,7 +1635,7 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
     /// `dst = rescale(relin(sum of pairs' tensors) [x2] [+ const])` with the ModDown fused into the rescale
     /// (`RelinRescale`; Regen relinearization key): rows 0..top-2 of dst, degree 1.
     #[allow(clippy::too_many_arguments)]
-    fn relin_rescale<M: DevStrategy<W>>(&self, cx: &mut BtsCx<'_, '_, W, M>, base: usize, dst: usize, pairs: &[(usize, usize)], n: usize, acc: bool, epi: Epi, kk: usize) -> Result<()> {
+    fn relin_rescale<M: DevStrategy<W>>(&self, cx: &mut BtsCx<'_, '_, W, M>, base: usize, dst: usize, pairs: &[(usize, usize)], n: usize, acc: bool, epi: Epi, add: Option<(usize, bool)>, ya: Option<(usize, usize, bool)>, kk: usize) -> Result<()> {
         let ctx = cx.ctx;
         let lay = ctx.lay;
         let top = n - 1;
@@ -1040,12 +1651,36 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
             let (a1, b1) = if pairs.len() > 1 { (v(pairs[1].0), v(pairs[1].1)) } else { (a0, b0) };
             let ext = View::of(&ex.ks.ext, 0);
             let t = TensorArgs { out: dstv.r(), d2: ext.r(), a0, b0, a1, b1, coef: std::ptr::null_mut(), coef_ct_stride: pw, pr: ctx.pr(), npairs: pairs.len() as i32, acc: acc as i32, n: n as i32, k: kk as i32, dbl: epi.dbl as i32, pad: 0 };
-            // SAFETY: as in `relin`
-            launch_result("tensor", unsafe { (ctx.table.tensor)(&t, ex.compute.raw()) })?;
-            ks::modup_from(ctx, &ex.compute, cx.ks, &mut ex.ks, &mut ex.bconv_work, ext.part::<W>(1), kk, top)?;
+            match ya {
+                // (d0, d1) -+= c y in the same pass (`Fuse::addend`)
+                Some((y, k, sub)) => {
+                    let c = &self.consts[k];
+                    let a = pc_kernels::TensorYArgs { t, y: v(y), c: c.v.vptr(), cs: c.s.vptr(), sub: sub as i32, pad: 0 };
+                    // SAFETY: as in `relin`; y a program buffer other than dst (checked by `plan_fusions`), read
+                    // before the thread's stores; the constant table covers every Q row
+                    launch_result("tensor_y", unsafe { (ctx.table.tensor_y)(&a, ex.compute.raw()) })?;
+                }
+                // SAFETY: as in `relin`
+                None => launch_result("tensor", unsafe { (ctx.table.tensor)(&t, ex.compute.raw()) })?,
+            }
+            // the program's `dst +/-= y` between the relinearization and the rescale: onto the tensor's (d0, d1),
+            // which the conversion below rescales with the key-switched d2
+            if let Some((y, sub)) = add {
+                let args = EwArgs { out: dstv.r(), a: dstv.r(), b: v(y), rs: lay.rs_q(top), sc: std::ptr::null(), scs: std::ptr::null(), pr: ctx.pr(), k: kk as i32, nparts: 2, sub: sub as i32, zero_p: 0 };
+                // SAFETY: kk-ct views of two distinct program buffers (y != dst, checked by `fused_rescale_at`)
+                launch_result("ew_add", unsafe { (ctx.table.ew_add)(&args, ex.compute.raw()) })?;
+            }
+            match self.levelks.get(&top) {
+                Some(lk) => ks::modup_from_level(ctx, &ex.compute, cx.ks, &lk.lv, &mut ex.ks, &mut ex.bconv_work, ext.part::<W>(1), kk, top)?,
+                None => ks::modup_from(ctx, &ex.compute, cx.ks, &mut ex.ks, &mut ex.bconv_work, ext.part::<W>(1), kk, top)?,
+            }
         }
+        let lk = self.levelks.get(&top);
         // 1. the dot over the two tops and the special rows, raw into ks.ext
-        self.regen_dot(cx, rr.rows.dptr(), 2 + lay.kp, top, kk, None)?;
+        match lk {
+            Some(l) => self.regen_dot(cx, l.rows.dptr(), 2 + l.nsp, top, kk, None, lk)?,
+            None => self.regen_dot(cx, rr.rows.dptr(), 2 + lay.kp, top, kk, None, None)?,
+        }
         let ex = &mut *cx.ex;
         let s = &ex.compute;
         // 2. the tops of the extended product: P c + dot [+ P k]
@@ -1059,20 +1694,30 @@ impl<'a, W: DevWord> EvalModPlan<'a, W> {
         src[0] = row(dstv, top - 1);
         src[1] = row(ext, top - 1);
         let pr = ctx.pr().wrapping_add(top - 1);
-        let w = WsumArgs { out: row(ext, top - 1), src, w: rr.wtop.v.vptr(), ws: rr.wtop.s.vptr(), pr, nsrc: 2, rowstride: 2, n: 2, k: kk as i32 };
+        let wt = lk.map(|l| &l.wtop).unwrap_or(&rr.wtop);
+        let w = WsumArgs { out: row(ext, top - 1), src, w: wt.v.vptr(), ws: wt.s.vptr(), pr, nsrc: 2, rowstride: 2, n: 2, k: kk as i32 };
         // SAFETY: rows top-1, top of kk cts of the program buffer and of ks.ext (the prime table offset to those
         // rows, the constant's two entries with them); element-wise, out aliasing src[1] index by index
-        match kc {
-            Some(c) => launch_result("wsum_k", unsafe { (ctx.table.wsum_k)(&WsumKArgs { w, k: c.tops.vptr() }, s.raw()) })?,
+        // a level key's P' k on the tops (its own table), else the relinearization key's P k
+        let ktop = match (kc, epi.k) {
+            (Some(c), Some(ki)) => Some(match lk.and_then(|l| l.ktops.get(&ki)) {
+                Some(t) => t.vptr(),
+                None => c.tops.vptr(),
+            }),
+            _ => None,
+        };
+        match ktop {
+            Some(t) => launch_result("wsum_k", unsafe { (ctx.table.wsum_k)(&WsumKArgs { w, k: t }, s.raw()) })?,
             None => launch_result("wsum", unsafe { (ctx.table.wsum)(&w, s.raw()) })?,
         }
         // 3. coefficient form of the 11 source rows, the exact conversion to rows 0..top-2, their NTT
-        rr.md.run(ctx, s, &mut ex.ks.ext.buf, &mut ex.ks.conv.buf, kk)?;
+        lk.map(|l| &l.md).unwrap_or(&rr.md).run(ctx, s, &mut ex.ks.ext.buf, &mut ex.ks.conv.buf, kk)?;
         // 4. the Q-row dot into dst = alpha c + beta (dot - conv) [+ alpha k]
         let conv = View::of(&ex.ks.conv, 0);
         let k = kc.map(|c| c.q.vptr()).unwrap_or(std::ptr::null());
-        let e = pc_kernels::EpiArgs { dst: dstv.base, conv: conv.base, binv: rr.beta.v.vptr(), binvs: rr.beta.s.vptr(), k, part_stride: pw, dbl: 0, pad: 0, alpha: rr.alpha.v.vptr(), alphas: rr.alpha.s.vptr() };
-        self.regen_dot(cx, qrows.dptr(), top - 1, top, kk, Some(e))
+        let bt = lk.map(|l| &l.beta).unwrap_or(&rr.beta);
+        let e = pc_kernels::EpiArgs { dst: dstv.base, conv: conv.base, binv: bt.v.vptr(), binvs: bt.s.vptr(), k, part_stride: pw, dbl: 0, pad: 0, alpha: rr.alpha.v.vptr(), alphas: rr.alpha.s.vptr() };
+        self.regen_dot(cx, qrows.dptr(), top - 1, top, kk, Some(e), lk)
     }
 
     /// dst = relin(sum of pairs' tensors) [x2] [+ const] [+ buffer `add`] (Mult: one pair; MultAcc: accumulate onto
@@ -1246,13 +1891,14 @@ mod tests {
         let st = pc_core::scale::ScaleTables::precompute(&chain).expect("tables");
         let v = &plan.variants[0];
         let ps = PsPlan::from_coeffs(&setup.evalmod_coeffs).expect("ps");
-        let (prog, _) = build_evalmod(&st, v.em_in, &ps, setup.evalmod_da_its as i32).expect("program");
+        let (prog, _) = build_evalmod_opts(&st, v.em_in, &ps, setup.evalmod_da_its as i32, true).expect("program");
         let fused = prog.fused();
         let before = slots_of(&fused);
         let (ops, after) = assign_buffers(fused.clone());
         println!("dense EvalMod: {} ops, buffers {before} -> {after}", ops.len());
         assert!(after < before);
         let (rw, _) = rewrite(fused.clone(), &prog.consts, &st.q);
+        let rw = schedule_relin_rescales(rw, st.d);
         let after_rw = assign_buffers(rw.clone()).1;
         println!("dense EvalMod rewritten: {} -> {} ops, buffers {after_rw}", fused.len(), rw.len());
         assert!(after_rw <= after && after_rw == v.em_slots);
@@ -1277,3 +1923,4 @@ mod tests {
         }
     }
 }
+

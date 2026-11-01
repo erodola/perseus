@@ -19,20 +19,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import mmap
 import os
 import struct
 import sys
 import time
 import types
 
-from speedrun.record1 import PROMPT, pack, unpack
+from speedrun.record1 import _COUNT, _LEN, PROMPT
 
 HEADER = struct.Struct("<Q")
 STEPS = 16
 # Decode-8 never holds more than STEPS keys: its plan's softmax and GELU are fitted to positions 0..STEPS-1 (the main
 # decode plan's to 1024-token windows); it runs on the lean chain n32a4 (its runtime line's CHAIN_PRESET:
 # speedrun/make_n32a4_decode_plan.sh)
-DECODE_PLAN = "bootstrap_placements/gpt2_decode_python_n32a4_kc16r_cm"
+DECODE_PLAN = "bootstrap_placements/gpt2_decode_python_n32a4_kc16r_lh"
 # speedrun/make_prefill_plan.sh's plan with CutMax's scaled normalisers (stage 13 replanned: its PLAN_CMD.txt), on the
 # lean chain n32a4 too (PRESET=n32a4; its runtime line's CHAIN_PRESET)
 PREFILL_PLAN = "bootstrap_placements/gpt2_prefill128_n32a4_pfbhrd_cm"
@@ -48,10 +49,44 @@ def write(root, rel, payload):
     os.rename(tmp, path)
 
 
+def write_packed(root, rel, blobs):
+    """write(root, rel, pack(blobs)) without joining the blobs into one payload first."""
+    head = _COUNT.pack(len(blobs)) + b"".join(_LEN.pack(len(b)) for b in blobs)
+    path = os.path.join(root, rel)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = os.path.join(os.path.dirname(path), f".{os.path.basename(path)}.tmp")
+    with open(tmp, "wb") as f:
+        f.write(HEADER.pack(len(head) + sum(len(b) for b in blobs)))
+        f.write(head)
+        for b in blobs:
+            f.write(b)
+    os.rename(tmp, path)
+
+
+def unpacked(payload, most=64):
+    """unpack(payload) as views into the payload: its checks, no copies."""
+    if len(payload) < _COUNT.size:
+        raise ValueError("unpacked: no payload header")
+    (n,) = _COUNT.unpack_from(payload)
+    off = _COUNT.size + n * _LEN.size
+    if n > most or off > len(payload):
+        raise ValueError("unpacked: bad payload header")
+    lens = [_LEN.unpack_from(payload, _COUNT.size + i * _LEN.size)[0] for i in range(n)]
+    if off + sum(lens) != len(payload):
+        raise ValueError("unpacked: lengths do not match the payload")
+    mv, out = memoryview(payload), []
+    for m in lens:
+        out.append(mv[off:off + m])
+        off += m
+    return out
+
+
 def read(root, rel):
+    """The payload as a read-only view of the file mapped in place (no copy into a bytes object)."""
     with open(os.path.join(root, rel), "rb") as f:
-        data = f.read()
-    return data[HEADER.size:HEADER.size + HEADER.unpack_from(data)[0]]
+        n = HEADER.unpack(f.read(HEADER.size))[0]
+        m = mmap.mmap(f.fileno(), HEADER.size + n, flags=mmap.MAP_SHARED | mmap.MAP_POPULATE, prot=mmap.PROT_READ)
+    return memoryview(m)[HEADER.size:]
 
 
 def wait(root, *rels):
@@ -59,7 +94,7 @@ def wait(root, *rels):
         for rel in rels:
             if os.path.exists(os.path.join(root, rel)):
                 return rel
-        time.sleep(0.0005)
+        time.sleep(0.00005)
 
 
 def main():
@@ -78,7 +113,7 @@ def decode(a):
     from perseus.serve import gpt2_decode as served
     args = types.SimpleNamespace(plan=a.plan, chain="n32", layers=None, packing="cachemir_complex",
                                  weights=os.environ["WEIGHTS_PATH"], key_layout="packed", pt_rows=28, stc_cache=8,
-                                 work_dir=os.path.join(os.environ.get("HOME", "/tmp"), "speedrun"))
+                                 pt_cache=True, work_dir=os.path.join(os.environ.get("HOME", "/tmp"), "speedrun"))
     h = served.Gpt2Handler(args)
     os.environ["CUDA_VISIBLE_DEVICES"] = str(a.device)      # the handler exports its own device; the GPU is ours
     man = h.manifest({"tokens": STEPS, "argmax": True, "contract": contract_hash(served._config(args.plan, "n32"))})
@@ -91,7 +126,8 @@ def decode(a):
         for j in range(STEPS):
             wait(a.inbox, f"{k}/{j}")
             _h, outs = h.run({"t": j, "argmax": True}, [read(a.inbox, f"{k}/{j}")], None)
-            write(a.outbox, f"{k}/{j}", pack(outs))
+            write_packed(a.outbox, f"{k}/{j}", outs)
+            h.ahead((j + 1) % STEPS)                # the next position's patch while the client turns around
         k += 1
     h.run_.close()
     return 0
@@ -157,9 +193,9 @@ def prefill(a):
     tail, cutmax = run.reg[model.n_layers][0][1], run.reg[model.n_layers + 1][0][1]
     k = 0
     while wait(a.inbox, f"{k}/0", "quit") != "quit":
-        x0 = [_pc.import_ct(run.sess, f) for f in unpack(read(a.inbox, f"{k}/0"))]
+        x0 = [_pc.import_ct(run.sess, f) for f in unpacked(read(a.inbox, f"{k}/0"))]
         run.run(x0=x0)
-        write(a.outbox, f"{k}/0", pack([_pc.export_ct(run.sess, run.ct(r)) for r in (tail, cutmax)]))
+        write_packed(a.outbox, f"{k}/0", [_pc.export_ct(run.sess, run.ct(r)) for r in (tail, cutmax)])
         del x0
         k += 1
     run.close()

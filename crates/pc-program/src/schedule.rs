@@ -33,7 +33,7 @@ fn cost(st: &Step, lists: &[Vec<i64>]) -> f64 {
     match &st.op {
         StepOp::Bootstrap { .. } | StepOp::Finish { .. } => 17.0,
         StepOp::CoeffSum { .. } => 1.0,
-        StepOp::Mult | StepOp::Square => 0.45,
+        StepOp::Mult | StepOp::Square | StepOp::MultRescale { .. } => 0.45,
         StepOp::Rotate { g, .. } if *g == NONE => 0.02,
         StepOp::Rotate { .. } | StepOp::Conjugate { .. } => 0.4,
         StepOp::RotateSum { l, .. } => 0.15 + 0.3 * lists.get(*l as usize).map_or(1, |v| v.len()) as f64,
@@ -64,7 +64,8 @@ fn pinned(st: &Step, side_ok: &dyn Fn(&Step) -> bool) -> bool {
     let tmp = st.inplace && matches!(st.op, StepOp::Mult | StepOp::Square | StepOp::Negate | StepOp::Rotate { .. } | StepOp::RotateSum { .. } | StepOp::Conjugate { .. })
         || (st.inplace && matches!(st.op, StepOp::Add | StepOp::Sub) && st.b == st.out);
     // a streamed-weight sum uses compute's expander scratch and the frame compute joined
-    matches!(st.op, StepOp::Bootstrap { .. } | StepOp::Finish { .. } | StepOp::CoeffSum { .. }) || tmp || !side_ok(st)
+    // a fused relinearization-rescale runs on compute (its tables are the compute op layer's)
+    matches!(st.op, StepOp::Bootstrap { .. } | StepOp::Finish { .. } | StepOp::CoeffSum { .. } | StepOp::MultRescale { .. }) || tmp || !side_ok(st)
 }
 
 /// The schedule of `b` (its current dynamic steps) for one compute + one side lane.
@@ -110,7 +111,7 @@ pub fn plan<W: DevWord>(b: &Bound<'_, W>, side_ok: &dyn Fn(&Step) -> bool) -> Sc
             // a unit issues all its steps at once, on compute (its gather buffers are compute's); a product-add pair on
             // one lane, compute when either step is held there
             let unit = b.unit_of.get(i).filter(|&&u| u != NONE).map(|&u| &b.units[u as usize]);
-            let gathers = unit.is_some_and(|u| !matches!(u.kind, UnitKind::MultPtAdd { .. }));
+            let gathers = unit.is_some_and(|u| !matches!(u.kind, UnitKind::MultPtAdd { .. } | UnitKind::MultPtAddChain { .. }));
             if on_cp || gathers || dynamic.contains(&(i as u32)) || pinned(st, side_ok) {
                 0
             } else {
@@ -118,7 +119,7 @@ pub fn plan<W: DevWord>(b: &Bound<'_, W>, side_ok: &dyn Fn(&Step) -> bool) -> Sc
             }
         })
         .collect();
-    for u in b.units.iter().filter(|u| matches!(u.kind, UnitKind::MultPtAdd { .. })) {
+    for u in b.units.iter().filter(|u| matches!(u.kind, UnitKind::MultPtAdd { .. } | UnitKind::MultPtAddChain { .. })) {
         let (lo, hi) = (u.lo as usize, u.hi as usize);
         let l = lane[lo..hi].iter().copied().min().unwrap_or(0);
         lane[lo..hi].iter_mut().for_each(|x| *x = l);

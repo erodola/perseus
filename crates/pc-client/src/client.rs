@@ -118,6 +118,12 @@ impl Client {
     /// Packed `b` of one switching key (relation in `spec` module doc).
     #[allow(clippy::too_many_arguments)]
     fn ksk_packed(&self, shape: &KeyShape, s_new: &[Option<Vec<u32>>], s_old: &[Vec<u32>], sq: bool, seed: &KskSeed, err_key: [u32; 8], bits: u32, row_words: usize) -> Vec<u32> {
+        self.ksk_packed_with(shape, s_new, s_old, sq, seed, err_key, bits, row_words, None)
+    }
+
+    /// `ksk_packed` with the digit map and the gadget (P mod q_t by prime id) given (level relinearization keys).
+    #[allow(clippy::too_many_arguments)]
+    fn ksk_packed_with(&self, shape: &KeyShape, s_new: &[Option<Vec<u32>>], s_old: &[Vec<u32>], sq: bool, seed: &KskSeed, err_key: [u32; 8], bits: u32, row_words: usize, ov: Option<(&[i32], &[u32])>) -> Vec<u32> {
         let n = self.chain.n;
         let ids = shape.row_ids();
         let rows = ids.len();
@@ -132,8 +138,16 @@ impl Client {
             let mut a = vec![0u32; n];
             kska_expand_row(seed, d as u32, p as u32, &mut a);
             let sn = s_new[id].as_ref().expect("s_new row of every stored prime id");
-            let inq = id < nq && self.ring.digit_of(id) == Some(d);
-            let pm = if inq { self.ring.gadget(shape.kp)[id] } else { 0 };
+            let (inq, pm) = match ov {
+                Some((dof, g)) => {
+                    let inq = id < nq && dof[id] == d as i32;
+                    (inq, if inq { g[id] } else { 0 })
+                }
+                None => {
+                    let inq = id < nq && self.ring.digit_of(id) == Some(d);
+                    (inq, if inq { self.ring.gadget(shape.kp)[id] } else { 0 })
+                }
+            };
             let so = &s_old[id];
             for i in 0..n {
                 let mut v = b[i] as u64 + p - mm(a[i], sn[i], p);
@@ -146,6 +160,17 @@ impl Client {
             wire::pack_row(&b, bits, o);
         });
         out
+    }
+
+    /// A level relinearization key's digit map and gadget (P' mod q_t, Q ids <= top) by prime id.
+    fn level_tables(&self, top: usize) -> Result<(Vec<i32>, Vec<u32>)> {
+        let chain = &self.chain;
+        let (dg, sp, _) = chain.level_relin_layout(top, crate::spec::LEVEL_RELIN_CAP).ok_or_else(|| Error::Spec(format!("no level relinearization key at top {top}")))?;
+        let rows = chain.q.len() + chain.p.len();
+        let pr = &self.ring.primes;
+        let dof: Vec<i32> = (0..rows).map(|t| dg.iter().position(|g| g.contains(&t)).map_or(-1, |d| d as i32)).collect();
+        let g: Vec<u32> = (0..rows).map(|t| if t <= top { sp.iter().fold(1u64, |acc, &x| acc * (pr[x] % pr[t]) % pr[t]) as u32 } else { 0 }).collect();
+        Ok((dof, g))
     }
 
     /// Eval rows (every prime id; None outside `ids`) of a signed small polynomial.
@@ -240,13 +265,17 @@ impl Client {
         }
         drop(small);
         let tks = Instant::now();
-        let needs_sparse = spec.keys.iter().any(|k| matches!(k.role, Role::EncDenseToSparse | Role::EncSparseToDense));
+        let needs_sparse = spec.keys.iter().any(|k| matches!(k.role, Role::EncDenseToSparse | Role::EncSparseToDense | Role::SparseRot { .. }));
         let s_sparse = if needs_sparse { Some(self.dense_rows(&self.secret.sk.s_sparse)) } else { None };
         let s_all: Vec<Option<Vec<u32>>> = self.s_eval.iter().cloned().map(Some).collect();
         for (k, (seed, ek)) in spec.keys.iter().zip(&seeds) {
             let ids = k.shape.row_ids();
             let packed = match k.role {
                 Role::Relin => self.ksk_packed(&k.shape, &s_all, &self.s_eval, true, seed, *ek, bits, row_words),
+                Role::RelinLevel { top } => {
+                    let (dof, g) = self.level_tables(top)?;
+                    self.ksk_packed_with(&k.shape, &s_all, &self.s_eval, true, seed, *ek, bits, row_words, Some((&dof, &g)))
+                }
                 Role::Rot { .. } | Role::Conj | Role::Auto { .. } => {
                     let g = k.role.galois(n).ok_or_else(|| Error::Spec(format!("{:?} without a Galois element", k.role)))?;
                     let ginv = galois::galois_inverse(g, n)?;
@@ -261,6 +290,11 @@ impl Client {
                 Role::EncSparseToDense => {
                     let sp = s_sparse.as_ref().ok_or_else(|| Error::Spec("sparse secret rows".into()))?;
                     self.ksk_packed(&k.shape, &s_all, sp, false, seed, *ek, bits, row_words)
+                }
+                Role::SparseRot { galois, .. } => {
+                    let sp = s_sparse.as_ref().ok_or_else(|| Error::Spec("sparse secret rows".into()))?;
+                    let s_new = Self::gathered(&self.s_eval, galois::galois_inverse(galois, n)?, &ids, n)?;
+                    self.ksk_packed(&k.shape, &s_new, sp, false, seed, *ek, bits, row_words)
                 }
                 Role::SpruAtob => {
                     let block = self.spru_block.as_ref().ok_or_else(|| Error::Spec("SpruAtob key without a spru request".into()))?;
@@ -397,19 +431,24 @@ impl Client {
         let rows = ids.len();
         let s_all: Vec<Option<Vec<u32>>> = self.s_eval.iter().cloned().map(Some).collect();
         let (s_new, s_old, sq): (Vec<Option<Vec<u32>>>, Vec<Vec<u32>>, bool) = match key.role {
-            Role::Relin => (s_all, self.s_eval.clone(), true),
+            Role::Relin | Role::RelinLevel { .. } => (s_all, self.s_eval.clone(), true),
             Role::Rot { .. } | Role::Conj | Role::Auto { .. } => {
                 let g = key.role.galois(n).ok_or_else(|| Error::Spec("automorphism key without a Galois element".into()))?;
                 (Self::gathered(&self.s_eval, galois::galois_inverse(g, n)?, &ids, n)?, self.s_eval.clone(), false)
             }
             Role::EncDenseToSparse => (self.dense_rows(&self.secret.sk.s_sparse).into_iter().map(Some).collect(), self.s_eval.clone(), false),
             Role::EncSparseToDense => (s_all, self.dense_rows(&self.secret.sk.s_sparse), false),
+            Role::SparseRot { galois, .. } => (Self::gathered(&self.s_eval, galois::galois_inverse(galois, n)?, &ids, n)?, self.dense_rows(&self.secret.sk.s_sparse), false),
             Role::SpruAtob => {
                 let b = self.spru_block.as_ref().ok_or_else(|| Error::Spec("no SPRU block key in this client".into()))?;
                 (self.rows_of(b, &ids), self.s_eval.clone(), false)
             }
         };
         let nq = self.ring.nq;
+        let lvl = match key.role {
+            Role::RelinLevel { top } => Some(self.level_tables(top)?),
+            _ => None,
+        };
         let mx = (0..key.shape.ndig * rows)
             .into_par_iter()
             .map(|r| {
@@ -420,14 +459,17 @@ impl Client {
                 let mut a = vec![0u32; n];
                 kska_expand_row(seed, d as u32, p as u32, &mut a);
                 let sn = s_new[id].as_ref().expect("row");
-                let inq = id < nq && self.ring.digit_of(id) == Some(d);
+                let (inq, gm) = match &lvl {
+                    Some((dof, g)) => (id < nq && dof[id] == d as i32, g[id]),
+                    None => (id < nq && self.ring.digit_of(id) == Some(d), if id < nq { self.ring.gadget(key.shape.kp)[id] } else { 0 }),
+                };
                 let mut e: Vec<u32> = (0..n)
                     .map(|i| {
                         let mut v = b[i] as u64 + mm(a[i], sn[i], p);
                         if inq {
                             let so = s_old[id][i];
                             let x = if sq { mm(so, so, p) as u32 } else { so };
-                            v += p - mm(self.ring.gadget(key.shape.kp)[id], x, p);
+                            v += p - mm(gm, x, p);
                         }
                         (v % p) as u32
                     })
@@ -537,6 +579,43 @@ mod tests {
         }
     }
 
+    /// Level relinearization keys (n32a4: tops 26, 40 = 2, 3 digits over P' = P x one idle Q prime): the relation
+    /// holds with the level's digits and gadget (small |e|), and a wrong shape is refused.
+    #[test]
+    fn level_relin_keys() {
+        let name = "n32a4";
+        let mut c = client_on(name, 3);
+        let chain = c.chain.clone();
+        let keys: Vec<KeyReq> = [26usize, 40]
+            .iter()
+            .map(|&top| {
+                let (dg, _, q_top) = chain.level_relin_layout(top, crate::spec::LEVEL_RELIN_CAP).unwrap();
+                KeyReq { role: Role::RelinLevel { top }, shape: KeyShape { q_top, ndig: dg.len(), nq: chain.q.len(), kp: chain.p.len() } }
+            })
+            .collect();
+        let spec = KeySpec { chain: name.into(), params_hash: c.params_hash.clone(), contract: "test".into(), keys, spru: None, pcmm_t: vec![], ccmm: false, public_key: false };
+        spec.check(&chain).unwrap();
+        let mut bad = spec.clone();
+        bad.keys[0].shape = KeyShape::full(&chain);
+        assert!(bad.check(&chain).is_err());
+        let dir = std::env::temp_dir().join(format!("pc_client_level_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("b.pckb");
+        let f = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
+        let st = c.keygen(&spec, f, &mut Prng::from_seed([7; 8], 0), 8).unwrap();
+        assert_eq!(st.keys, 2);
+        let mut r = wire::BundleReader::open(&path).unwrap();
+        let (bits, rw) = (r.header.bits, r.header.row_words);
+        for i in 0..r.header.entries.len() {
+            if let Entry::Ksk { key, seed, .. } = r.header.entries[i].clone() {
+                let v = r.read(i).unwrap();
+                let mx = c.ksk_relation_max_err(&key, &KskSeed(seed), &v, bits, rw).unwrap();
+                assert!(mx > 0 && mx <= 45, "{:?}: max |e| {mx}", key.role);
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     fn keygen_relations_and_bundle_on(name: &str) {
         let mut c = client_on(name, 2);
         let chain = c.chain.clone();
@@ -550,7 +629,17 @@ mod tests {
             KeyReq { role: Role::EncSparseToDense, shape: full },
             KeyReq { role: Role::SpruAtob, shape: KeyShape::bottom(&chain).unwrap() },
             KeyReq { role: Role::Auto { galois: 2 * chain.n as u64 - 5 }, shape: full },
+            KeyReq { role: Role::SparseRot { step: 2048, galois: galois::rotation_galois(2048, chain.n).unwrap() }, shape: full },
         ];
+        let mut keys = keys;
+        if chain.p_sparse < chain.p.len() {
+            // a lean chain's StC-first input stages: a rotation key over P' at the single primes
+            keys.push(KeyReq { role: Role::rot(1, chain.n).unwrap(), shape: KeyShape::stc_ps(&chain, chain.level_unit + 2).unwrap() });
+            // and over a shorter prefix of P (6 special primes still exceed the digit by 16 bits; 5 do not)
+            keys.push(KeyReq { role: Role::rot(2, chain.n).unwrap(), shape: KeyShape::stc_ps_kp(&chain, chain.level_unit + 2, 6).unwrap() });
+            assert!(KeyShape::stc_ps_kp(&chain, chain.level_unit + 2, 5).is_err());
+        }
+        let nkeys = keys.len();
         let spec = KeySpec {
             chain: name.into(),
             params_hash: c.params_hash.clone(),
@@ -566,6 +655,10 @@ mod tests {
             let mut wide = spec.clone();
             wide.keys[4].shape = KeyShape::banded(&chain, 1).unwrap();
             assert!(wide.check(&chain).is_err());
+            // P' above the bottom only for rotation keys
+            let mut ps_relin = spec.clone();
+            ps_relin.keys[0].shape = KeyShape::stc_ps(&chain, chain.level_unit + 2).unwrap();
+            assert!(ps_relin.check(&chain).is_err());
         }
         let dir = std::env::temp_dir().join(format!("pc_client_test_{name}_{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -573,7 +666,7 @@ mod tests {
         let f = std::io::BufWriter::new(std::fs::File::create(&path).unwrap());
         let mut g = Prng::from_seed([9; 8], 0);
         let st = c.keygen(&spec, f, &mut g, 8).unwrap();
-        assert_eq!(st.keys, 8);
+        assert_eq!(st.keys, nkeys);
         let mut r = wire::BundleReader::open(&path).unwrap();
         assert_eq!(r.bytes(), st.bytes);
         let (bits, rw) = (r.header.bits, r.header.row_words);

@@ -49,6 +49,9 @@ section! {
         #[doc = "EvalMod: a Regen relinearization and the rescale after it as one exact conversion (pc-gpu `BtsSetup::em_fuse_rescale`; default off = relinearize, then rescale)."]
         #[doc = "Runtime switch `PC_EM_FUSE_RESCALE` [kernel]: binds no plan and no key bundle."]
         em_fuse_rescale: Flag = "PC_EM_FUSE_RESCALE", "(unset)";
+        #[doc = "EvalMod: relinearization-rescales over level relinearization keys (P' = P x the Q primes idle above the level, fewer digits; pc-gpu `keys::LevelRelinSpec`; default off)."]
+        #[doc = "Runtime switch `PC_EM_LEVEL_KEYS`: binds the key bundle (level relinearization keys), not the plan."]
+        em_level_keys: Flag = "PC_EM_LEVEL_KEYS", "(unset)";
         #[doc = "`FIDESLIB_GPU_ENCODE`. Default (unset). Read at examples/gpt2/env.py::ENV; examples/llama/env.py::ENV."]
         #[doc = "Shipped plans: none."]
         gpu_encode: Flag = "FIDESLIB_GPU_ENCODE", "(unset)";
@@ -58,6 +61,9 @@ section! {
         #[doc = "Resident key `a` tails for the CtS baby keys of packed key sets (pc-gpu `BtsSetup::lt_tails`; default on, off = those stages regenerate every digit)."]
         #[doc = "Runtime switch `PC_LT_TAILS` [kernel]: binds no plan and no key bundle."]
         lt_tails: Flag = "PC_LT_TAILS", "(unset)";
+        #[doc = "The raise's sparse -> dense switch folded into the first hoisted rotations after it: StC-first's CtS stage 0 and SparseB's first fold round switch out of the sparse secret with `SparseRot` keys (pc-gpu `BtsSetup::merge_s2d`; default off)."]
+        #[doc = "Runtime switch `PC_BTS_MERGE_S2D`: binds the key bundle (sparse -> dense rotation keys), not the plan."]
+        merge_s2d: Flag = "PC_BTS_MERGE_S2D", "(unset)";
         #[doc = "Two sibling real dense StC-first refreshes of one level and degree run as one complex refresh (pc-program K-batching pairs them, pc-gpu `BtsRoute::run_pair`; default off = each on its own)."]
         #[doc = "Runtime switch `PC_BTS_PAIR`."]
         pair: Flag = "PC_BTS_PAIR", "(unset)";
@@ -73,6 +79,9 @@ section! {
         #[doc = "`FIDESLIB_BTS_RAISE_STC_ONUSE`. Default (unset). Read at Context.cu: a staged-only StC-first route builds a missing raise variant at first use."]
         #[doc = "Shipped plans: runtime= llama128."]
         raise_stc_onuse: Flag = "FIDESLIB_BTS_RAISE_STC_ONUSE", "(unset)";
+        #[doc = "A lean chain's StC-first input stages switch over a prefix of P (pc-gpu `BtsSetup::stc_ps`, `KskShape::stc_ps_kp` rotation keys): 0 = off, 1 = P' (n32's 9 special primes), k > 1 = the first k."]
+        #[doc = "Runtime switch `PC_BTS_STC_PS`: binds the key bundle (P' rotation keys), not the plan."]
+        stc_ps: Int = "PC_BTS_STC_PS", "(unset)";
         #[doc = "`FIDESLIB_BTS_REAL`. Default '0'. Read at impl/ops.py::FheOps.bootstrap_real."]
         #[doc = "Shipped plans: runtime= 15."]
         real: Flag = "FIDESLIB_BTS_REAL", "'0'";
@@ -556,6 +565,12 @@ section! {
         #[doc = "`PF_PCMM_RAISE_HI`. Default ''. Read at impl/pcmm.py::(module)."]
         #[doc = "Shipped plans: runtime= llama128."]
         pcmm_raise_hi: List = "PF_PCMM_RAISE_HI", "''";
+        #[doc = "`PF_PCMM_RAISE_OUT`. Default ''. Read at impl/pcmm.py::(module): linear:output:drop[:lo-hi]."]
+        #[doc = "Shipped plans: none."]
+        pcmm_raise_out: List = "PF_PCMM_RAISE_OUT", "''";
+        #[doc = "`KV_PUSH_RAISE`. Default ''. Read at impl/attention.py::(module): block:drop of the K/V push refreshes."]
+        #[doc = "Shipped plans: none."]
+        kv_push_raise: List = "KV_PUSH_RAISE", "''";
         #[doc = "`PF_PCMM_RAISE_UP`. Default '' / None. Read at impl/pcmm.py::(module)."]
         #[doc = "Shipped plans: runtime= pr9."]
         pcmm_raise_up: Str = "PF_PCMM_RAISE_UP", "'' / None";

@@ -12,6 +12,9 @@ pub mod apply_plan;
 pub mod batch;
 pub mod check;
 pub mod resolve;
+pub mod rotacc;
+pub mod rr;
+pub mod share;
 pub mod stream;
 
 use crate::error::{Error, Result};
@@ -184,6 +187,18 @@ impl RouteEnv {
             let got = if cap.deg == 2 { (rec.out.level.checked_sub(sh.unit())?, 2) } else { (rec.out.level, rec.out.deg) };
             if got == (cap.level, cap.deg) {
                 return Some(r);
+            }
+        }
+        // a dense refresh the code ran under a raise variant (CapFhe.raise_drop: KV_PUSH_RAISE, PF_SM_R_RAISE) lands that
+        // many units deeper: the dense route at the built drop that lands there
+        if sh.cfg.bts.landings.contains_key(&0) {
+            for &d in &sh.cfg.bts.raise_drops {
+                let r = Route { raise_drop: d, ..self.base(0) };
+                let Ok(rec) = sh.bootstrap(input, &r) else { continue };
+                let got = if cap.deg == 2 { (rec.out.level.checked_sub(sh.unit())?, 2) } else { (rec.out.level, rec.out.deg) };
+                if got == (cap.level, cap.deg) {
+                    return Some(r);
+                }
             }
         }
         None
@@ -511,6 +526,18 @@ pub fn compile_block(
     let cf_max = if chain_of(cfg)?.lone_top().is_some() { crate::program::PAIR_CF_MAX_LEAN } else { crate::program::PAIR_CF_MAX };
     let cf_default = u32_of("bts.stc_first_cf", cfg.bts.stc_first_cf, 13)?;
     let pair = sh.cfg.bts.stc_first_entry.filter(|_| cfg.bts.pair.unwrap_or(false)).map(|entry| Pairing { entry, unit: sh.cfg.chain.unit, cf_max, cf_default });
+    if crate::program::lever_on("rr") {
+        rr::fuse(&mut p, &sh);
+        if crate::program::lever_on("rr_pre") {
+            rr::fuse_preludes(&mut p, &sh);
+        }
+    }
+    if crate::program::lever_on("share") {
+        share::share_rescales(&mut p, &sh);
+    }
+    if crate::program::lever_on("rotacc") && crate::program::lever_on("rotacc_lazy") {
+        rotacc::sink(&mut p);
+    }
     batch::batch(&mut p, k_max, opts.schedule, opts.batch_cf_free, pair);
     let word_bytes = 4u64;
     alloc::alloc(&mut p, sh.cfg.chain.n_q, env.ring_dim as u64 * word_bytes);

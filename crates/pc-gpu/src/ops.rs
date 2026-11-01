@@ -23,7 +23,7 @@ use crate::ct::Ct;
 use pc_core::encode::Complex;
 use pc_core::modmul::{addmod, mulmod, shoup, submod};
 use pc_cuda::{launch_result, Arena, Compute, ConstBuf, DBuf, Device, Event, Lane, PinnedBuf, Stream};
-use pc_kernels::{AddConstArgs, EwArgs, MulAddArgs, MulTableArgs, PolyRef, RowSet, TensorArgs, WsumArgs};
+use pc_kernels::{AddConstArgs, EwArgs, MulAddArgs, MulAddNArgs, MulTableArgs, PolyRef, RowSet, TensorArgs, WsumArgs};
 use pc_shadow::meta::top_limb;
 use pc_shadow::{tag, CtMeta, Operand, Prelude, PtMeta, Recipe, Shadow};
 use rayon::prelude::*;
@@ -236,6 +236,8 @@ pub struct Ops<'a, W: DevWord> {
     pub rescaler: Rescaler<'a, W>,
     primes: Vec<u64>,
     lay: Layout,
+    /// The relinearization fused with its rescale (`mult_rescale`); None: not built (setup's choice).
+    pub rr: Option<crate::relin::RelinRescaler<'a, W>>,
 }
 
 /// OpenFHE ForwardTransformToBitReverse (`w[i] = psi^brev(i)`), for the setup-time monomial table.
@@ -300,7 +302,7 @@ impl<'a, W: DevWord> Ops<'a, W> {
             .collect();
         let mono = ConstBuf::new(arena, "ops.mono_i", s, &mono_v)?;
         let rescaler = Rescaler::new(arena, s, ctx, cfg.rescale)?;
-        Ok(Ops { cfg, ring, mono, rescaler, primes: ctx.chain.primes(), lay })
+        Ok(Ops { cfg, ring, mono, rescaler, primes: ctx.chain.primes(), lay, rr: None })
     }
 
     // ── launch helpers (raw PolyRefs: views into Ct batches, scratch, plaintext rows) ─────────────────────────────
@@ -396,8 +398,9 @@ impl<'a, W: DevWord> Ops<'a, W> {
         while i < mine.len() {
             let top = self.top(shape_, &t.meta)?;
             if let (Some(sv), false) = (src, matches!(mine[i], Prelude::DropTo(..))) {
-                // the first data prelude: it reads `src` (rescale) or `src` is copied into x now
-                if !(out_of_place && matches!(mine[i], Prelude::Rescale(_))) && !(out_of_place && matches!(mine[i], Prelude::ScalarAdjust(..)) && matches!(mine.get(i + 1), Some(Prelude::Rescale(_)))) {
+                // the first data prelude: it reads `src` (a rescale, or a scalar adjust: folded into the rescale after
+                // it, else the scaling reads `src`), or `src` is copied into x now
+                if !(out_of_place && matches!(mine[i], Prelude::Rescale(_) | Prelude::ScalarAdjust(..))) {
                     Self::copy_ct(ctx, s, x.w(), sv, x.k, top)?;
                     src = None;
                 }
@@ -433,13 +436,11 @@ impl<'a, W: DevWord> Ops<'a, W> {
                         i += 2;
                         continue;
                     }
-                    if let Some(sv) = src.take() {
-                        // not foldable after all: copy, then scale in place
-                        Self::copy_ct(ctx, s, x.w(), sv, x.k, top)?;
-                    }
+                    // not folded: x = c * (`src`, or x itself)
                     let sc = self.ring.push_rows(s, &self.primes, &[&rows])?;
                     let r = x.w();
-                    Self::ew(ctx, s, "ew_scale", r, r, r, ctx.lay.rs_q(top), x.k, 2, false, sc)?;
+                    let a = src.take().unwrap_or(r);
+                    Self::ew(ctx, s, "ew_scale", r, a, a, ctx.lay.rs_q(top), x.k, 2, false, sc)?;
                     t.meta.deg += 1;
                 }
             }
@@ -591,6 +592,22 @@ impl<'a, W: DevWord> Ops<'a, W> {
             self.add_like(ctx, ex, sh, o, None, b, true)?;
         }
         Ok(())
+    }
+
+    /// `x += x` (`sub`: `x -= x`) when its recipe has no prelude (both operands are one ciphertext): the kernel reads
+    /// `x` as both operands (element-wise in place), the add `add_inplace(x, &[copy of x])` makes; false (nothing
+    /// issued) when the recipe has preludes.
+    pub fn add_self_inplace<M: DevStrategy<W>>(&mut self, ctx: &Context<'_, W, M>, ex: &mut Executor<'_, W>, sh: &Shadow, x: &mut Ct<'_, W>, sub: bool) -> Result<bool> {
+        let r = if sub { sh.sub(&x.meta, &x.meta)? } else { sh.add(&x.meta, &x.meta)? };
+        if !r.pre.is_empty() {
+            return Ok(false);
+        }
+        let t = Track { meta: x.meta };
+        let top = self.top(ctx.shape, &t.meta)?;
+        let o = x.buf.w();
+        Self::ew(ctx, &ex.compute, "ew_add", o, o, o, rows_q(&ctx.lay, top), x.k(), 2, sub, (std::ptr::null(), std::ptr::null()))?;
+        Self::finish(x, &r, &t)?;
+        Ok(true)
     }
 
     /// `out[j] = a[j] + c[j]` (`addScalar`: the constant at the ciphertext's top and degree, no level change).
@@ -871,6 +888,87 @@ impl<'a, W: DevWord> Ops<'a, W> {
         Ok(())
     }
 
+    /// The output metadata of `mult_pt_add_chain` when it runs as one pass: the head product (if any) and every pair
+    /// take no prelude (none on the operand, the plaintext or the add), every product sits at one level; None otherwise.
+    pub fn mult_pt_add_chain_meta(sh: &Shadow, head: Option<(&CtMeta, &PtMeta)>, y: Option<&CtMeta>, terms: &[(&CtMeta, &PtMeta, bool)]) -> Result<Option<CtMeta>> {
+        let (mut m, level) = match (head, y) {
+            (Some((a, p)), None) => {
+                let r = sh.mult_pt(a, p)?;
+                if !r.pre.is_empty() || r.out.level != a.level {
+                    return Ok(None);
+                }
+                (r.out, a.level)
+            }
+            (None, Some(y)) => (*y, y.level),
+            _ => return Ok(None),
+        };
+        for &(a, p, pf) in terms {
+            if a.level != level {
+                return Ok(None);
+            }
+            let (r1, r2) = Self::mac_recipes(sh, a, p, &m, false, pf)?;
+            if !r1.pre.is_empty() || !r2.pre.is_empty() || r1.out.level != level || r2.out.level != level {
+                return Ok(None);
+            }
+            m = r2.out;
+        }
+        Ok(Some(m))
+    }
+
+    /// `out = x0 * pt0 + sum_j a_j * pt_j` (`head` = (x0, pt0)) or `out = y + sum_j a_j * pt_j` (`y`: its rows and
+    /// metadata; it may be `out` itself): a product and the chain of `mult_pt_add`s summing onto it (no subtraction;
+    /// `product_first` orders each add's operands) in launches of up to 8 terms, the products summed in the double word
+    /// and reduced once. The same words and metadata as the steps one by one. Needs `mult_pt_add_chain_meta`; `out`
+    /// must not be any term's operand.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mult_pt_add_chain<M: DevStrategy<W>>(
+        &mut self,
+        ctx: &Context<'_, W, M>,
+        ex: &mut Executor<'_, W>,
+        sh: &Shadow,
+        out: &mut Ct<'_, W>,
+        head: Option<(&Ct<'_, W>, &Pt<'_>)>,
+        y: Option<(PolyRef, CtMeta)>,
+        terms: &[(&Ct<'_, W>, &Pt<'_>, bool)],
+    ) -> Result<()> {
+        let tm: Vec<(&CtMeta, &PtMeta, bool)> = terms.iter().map(|(a, p, pf)| (&a.meta, &p.meta, *pf)).collect();
+        let m = Self::mult_pt_add_chain_meta(sh, head.map(|(a, p)| (&a.meta, &p.meta)), y.as_ref().map(|(_, m)| m), &tm)?
+            .ok_or_else(|| shape("mult_pt_add_chain", "a product or an add takes a prelude: run the steps one by one"))?;
+        let k = out.k();
+        let ob = out.buf.r().base;
+        for (a, _, _) in terms {
+            Self::check_k("mult_pt_add_chain", a.k(), k)?;
+            if a.buf.r().base == ob {
+                return Err(shape("mult_pt_add_chain", "the sum lands on a term's operand"));
+            }
+        }
+        if let Some((a, _)) = head {
+            Self::check_k("mult_pt_add_chain", a.k(), k)?;
+        }
+        let top = self.top(ctx.shape, &m)?;
+        let xs: Vec<(PolyRef, *const c_void)> = head.into_iter().map(|(a, p)| (a.buf.r(), p.rows)).chain(terms.iter().map(|(a, p, _)| (a.buf.r(), p.rows))).collect();
+        // lazy: 8 products of the largest prime's residues fit the double word
+        let bits = 8 * std::mem::size_of::<W>() as u32;
+        let pm = self.primes.iter().take(top + 1).copied().max().unwrap_or(0).saturating_sub(1) as u128;
+        let lazy = pm.checked_mul(pm).and_then(|x| x.checked_mul(8)).is_some_and(|x| bits >= 64 || x < 1u128 << (2 * bits));
+        let s = &ex.compute;
+        let mut yr = y.map(|(r, _)| r).unwrap_or_default();
+        for c in xs.chunks(8) {
+            let mut a = MulAddNArgs { out: out.buf.w(), y: yr, pr: ctx.pr(), n: (top + 1) as i32, k: k as i32, nterm: c.len() as i32, lazy: lazy as i32, ..Default::default() };
+            for (j, &(x, t)) in c.iter().enumerate() {
+                a.x[j] = x;
+                a.t[j] = t;
+            }
+            // SAFETY: k cts of the context layout over rows 0..=top (the plaintexts broadcast); element-wise, so out may
+            // alias y or the head's operand (each thread reads its operands before writing the same index); a later
+            // launch adds onto out, which no term reads
+            launch_result("mul_add_n", unsafe { (ctx.table.mul_add_n)(&a, s.raw()) })?;
+            yr = out.buf.r();
+        }
+        out.meta = m;
+        Ok(())
+    }
+
     /// `out[j] = i * a[j]`: the monomial X^{N/2} (level and degree kept; exact).
     pub fn mult_i<M: DevStrategy<W>>(&mut self, ctx: &Context<'_, W, M>, ex: &mut Executor<'_, W>, sh: &Shadow, out: &mut [Ct<'_, W>], a: &[&Ct<'_, W>]) -> Result<()> {
         lens("mult_i", out.len(), &[a.len()])?;
@@ -975,11 +1073,17 @@ impl<'a, W: DevWord> Ops<'a, W> {
     /// (where `relin::relin_staged` expects it). Returns the live top and the recipe; `out.meta` is left to the caller
     /// (the relinearized product takes `recipe.out`).
     pub fn tensor_for_relin<M: DevStrategy<W>>(&mut self, ctx: &Context<'_, W, M>, ex: &mut Executor<'_, W>, sh: &Shadow, out: &mut Ct<'_, W>, a: &Ct<'_, W>, b: Option<&Ct<'_, W>>) -> Result<(usize, Recipe)> {
+        self.tensor_for_relin_of(ctx, ex, sh, out, Some(a), b, false)
+    }
+
+    /// `tensor_for_relin` with `a = None`: A is `out` itself (its preludes run in place, no copy); `b` must not alias it.
+    fn tensor_for_relin_of<M: DevStrategy<W>>(&mut self, ctx: &Context<'_, W, M>, ex: &mut Executor<'_, W>, sh: &Shadow, out: &mut Ct<'_, W>, a: Option<&Ct<'_, W>>, b: Option<&Ct<'_, W>>, dbl: bool) -> Result<(usize, Recipe)> {
+        let am = a.map_or(out.meta, |a| a.meta);
         let r = match b {
-            Some(b) => sh.mult(&a.meta, &b.meta)?,
-            None => sh.square(&a.meta)?,
+            Some(b) => sh.mult(&am, &b.meta)?,
+            None => sh.square(&am)?,
         };
-        let k = a.k();
+        let k = a.map_or(out.k(), |a| a.k());
         if k > ex.ks.k_max {
             return Err(shape("mult", format!("batch of {k} > the key-switching k_max {}", ex.ks.k_max)));
         }
@@ -990,7 +1094,7 @@ impl<'a, W: DevWord> Ops<'a, W> {
             }
             None => None,
         };
-        let (t, x) = self.prep_a_view(ctx, &ex.compute, out, Some(a), &r.pre)?;
+        let (t, x) = self.prep_a_view(ctx, &ex.compute, out, a, &r.pre)?;
         if t.meta.level != r.out.level {
             return Err(shape("mult", format!("preludes left level {} but the recipe's output is at {}", t.meta.level, r.out.level)));
         }
@@ -1020,7 +1124,7 @@ impl<'a, W: DevWord> Ops<'a, W> {
             acc: 0,
             n: (top + 1) as i32,
             k: k as i32,
-            dbl: 0,
+            dbl: dbl as i32,
             pad: 0,
         };
         // SAFETY: per (ct, row, i) the kernel reads all inputs before writing out[c] parts 0/1, so out aliasing the A
@@ -1038,6 +1142,31 @@ impl<'a, W: DevWord> Ops<'a, W> {
         let (top, r) = self.tensor_for_relin(ctx, ex, sh, out, a, Some(b))?;
         crate::relin::relin_staged(ctx, ex, kc, key, out, top)?;
         out.meta = r.out;
+        Ok(())
+    }
+
+    /// `rescale([2] a * b)` (`b = None`: a^2; `a = None`: `out` holds A), the relinearization's ModDown fused with the
+    /// rescale (`relin::RelinRescaler`): degree 1 out, one unit of levels down. The same value as `mult` [+ the
+    /// doubling add] + `Rescale` up to one rounding in place of two. Errs when the tables do not serve the top.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mult_rescale<M: DevStrategy<W>>(&mut self, ctx: &Context<'_, W, M>, ex: &mut Executor<'_, W>, kc: crate::rotate::KsCfg<'_, '_>, sh: &Shadow, key: &crate::ks::KeyGroup<'_>, out: &mut Ct<'_, W>, a: Option<&Ct<'_, W>>, b: Option<&Ct<'_, W>>, dbl: bool) -> Result<()> {
+        let am = a.map_or(out.meta, |a| a.meta);
+        let r0 = match b {
+            Some(b) => sh.mult(&am, &b.meta)?,
+            None => sh.square(&am)?,
+        };
+        let top = self.top(ctx.shape, &r0.out)?;
+        if !self.rr.as_ref().is_some_and(|rr| rr.serves(top, out.k())) {
+            return Err(shape("mult_rescale", format!("no fused relin-rescale tables for top {top}")));
+        }
+        let (top, r) = self.tensor_for_relin_of(ctx, ex, sh, out, a, b, dbl)?;
+        let rr = self.rr.as_ref().ok_or_else(|| shape("mult_rescale", "no tables"))?;
+        rr.relin_rescale(ctx, ex, kc, key, out, top)?;
+        let mut m = r.out;
+        if dbl {
+            m = sh.add(&m, &m)?.out;
+        }
+        out.meta = sh.realize(&m)?.out;
         Ok(())
     }
 

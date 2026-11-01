@@ -5,7 +5,7 @@
 //! StC + Accumulate + rotate-add -> x 2^correction. Plaintexts are encoded at setup straight at the level they are
 //! used (one rounding; FIDESlib re-levels from the top, two), so device words differ from FIDESlib's by that
 //! rounding. Details: docs/ARCHITECTURE.md "pc-gpu SparseB".
-use super::cts::{tail_steps, KeyTails, LtEnd, LtGeom, LtPts, LtStage, PtSource, LT_REGEN_DIGITS};
+use super::cts::{tail_steps, KeyTails, LtEnd, LtGeom, LtPts, LtStage, PtSource, LT_REGEN_DIGITS, TAIL_MIN_DIGITS_SPARSE};
 use super::evalmod::{em_work, EmMode, EvalModPlan};
 use super::raise::RaisePlan;
 use super::{BtsKeyRing, BtsWorkShape};
@@ -42,16 +42,23 @@ pub struct SparseBCfg {
     /// K of the EvalMod series: 24 (FIDESlib's degree-20 table) or 16 (the dense route's degree-14 table); the overflow
     /// integer after the fold has the dense route's distribution.
     pub evalmod_k: f64,
+    /// An EvalMod series replacing the K = 16 table (same K, double angles and depth; empty = the frozen table).
+    pub em_coeffs: Vec<f64>,
+    /// The raise's sparse -> dense switch folded into the fold's first round (`BtsSetup::merge_s2d`): its hoisted
+    /// group is the sparse -> dense key and `SparseRot` keys of the round's steps, summed with no add of the input.
+    pub merge_s2d: bool,
 }
 
 impl SparseBCfg {
     pub fn n32(slots: u32, raise_drop: u32) -> Self {
-        SparseBCfg { slots, raise_drop, cts0_t: 12, raise_k: pc_core::bts_setup::EVALMOD_K, acc_bstep: 4, b_step: 0, k_max: 8, ks_source: KskSource::Regen, lt_tails: true, em_fuse_rescale: false, evalmod_k: pc_core::bts_setup::SPARSE_B_K }
+        SparseBCfg { slots, raise_drop, cts0_t: 12, raise_k: pc_core::bts_setup::EVALMOD_K, acc_bstep: 4, b_step: 0, k_max: 8, ks_source: KskSource::Regen, lt_tails: true, em_fuse_rescale: false, evalmod_k: pc_core::bts_setup::SPARSE_B_K, em_coeffs: Vec::new(), merge_s2d: false }
     }
 
     /// The EvalMod series' Paterson-Stockmeyer plan for `evalmod_k`.
     pub fn em_series(&self) -> Result<PsPlan> {
-        if self.evalmod_k == pc_core::bts_setup::EVALMOD_K {
+        if self.evalmod_k == pc_core::bts_setup::EVALMOD_K && !self.em_coeffs.is_empty() {
+            Ok(PsPlan::from_coeffs(&self.em_coeffs)?)
+        } else if self.evalmod_k == pc_core::bts_setup::EVALMOD_K {
             Ok(PsPlan::from_coeffs(pc_core::bts_setup::evalmod_coeffs())?)
         } else if self.evalmod_k == pc_core::bts_setup::SPARSE_B_K {
             ps_k24()
@@ -64,6 +71,9 @@ impl SparseBCfg {
 /// Accumulate rounds as key groups (steps, group).
 pub struct AccRounds<'a> {
     pub rounds: Vec<(Vec<i64>, KeyGroup<'a>)>,
+    /// Round 0 runs on a raised ciphertext under the sparse secret (`new_merged`): its group is the sparse -> dense key
+    /// then the round's `SparseRot` keys.
+    pub merged: bool,
 }
 
 impl<'a> AccRounds<'a> {
@@ -81,10 +91,35 @@ impl<'a> AccRounds<'a> {
             let g = KeyGroup::new(arena, s, n, &refs, stage)?;
             v.push((r, g));
         }
-        Ok(AccRounds { rounds: v })
+        Ok(AccRounds { rounds: v, merged: false })
+    }
+    /// `new` with round 0 switching out of the sparse secret (`merged`).
+    pub fn new_merged<S: pc_cuda::Lane>(
+        arena: &'a Arena,
+        s: &Stream<S>,
+        n: usize,
+        keys: &dyn BtsKeyRing,
+        stage: Option<(*const c_void, *const c_void)>,
+        rounds: Vec<Vec<i64>>,
+    ) -> Result<Self> {
+        let mut it = rounds.into_iter();
+        let r0 = it.next().ok_or_else(|| shape("AccRounds::new_merged", "no round"))?;
+        let mut refs: Vec<&dyn KsKeyRef> = vec![keys.sparse_to_dense()?];
+        for &st in &r0 {
+            refs.push(keys.sparse_rot(st)?);
+        }
+        let g0 = KeyGroup::new(arena, s, n, &refs, stage)?;
+        let rest = Self::new(arena, s, n, keys, stage, it.collect())?;
+        let mut v = vec![(r0, g0)];
+        v.extend(rest.rounds);
+        Ok(AccRounds { rounds: v, merged: true })
     }
     pub fn bytes(rounds: &[Vec<i64>]) -> usize {
         rounds.iter().map(|r| KeyGroup::bytes(r.len(), true)).sum()
+    }
+    /// `bytes` of `new_merged`.
+    pub fn bytes_merged(rounds: &[Vec<i64>]) -> usize {
+        rounds.iter().enumerate().map(|(i, r)| KeyGroup::bytes(r.len() + (i == 0) as usize, true)).sum()
     }
     pub fn steps(&self) -> Vec<i64> {
         self.rounds.iter().flat_map(|r| r.0.iter().copied()).collect()
@@ -117,6 +152,15 @@ pub fn rounds(n: usize, cfg: &SparseBCfg, g: &SparseBGeom) -> [Vec<Vec<i64>>; 4]
     let acc = super::spru::accumulate_rounds;
     let s = cfg.slots as usize;
     [acc(cfg.acc_bstep, s, n / 2 / s), acc(cfg.acc_bstep, g.s as usize, g.r as usize / 4), acc(cfg.acc_bstep, g.n as usize, g.r as usize / 2), vec![vec![g.n as i64 / 2]]]
+}
+
+/// The `SparseRot` steps the route reads (`merge_s2d`: the fold's first round).
+pub fn sparse_rot_steps(n: usize, cfg: &SparseBCfg) -> Result<Vec<i64>> {
+    if !cfg.merge_s2d {
+        return Ok(Vec::new());
+    }
+    let g = geometry(n, cfg)?;
+    Ok(rounds(n, cfg, &g)[0].first().cloned().unwrap_or_default())
 }
 
 /// Every rotation step the route reads (keys to generate / import).
@@ -179,7 +223,7 @@ impl<'a, W: DevWord> SparseBPrecomp<'a, W> {
         };
         Ok(vec![
             ("raise", RaisePlan::<W>::table_bytes()),
-            ("fold", AccRounds::bytes(&rr[0])),
+            ("fold", if cfg.merge_s2d { AccRounds::bytes_merged(&rr[0]) } else { AccRounds::bytes(&rr[0]) }),
             ("cts", lt(tops.0)?),
             ("cts_acc", AccRounds::bytes(&rr[1])),
             ("em", Self::em_bytes(st, &lay, tops.1, cfg)?),
@@ -195,7 +239,7 @@ impl<'a, W: DevWord> SparseBPrecomp<'a, W> {
         let mut steps = Vec::new();
         for cfg in cfgs.iter().filter(|c| c.lt_tails) {
             let g = geometry(chain.n, cfg)?;
-            steps.extend(tail_steps(chain, &[(Self::lt_geom(&g), Self::tops(chain, st, cfg)?.0)], LT_REGEN_DIGITS));
+            steps.extend(tail_steps(chain, &[(Self::lt_geom(&g), Self::tops(chain, st, cfg)?.0)], LT_REGEN_DIGITS, TAIL_MIN_DIGITS_SPARSE));
         }
         steps.sort();
         steps.dedup();
@@ -264,7 +308,7 @@ impl<'a, W: DevWord> SparseBPrecomp<'a, W> {
         mark("raise", &mut parts);
         let rr = rounds(n, &cfg, &g);
         let [r_fold, r_cts, r_stc, r_half] = rr;
-        let fold = AccRounds::new(arena, s, n, keys, stage, r_fold)?;
+        let fold = if cfg.merge_s2d { AccRounds::new_merged(arena, s, n, keys, stage, r_fold)? } else { AccRounds::new(arena, s, n, keys, stage, r_fold)? };
         mark("fold", &mut parts);
         // diagonals: gc = K_raise / K * 2^-t (the shifted raise carries 2^t), gd = q0 / sf(L) * fdrop: a raise to a
         // lower top carries sf(L) / sf(raise top) (as the dense routes' last StC stage; 1 at drops 0 and 1, a 4-8 %
@@ -281,13 +325,15 @@ impl<'a, W: DevWord> SparseBPrecomp<'a, W> {
         let geo = Self::lt_geom(&g);
         let sf_c = st.sf(top as i32)?;
         let cts_pts = LtPts::new(arena, s, ctx, top, PtSource::Slots { values: &p, scale: sf_c })?;
-        let steps = if cfg.lt_tails { tail_steps(&ctx.chain, &[(geo, top)], LT_REGEN_DIGITS) } else { Vec::new() };
+        let steps = if cfg.lt_tails { tail_steps(&ctx.chain, &[(geo, top)], LT_REGEN_DIGITS, TAIL_MIN_DIGITS_SPARSE) } else { Vec::new() };
         let cts = LtStage::new(arena, s, ctx, geo, top, LtEnd::ModDown, sf_c * shift_t, cts_pts, &tails.ring_of(keys, n, &steps)?, stage, cfg.k_max)?;
         mark("cts", &mut parts);
         let cts_acc = AccRounds::new(arena, s, n, keys, stage, r_cts)?;
         mark("cts_acc", &mut parts);
         let mut em = EvalModPlan::new(arena, s, ctx, EmMode::Real, em_in, &cfg.em_series()?, SPARSE_B_DA_ITS, keys.conj()?, keys.relin()?, stage, cfg.k_max, KskSource::Regen)?;
         em.fuse_rescale = cfg.em_fuse_rescale;
+        // level relinearization keys (prototype): only when the key ring carries them
+        em.attach_level_keys(arena, s, ctx, keys, stage)?;
         mark("em", &mut parts);
         let sf_s = st.sf(stc_top as i32)?;
         let stc_pts = LtPts::new(arena, s, ctx, stc_top, PtSource::Slots { values: &q, scale: sf_s })?;

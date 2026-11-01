@@ -6,7 +6,7 @@ use std::ffi::c_void;
 /// `cudaStream_t`
 pub type CudaStream = *mut c_void;
 
-pub const ABI: u32 = 16;
+pub const ABI: u32 = 20;
 pub const LOG_N: u32 = 16;
 pub const N: usize = 1 << LOG_N;
 
@@ -102,7 +102,11 @@ pub struct BconvJob {
     pub ntgt: u32,
     pub pool_off: u32,
     pub exact: u32,
-    pub pad: [u32; 2],
+    /// ABI 17: 1 = the source rows hold `x_i pre_i` already (folded into the INTT's last pass).
+    pub prescaled: u32,
+    /// ABI 17: 1 = u32 words, every target below 2^30: the sums reduced as `hi 2^32 + lo` in 32-bit products (plain
+    /// jobs; exact ones keep the double-word reduction).
+    pub split: u32,
 }
 
 #[repr(C)]
@@ -155,6 +159,8 @@ pub struct PtDotArgs {
 
 /// `KsArgs::c0_mode` flag (ABI 16): the inner product is added onto the outputs' words.
 pub const KS_ACC: i32 = 4;
+/// `c0_mode | KS_SUM`: the K = 1 segment dot (u32) sums its R rotations into rotation 0's output (`ks_dot_seg`).
+pub const KS_SUM: i32 = 8;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -265,6 +271,9 @@ pub struct CtsArgs {
     pub kmax: i32,
     /// > 0: giant pair l of a launch at res + l * pair_cts cts (one K=1 launch of up to 4 giant steps); 0: G <= 2
     pub pair_cts: i32,
+    /// ABI 20: non-null: baby 0 read from here as stored (extended rows, ct c at + c * ct_stride: a key-switched
+    /// identity); null: (P c0, P c1) of x
+    pub x0: *const c_void,
 }
 
 #[repr(C)]
@@ -329,6 +338,36 @@ pub struct WsumArgs {
 }
 
 /// wsum then part 0 += k\[row\] (ABI 7; = wsum + add_const).
+/// ABI 19: tensor, then (c0, c1) +-= y * c[row] (Shoup cs) after the doubling (args.cuh `TensorYArgs`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct TensorYArgs {
+    pub t: TensorArgs,
+    pub y: PolyRef,
+    pub c: *const c_void,
+    pub cs: *const c_void,
+    pub sub: i32,
+    pub pad: i32,
+}
+
+/// ABI 19: up to 3 weighted sums over one source list read once (args.cuh `WsumMultiArgs`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct WsumMultiArgs {
+    pub out: [PolyRef; 3],
+    pub src: [PolyRef; 8],
+    pub w: [*const c_void; 3],
+    pub ws: [*const c_void; 3],
+    pub k: [*const c_void; 3],
+    pub pr: *const PrimeConst,
+    pub nout: i32,
+    pub nsrc: i32,
+    pub rowstride: i32,
+    pub k_cts: i32,
+    pub n: [i32; 3],
+    pub nmax: i32,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct WsumKArgs {
@@ -365,6 +404,21 @@ pub struct MulAddArgs {
     pub y: PolyRef,
     pub sub: i32,
     pub pad: i32,
+}
+
+/// out = y + sum_j x\[j\] t\[j\] over `nterm` <= 8 terms (y.base null: no y), args.cuh MulAddNArgs (ABI 18).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct MulAddNArgs {
+    pub out: PolyRef,
+    pub y: PolyRef,
+    pub x: [PolyRef; 8],
+    pub t: [*const c_void; 8],
+    pub pr: *const PrimeConst,
+    pub n: i32,
+    pub k: i32,
+    pub nterm: i32,
+    pub lazy: i32,
 }
 
 #[repr(C)]
@@ -755,7 +809,7 @@ zeroed_default!(
     SpruFftArgs, SpruScatterArgs, SpruExtractArgs, NttArgs, BconvArgs, EwArgs, PtDotArgs, KsArgs, EpiArgs, KsRegenArgs, KskExpandArgs, CtsArgs, TensorArgs, MdEpiArgs,
     WsumArgs, AddConstArgs, MulTableArgs, RescaleArgs, RescaleCombineArgs, AutomorphArgs, EncodeArgs, EncryptArgs, KskGenArgs, KskUnpackArgs, ModRaiseArgs, SmallIntTab, SmallIntArgs,
     KeyTab, CtsRegenArgs, KsKeyArgs, PcmmArgs, CcmmArgs, WsumKArgs, RescaleCombineToArgs, MdEpiToArgs, SmallInt1Args, CoeffArgs, MulAddArgs,
-    RescaleNttArgs
+    RescaleNttArgs, MulAddNArgs, TensorYArgs, WsumMultiArgs
 );
 
 /// A launcher: (args, stream) -> cudaError_t of the launch (0 ok; negative = argument outside the kernel's range).
@@ -808,6 +862,11 @@ pub struct KernelTable {
     pub coeff_sum: Launch<CoeffArgs>,
     pub mul_add: Launch<MulAddArgs>,
     pub rescale_fwd: Launch<RescaleNttArgs>,
+    pub mul_add_n: Launch<MulAddNArgs>,
+    pub tensor_y: Launch<TensorYArgs>,
+    pub wsum_multi: Launch<WsumMultiArgs>,
+    /// ABI 20: `bconv` for jobs of more than 16 sources (u32 words: up to 48).
+    pub bconv_wide: Launch<BconvArgs>,
 }
 
 // Sizes must equal the static_asserts in args.cuh.
@@ -825,11 +884,13 @@ const _: () = {
     assert!(size_of::<EpiArgs>() == 72);
     assert!(size_of::<KsRegenArgs>() == 312);
     assert!(size_of::<KskExpandArgs>() == 48);
-    assert!(size_of::<CtsArgs>() == 192);
+    assert!(size_of::<CtsArgs>() == 200);
     assert!(size_of::<TensorArgs>() == 192);
     assert!(size_of::<MdEpiArgs>() == 120);
     assert!(size_of::<WsumArgs>() == 256);
     assert!(size_of::<WsumKArgs>() == 264);
+    assert!(size_of::<TensorYArgs>() == 240);
+    assert!(size_of::<WsumMultiArgs>() == 376);
     assert!(size_of::<AddConstArgs>() == 48);
     assert!(size_of::<MulTableArgs>() == 72);
     assert!(size_of::<RescaleArgs>() == 152);
@@ -847,13 +908,14 @@ const _: () = {
     assert!(size_of::<SpruFftArgs>() == 32);
     assert!(size_of::<SpruScatterArgs>() == 56);
     assert!(size_of::<KeyTab>() == 40);
-    assert!(size_of::<CtsRegenArgs>() == 232);
+    assert!(size_of::<CtsRegenArgs>() == 240);
     assert!(size_of::<KsKeyArgs>() == 216);
     assert!(size_of::<PcmmArgs>() == 168);
     assert!(size_of::<CcmmArgs>() == 280);
     assert!(size_of::<SmallInt1Args>() == 56);
-    assert!(size_of::<KernelTable>() == 16 + 40 * 8);
+    assert!(size_of::<KernelTable>() == 16 + 44 * 8);
     assert!(size_of::<MulAddArgs>() == 104);
+    assert!(size_of::<MulAddNArgs>() == 328);
     assert!(size_of::<CoeffArgs>() == 80 + 16 * COEFF_MAXT);
     assert!(size_of::<MdEpiToArgs>() == 152);
     assert!(size_of::<RescaleCombineToArgs>() == 104);

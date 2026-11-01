@@ -172,6 +172,8 @@ pub enum Epi {
     MulAdd { out: *mut c_void, x: *const c_void, s: *const c_void, ss: *const c_void },
     /// out = d + (x_0 + .. + x_(n-1) - v) s, the x_j `stride` words apart (d as in SubMulAcc)
     SubMulAccSum { out: *mut c_void, x: *const c_void, n: usize, stride: usize, s: *const c_void, ss: *const c_void, d: *const c_void },
+    /// out = (x_0 + .. + x_(n-1) - v) s, the x_j `stride` words apart
+    SubMulSum { out: *mut c_void, x: *const c_void, n: usize, stride: usize, s: *const c_void, ss: *const c_void },
 }
 
 impl Epi {
@@ -184,6 +186,7 @@ impl Epi {
             Epi::SubMulAcc { out, x, s, ss, d } => (ntt_epi::SUB_MUL_ACC, out, x, 1, 0, s, ss, d),
             Epi::MulAdd { out, x, s, ss } => (ntt_epi::MUL_ADD, out, x, 1, 0, s, ss, nul),
             Epi::SubMulAccSum { out, x, n, stride, s, ss, d } => (ntt_epi::SUB_MUL_ACC, out, x, n, stride, s, ss, d),
+            Epi::SubMulSum { out, x, n, stride, s, ss } => (ntt_epi::SUB_MUL, out, x, n, stride, s, ss, nul),
         }
     }
 }
@@ -265,7 +268,7 @@ fn args_ex<W: DevWord, M: DevStrategy<W>>(
         snum: src.map(|x| x.n.max(1)).unwrap_or(1) as i32,
         sstride: src.map(|x| x.stride).unwrap_or(0) as u64,
         xnum: xn.max(1) as i32,
-        lazy: ctx.ntt.lazy as i32,
+        lazy: ctx.ntt.lazy,
         xstride: xs as u64,
         ed,
     }
@@ -340,6 +343,29 @@ pub fn forward_k_epi<W: DevWord, M: DevStrategy<W>>(
     Ok(())
 }
 
+/// Forward `transform_k` of ciphertexts `[c0, c0 + k)` of `ct`, storing `epi` of the transform when given (its
+/// buffers at the same row offsets from their own bases, as `forward_k_epi`).
+#[allow(clippy::too_many_arguments)]
+pub fn forward_k_at<W: DevWord, M: DevStrategy<W>>(
+    ctx: &Context<'_, W, M>,
+    s: &Stream<Compute>,
+    ct: &mut CtBuf<'_, Compute, W>,
+    c0: usize,
+    span: Span,
+    parts: Parts,
+    k: usize,
+    epi: Option<Epi>,
+) -> Result<()> {
+    if ct.lay != ctx.lay || c0 + k > ct.k {
+        return Err(shape("ntt", format!("cts [{c0}, {}) of {}, buffer layout {:?}, context {:?}", c0 + k, ct.k, ct.lay, ctx.lay)));
+    }
+    let base = (ct.buf.vptr_mut() as *mut W).wrapping_add(c0 * ct.lay.ct_words()) as *mut c_void;
+    for (start, n) in ctx.rows.launches(span, parts, k)? {
+        launch_ex(ctx, s, Dir::Forward, base, ctx.rows.roff.dptr_at(start)?, ctx.rows.rprime.dptr_at(start)?, n, None, epi)?;
+    }
+    Ok(())
+}
+
 /// `transform_k` with an out-of-place (summing) first pass from `src` at the row tables' offsets (`Src::soff` unused:
 /// the context's own row offsets are the source offsets) and an optional forward epilogue.
 #[allow(clippy::too_many_arguments)]
@@ -362,6 +388,33 @@ pub fn transform_k_ex<W: DevWord, M: DevStrategy<W>>(
         let roff = ctx.rows.roff.dptr_at(start)?;
         let src = src.map(|x| Src { soff: roff, ..x });
         launch_ex(ctx, s, dir, base, roff, ctx.rows.rprime.dptr_at(start)?, n, src, epi)?;
+    }
+    Ok(())
+}
+
+/// Inverse `transform_k_ex` with row i's last-pass scale `scale.0[i]` (Shoup `scale.1[i]`) in place of N^-1: the
+/// tables hold one entry per row of the span's launches, periodic in the span's live rows (any launch start).
+#[allow(clippy::too_many_arguments)]
+pub fn inverse_k_scaled<W: DevWord, M: DevStrategy<W>>(
+    ctx: &Context<'_, W, M>,
+    s: &Stream<Compute>,
+    ct: &mut CtBuf<'_, Compute, W>,
+    span: Span,
+    parts: Parts,
+    k: usize,
+    src: Option<Src>,
+    scale: (*const c_void, *const c_void),
+) -> Result<()> {
+    if ct.lay != ctx.lay || k > ct.k {
+        return Err(shape("ntt", format!("{k} of {} cts, buffer layout {:?}, context {:?}", ct.k, ct.lay, ctx.lay)));
+    }
+    let base = ct.buf.vptr_mut();
+    for (start, n) in ctx.rows.launches(span, parts, k)? {
+        let roff = ctx.rows.roff.dptr_at(start)?;
+        let mut a = args_ex(ctx, base, roff, ctx.rows.rprime.dptr_at(start)?, n, src.map(|x| Src { soff: roff, ..x }), None);
+        (a.es, a.ess) = scale;
+        // SAFETY: as `launch_ex`; the scale tables hold an entry for every row of the launch
+        launch_result("ntt_inv", unsafe { (ctx.table.ntt_inv)(&a, s.raw()) })?;
     }
     Ok(())
 }
@@ -413,6 +466,30 @@ pub fn transform_rows_prefix<W: DevWord, M: DevStrategy<W>>(
         return Err(shape("ntt rows", format!("{nrows} of {} rows; list spans {} limbs, buffer holds {}", list.len(), list.span_limbs, buf.len() / ctx.lay.n)));
     }
     launch(ctx, s, dir, buf.vptr_mut(), list.roff.dptr(), list.rprime.dptr(), nrows)
+}
+
+/// Inverse `transform_rows_prefix_ex` with row i's last-pass scale `scale.0[i]` (Shoup `scale.1[i]`, W words of one
+/// entry per row of `list`) in place of N^-1.
+pub fn inverse_rows_prefix_scaled<W: DevWord, M: DevStrategy<W>>(
+    ctx: &Context<'_, W, M>,
+    s: &Stream<Compute>,
+    buf: &mut DBuf<'_, Compute, W>,
+    list: &RowList<'_>,
+    nrows: usize,
+    src: Option<Src>,
+    scale: (*const c_void, *const c_void),
+) -> Result<()> {
+    if nrows > list.len() || list.span_limbs * ctx.lay.n > buf.len() {
+        return Err(shape("ntt rows", format!("{nrows} of {} rows; list spans {} limbs, buffer holds {}", list.len(), list.span_limbs, buf.len() / ctx.lay.n)));
+    }
+    if nrows == 0 {
+        return Ok(());
+    }
+    let mut a = args_ex(ctx, buf.vptr_mut(), list.roff.dptr(), list.rprime.dptr(), nrows, src, None);
+    (a.es, a.ess) = scale;
+    // SAFETY: as `launch_ex`; the scale tables hold one W word per row of `list` (>= nrows)
+    launch_result("ntt_inv", unsafe { (ctx.table.ntt_inv)(&a, s.raw()) })?;
+    Ok(())
 }
 
 /// `transform_rows_prefix` with an out-of-place first pass (`src`: one offset per entry of `list`, read before any
